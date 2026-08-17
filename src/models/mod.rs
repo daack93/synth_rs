@@ -14,6 +14,7 @@
 
 pub mod basic_wave;
 pub mod musical_string;
+pub mod pure_string;
 
 /// Maximum partials a single voice can hold (hard array bound).
 pub const MAX_MODES: usize = 128;
@@ -100,6 +101,7 @@ impl Clone for Box<dyn FtmModel> {
 pub fn registry() -> Vec<Box<dyn FtmModel>> {
     vec![
         Box::new(musical_string::MusicalString::default()),
+        Box::new(pure_string::PureString::default()),
         Box::new(basic_wave::BasicWave::default()),
     ]
 }
