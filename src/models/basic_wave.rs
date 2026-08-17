@@ -6,19 +6,22 @@
 //! (no aliasing) for free. It doubles as the desktop stand-in for the firmware's
 //! `MODE_TRIANGLE_WAVE`.
 
+use serde::{Deserialize, Serialize};
+
 use super::{unbounded_slider, FtmModel, ModeBuffer};
 
 const PI: f32 = std::f32::consts::PI;
 /// ln(1000): the factor giving a -60 dB fall over `decay_time`.
 const LN_1000: f32 = 6.907_755;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Waveform {
     Triangle,
     Saw,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct BasicWave {
     pub waveform: Waveform,
     /// Number of harmonics summed.
@@ -38,6 +41,10 @@ impl Default for BasicWave {
 }
 
 impl FtmModel for BasicWave {
+    fn id(&self) -> &'static str {
+        "basic_wave"
+    }
+
     fn display_name(&self) -> &'static str {
         "Basic Wave"
     }
@@ -111,6 +118,10 @@ impl FtmModel for BasicWave {
 
     fn box_clone(&self) -> Box<dyn FtmModel> {
         Box::new(self.clone())
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
     }
 }
 

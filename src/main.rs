@@ -5,6 +5,7 @@
 mod audio;
 mod midi;
 mod models;
+mod presets;
 mod synth;
 
 use std::collections::HashMap;
@@ -15,6 +16,7 @@ use eframe::egui;
 use audio::AudioEngine;
 use midi::MidiInputHandle;
 use models::FtmModel;
+use presets::Preset;
 use synth::{Command, EngineParams};
 
 fn main() -> eframe::Result<()> {
@@ -42,6 +44,14 @@ struct App {
     selected: usize,
     /// Engine-wide parameters (gain, envelope, retrigger).
     engine: EngineParams,
+
+    // Preset library
+    /// Presets found in the folder (refreshed on save/load/delete).
+    preset_list: Vec<Preset>,
+    /// Name field for saving the current sound.
+    preset_name: String,
+    /// Last preset action result, shown in the UI.
+    preset_status: String,
 
     // Keyboard state
     base_midi: i32,
@@ -73,6 +83,7 @@ impl App {
         let _ = tx.send(Command::SetEngine(engine.clone()));
 
         let midi_ports = midi::list_ports();
+        let preset_list = presets::list();
 
         App {
             tx,
@@ -81,6 +92,9 @@ impl App {
             models,
             selected,
             engine,
+            preset_list,
+            preset_name: String::new(),
+            preset_status: String::new(),
             base_midi: 60, // C4
             mouse_note: None,
             held_keys: HashMap::new(),
@@ -94,6 +108,57 @@ impl App {
     /// Send the active model's current parameters to the audio thread.
     fn push_model(&self) {
         let _ = self.tx.send(Command::SetModel(self.models[self.selected].box_clone()));
+    }
+
+    /// Save the current model + engine as a preset under `preset_name`.
+    fn save_preset(&mut self) {
+        let name = self.preset_name.trim().to_string();
+        if name.is_empty() {
+            self.preset_status = "Enter a name first.".into();
+            return;
+        }
+        let preset = Preset::capture(&name, self.models[self.selected].as_ref(), &self.engine);
+        match presets::save(&preset) {
+            Ok(path) => {
+                self.preset_status = format!("Saved “{name}” → {}", path.display());
+                self.preset_list = presets::list();
+            }
+            Err(e) => self.preset_status = format!("Save failed: {e}"),
+        }
+    }
+
+    /// Load a preset: swap in its model + params + engine and start playing it.
+    fn apply_preset(&mut self, preset: &Preset) {
+        let Some(model) = preset.build_model() else {
+            self.preset_status =
+                format!("Can't load “{}”: unknown model “{}”.", preset.name, preset.model_id);
+            return;
+        };
+        // Replace the matching registry slot so the editor shows these params.
+        match self.models.iter().position(|m| m.id() == preset.model_id) {
+            Some(idx) => {
+                self.models[idx] = model;
+                self.selected = idx;
+            }
+            None => {
+                self.models.push(model);
+                self.selected = self.models.len() - 1;
+            }
+        }
+        self.engine = preset.engine.clone();
+        self.preset_name = preset.name.clone();
+        self.push_model();
+        let _ = self.tx.send(Command::SetEngine(self.engine.clone()));
+        self.preset_status = format!("Loaded “{}”.", preset.name);
+    }
+
+    fn delete_preset(&mut self, name: &str) {
+        match presets::delete(name) {
+            Ok(true) => self.preset_status = format!("Deleted “{name}”."),
+            Ok(false) => self.preset_status = format!("“{name}” not found."),
+            Err(e) => self.preset_status = format!("Delete failed: {e}"),
+        }
+        self.preset_list = presets::list();
     }
 
     fn connect_midi(&mut self, index: usize) {
@@ -164,6 +229,10 @@ impl eframe::App for App {
 
         self.handle_computer_keyboard(ctx);
 
+        egui::TopBottomPanel::top("presets").show(ctx, |ui| {
+            self.presets_bar(ui);
+        });
+
         egui::SidePanel::right("params")
             .resizable(false)
             .min_width(300.0)
@@ -210,6 +279,80 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// The instrument-library bar: name + save, and load/delete of saved presets.
+    fn presets_bar(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.strong("Presets");
+            ui.separator();
+
+            ui.label("Name:");
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.preset_name)
+                    .hint_text("instrument name")
+                    .desired_width(160.0),
+            );
+            let save_on_enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if ui.button("💾 Save").clicked() || save_on_enter {
+                self.save_preset();
+            }
+
+            ui.separator();
+
+            // Load: pick from the saved presets.
+            let mut to_load: Option<usize> = None;
+            let load_label = if self.preset_list.is_empty() {
+                "— no presets —".to_string()
+            } else {
+                "Load preset…".to_string()
+            };
+            egui::ComboBox::from_id_salt("preset_load")
+                .selected_text(load_label)
+                .show_ui(ui, |ui| {
+                    for (i, p) in self.preset_list.iter().enumerate() {
+                        let model_name = self
+                            .models
+                            .iter()
+                            .find(|m| m.id() == p.model_id)
+                            .map(|m| m.display_name())
+                            .unwrap_or(p.model_id.as_str());
+                        if ui
+                            .selectable_label(false, format!("{}  ·  {}", p.name, model_name))
+                            .clicked()
+                        {
+                            to_load = Some(i);
+                        }
+                    }
+                });
+            if let Some(i) = to_load {
+                let preset = self.preset_list[i].clone();
+                self.apply_preset(&preset);
+            }
+
+            // Delete the preset matching the current name field.
+            let can_delete = self
+                .preset_list
+                .iter()
+                .any(|p| p.name.eq_ignore_ascii_case(self.preset_name.trim()));
+            if ui
+                .add_enabled(can_delete, egui::Button::new("🗑 Delete"))
+                .on_hover_text("Delete the saved preset with this name")
+                .clicked()
+            {
+                let name = self.preset_name.trim().to_string();
+                self.delete_preset(&name);
+            }
+
+            if ui.button("⟳").on_hover_text("Rescan preset folder").clicked() {
+                self.preset_list = presets::list();
+            }
+        });
+        if !self.preset_status.is_empty() {
+            ui.label(egui::RichText::new(&self.preset_status).weak().small());
+        }
+        ui.add_space(2.0);
+    }
+
     fn params_panel(&mut self, ui: &mut egui::Ui) {
         let unbounded = egui::SliderClamping::Never;
 

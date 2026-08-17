@@ -6,11 +6,14 @@
 //! and a continuous pluck position that sweeps triangle → saw. The key always
 //! sets the pitch.
 
+use serde::{Deserialize, Serialize};
+
 use super::{unbounded_slider, FtmModel, ModeBuffer};
 
 const PI: f32 = std::f32::consts::PI;
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MusicalString {
     /// Pluck position 0..1 (0.5 = center = triangle; near an end = saw).
     pub pluck_pos: f32,
@@ -40,6 +43,10 @@ impl Default for MusicalString {
 const LN_1000: f32 = 6.907_755;
 
 impl FtmModel for MusicalString {
+    fn id(&self) -> &'static str {
+        "musical_string"
+    }
+
     fn display_name(&self) -> &'static str {
         "Musical String"
     }
@@ -127,6 +134,10 @@ impl FtmModel for MusicalString {
 
     fn box_clone(&self) -> Box<dyn FtmModel> {
         Box::new(self.clone())
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
     }
 }
 

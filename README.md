@@ -35,6 +35,14 @@ cargo run --release
 - **Mouse:** click the on-screen piano (vertical position sets velocity).
 - **MIDI:** pick your device from the dropdown (Rescan if you plug in later).
 
+## Presets
+
+Build a library of instruments in the top bar. A **preset** is a model + its
+parameters + engine settings + a name, saved as one JSON file per preset. Type a
+name and **Save**; pick from the dropdown to **Load**; **Delete** removes the
+saved file. Presets live in `presets/` under the working directory, or wherever
+`$FTM_SYNTH_PRESETS` points.
+
 ## Models
 
 - **Musical String** — a plucked string with music-friendly controls

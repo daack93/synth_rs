@@ -19,7 +19,8 @@ const TABLE_MASK: usize = TABLE_SIZE - 1;
 const TWO_PI: f32 = std::f32::consts::TAU;
 
 /// Engine-wide (model-independent) parameters.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct EngineParams {
     /// Master output gain (the firmware's SPEAKER_GAIN).
     pub gain: f32,

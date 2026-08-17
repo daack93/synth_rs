@@ -72,6 +72,10 @@ impl ModeBuffer {
 /// A synthesis model plugin. Implementors live in their own file and are
 /// registered in [`registry`].
 pub trait FtmModel: Send {
+    /// Stable identifier used to persist/restore presets (e.g. "musical_string").
+    /// Must be unique across models and never change once presets exist.
+    fn id(&self) -> &'static str;
+
     /// Short name shown in the model picker.
     fn display_name(&self) -> &'static str;
 
@@ -89,6 +93,29 @@ pub trait FtmModel: Send {
 
     /// Clone into a box so the UI thread can hand a snapshot to the audio thread.
     fn box_clone(&self) -> Box<dyn FtmModel>;
+
+    /// Serialize this model's parameters (for presets).
+    fn to_json(&self) -> serde_json::Value;
+}
+
+/// Rebuild a model from its `id` and serialized parameters (the inverse of
+/// [`FtmModel::to_json`]). Returns `None` for an unknown id or params that don't
+/// deserialize. Every model in [`registry`] must be handled here.
+pub fn model_from_id(id: &str, params: &serde_json::Value) -> Option<Box<dyn FtmModel>> {
+    fn boxed<M>(v: &serde_json::Value) -> Option<Box<dyn FtmModel>>
+    where
+        M: FtmModel + serde::de::DeserializeOwned + 'static,
+    {
+        serde_json::from_value::<M>(v.clone())
+            .ok()
+            .map(|m| Box::new(m) as Box<dyn FtmModel>)
+    }
+    match id {
+        "basic_wave" => boxed::<basic_wave::BasicWave>(params),
+        "musical_string" => boxed::<musical_string::MusicalString>(params),
+        "pure_string" => boxed::<pure_string::PureString>(params),
+        _ => None,
+    }
 }
 
 impl Clone for Box<dyn FtmModel> {

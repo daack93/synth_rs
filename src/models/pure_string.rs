@@ -3,12 +3,14 @@
 //! 2014 `main.h`. Triangle vs. saw is the pluck geometry (center vs. end), which
 //! only changes the mode weights K[m].
 
+use serde::{Deserialize, Serialize};
+
 use super::{strike_amplitude, unbounded_slider, FtmModel, ModeBuffer, TICK_RATE};
 
 const PI: f32 = std::f32::consts::PI;
 const TWO_PI: f32 = std::f32::consts::TAU;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Pluck {
     /// `MODE_TRIANGLE_STRING`: plucked at the center — odd modes only.
     Triangle,
@@ -16,7 +18,8 @@ pub enum Pluck {
     Saw,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PureString {
     pub stiffness: f32,         // STRING_STIFFNESS (S)
     pub prop_speed: f32,        // STRING_PROP_SPEED (c)
@@ -54,6 +57,10 @@ impl Default for PureString {
 }
 
 impl FtmModel for PureString {
+    fn id(&self) -> &'static str {
+        "pure_string"
+    }
+
     fn display_name(&self) -> &'static str {
         "Pure String (firmware)"
     }
@@ -216,6 +223,10 @@ impl FtmModel for PureString {
 
     fn box_clone(&self) -> Box<dyn FtmModel> {
         Box::new(self.clone())
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
     }
 }
 
