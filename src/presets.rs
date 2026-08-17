@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::models::pure_string::{Pluck, PureString};
 use crate::models::{model_from_id, FtmModel};
 use crate::synth::EngineParams;
 
@@ -42,6 +43,114 @@ impl Preset {
     pub fn build_model(&self) -> Option<Box<dyn FtmModel>> {
         model_from_id(&self.model_id, &self.params)
     }
+}
+
+/// Built-in "factory" instruments (all Pure String), as starting points to tune
+/// by ear. These are seeded into the presets folder on first run.
+///
+/// The parameters are chosen from the physical levers: `damping` (d1) sets
+/// sustain (T60 ≈ 13.8/d1 s), `freq_dep_damping` (d3) sets how fast the tone
+/// darkens, `stiffness` (S) sets inharmonicity, and pluck/`depth`/`string_length`
+/// shape brightness.
+pub fn factory() -> Vec<Preset> {
+    // Common firmware baselines; only the expressive fields vary per instrument.
+    fn string(
+        stiffness: f32,
+        damping: f32,
+        freq_dep_damping: f32,
+        string_length: f32,
+        depth: usize,
+        pluck: Pluck,
+    ) -> PureString {
+        PureString {
+            stiffness,
+            prop_speed: 500.0,
+            damping,
+            freq_dep_damping,
+            string_length,
+            depth,
+            pluck,
+            damp_period: 100.0,
+            time_scale: 10_000.0,
+            play_magnitude: 0.0,
+            max_magnitude: 2500.0,
+            key_tracks_pitch: true,
+        }
+    }
+    fn eng(gain: f32, attack_ms: f32, release_ms: f32) -> EngineParams {
+        EngineParams {
+            gain,
+            attack_ms,
+            release_ms,
+            retrigger_ms: 0.0,
+        }
+    }
+    fn make(name: &str, ps: PureString, engine: EngineParams) -> Preset {
+        Preset::capture(name, &ps, &engine)
+    }
+
+    vec![
+        // Round upright pizz: hollow triangle pluck, dark, medium sustain.
+        make(
+            "Acoustic Bass",
+            string(1.5, 5.0, -3.0, 6.0, 16, Pluck::Triangle),
+            eng(0.75, 4.0, 120.0),
+        ),
+        // Growly finger bass: fuller saw, a touch brighter and longer.
+        make(
+            "Electric Bass",
+            string(2.0, 4.0, -2.0, 8.0, 20, Pluck::Saw),
+            eng(0.75, 4.0, 140.0),
+        ),
+        // Steel-string body: saw, moderate brightness and sustain.
+        make(
+            "Acoustic Guitar",
+            string(1.0, 7.0, -1.8, 12.0, 24, Pluck::Saw),
+            eng(0.6, 3.0, 120.0),
+        ),
+        // Clean electric: bright, long sustain, slow tone decay.
+        make(
+            "Electric Guitar",
+            string(1.2, 2.0, -0.6, 16.0, 28, Pluck::Saw),
+            eng(0.6, 3.0, 200.0),
+        ),
+        // Hammered piano: strong inharmonicity (high stiffness), long ring.
+        make(
+            "Piano",
+            string(6.0, 3.0, -1.2, 12.0, 24, Pluck::Saw),
+            eng(0.6, 2.0, 150.0),
+        ),
+        // Banjo: very bright, quick "plink" (fast HF + short sustain).
+        make(
+            "Banjo",
+            string(3.0, 13.0, -4.0, 20.0, 32, Pluck::Saw),
+            eng(0.6, 2.0, 80.0),
+        ),
+    ]
+}
+
+/// Seed the folder with the factory presets if it currently has none (first run).
+/// Returns the resulting list.
+pub fn seed_if_empty() -> Vec<Preset> {
+    let dir = presets_dir();
+    let existing = list_in(&dir);
+    if existing.is_empty() {
+        for p in factory() {
+            let _ = save_in(&dir, &p);
+        }
+        list_in(&dir)
+    } else {
+        existing
+    }
+}
+
+/// (Re)write every factory preset, overwriting same-named files. Returns the list.
+pub fn restore_factory() -> Vec<Preset> {
+    let dir = presets_dir();
+    for p in factory() {
+        let _ = save_in(&dir, &p);
+    }
+    list_in(&dir)
 }
 
 /// Directory presets are stored in: `$FTM_SYNTH_PRESETS` if set, else `presets/`
@@ -178,6 +287,27 @@ mod tests {
         assert!(!delete_in(&dir, "Warm Pluck").expect("delete-missing")); // already gone
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn factory_kit_is_valid() {
+        let kit = factory();
+        assert_eq!(kit.len(), 6);
+        let mut names: Vec<_> = kit.iter().map(|p| p.name.clone()).collect();
+        let before = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), before, "factory preset names must be unique");
+        // Every factory preset must rebuild into a working model that produces sound.
+        for p in &kit {
+            assert_eq!(p.model_id, "pure_string");
+            let model = p.build_model().expect("factory preset rebuilds");
+            let mut buf = crate::models::ModeBuffer::default();
+            model.excite(110.0, 1.0, 48_000.0, &mut buf);
+            assert!(buf.n > 0, "{} should produce modes", p.name);
+            assert!(buf.freq[..buf.n].iter().all(|f| f.is_finite() && *f > 0.0));
+            assert!(buf.decay[..buf.n].iter().all(|d| d.is_finite() && *d >= 0.0));
+        }
     }
 
     #[test]

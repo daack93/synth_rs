@@ -83,7 +83,8 @@ impl App {
         let _ = tx.send(Command::SetEngine(engine.clone()));
 
         let midi_ports = midi::list_ports();
-        let preset_list = presets::list();
+        // First run seeds the folder with the factory instrument kit.
+        let preset_list = presets::seed_if_empty();
 
         App {
             tx,
@@ -345,6 +346,14 @@ impl App {
 
             if ui.button("⟳").on_hover_text("Rescan preset folder").clicked() {
                 self.preset_list = presets::list();
+            }
+            if ui
+                .button("★ Factory")
+                .on_hover_text("Restore the built-in instrument kit (overwrites same-named presets)")
+                .clicked()
+            {
+                self.preset_list = presets::restore_factory();
+                self.preset_status = "Restored factory presets.".into();
             }
         });
         if !self.preset_status.is_empty() {
