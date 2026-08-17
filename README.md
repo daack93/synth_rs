@@ -37,10 +37,12 @@ cargo run --release
 
 ## Models
 
+- **Musical String** — a plucked string with music-friendly controls
+  (inharmonicity, decay time, a pluck-position sweep from triangle to saw).
 - **Basic Wave** — band-limited triangle / sawtooth; the framework's reference
   oscillator.
 
-_(Musical String and the firmware-faithful Pure String land in follow-up PRs.)_
+_(The firmware-faithful Pure String lands in a follow-up PR.)_
 
 ## Roadmap
 

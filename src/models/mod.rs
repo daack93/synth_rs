@@ -13,6 +13,7 @@
 //! amplitudes and decay rates of its modes and register it in [`registry`].
 
 pub mod basic_wave;
+pub mod musical_string;
 
 /// Maximum partials a single voice can hold (hard array bound).
 pub const MAX_MODES: usize = 128;
@@ -97,7 +98,10 @@ impl Clone for Box<dyn FtmModel> {
 
 /// All available models, in picker order. Add new plugins here.
 pub fn registry() -> Vec<Box<dyn FtmModel>> {
-    vec![Box::new(basic_wave::BasicWave::default())]
+    vec![
+        Box::new(musical_string::MusicalString::default()),
+        Box::new(basic_wave::BasicWave::default()),
+    ]
 }
 
 /// The model selected on startup (the first in the registry).
