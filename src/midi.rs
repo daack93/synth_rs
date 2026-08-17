@@ -5,7 +5,7 @@ use std::sync::mpsc::Sender;
 
 use midir::{MidiInput, MidiInputConnection};
 
-use crate::synth::Command;
+use crate::studio::Command;
 
 pub struct MidiInputHandle {
     _conn: MidiInputConnection<()>,

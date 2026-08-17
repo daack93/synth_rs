@@ -35,6 +35,26 @@ cargo run --release
 - **Mouse:** click the on-screen piano (vertical position sets velocity).
 - **MIDI:** pick your device from the dropdown (Rescan if you plug in later).
 
+## Looper
+
+Build up a jam from layered loops, shown as tracks below the keyboard. The
+**spacebar is the pedal**:
+
+- **Tap** — the mode's primary action.
+- **Hold ~0.4 s** — Stop (keep the loops).
+- **Hold ~1.5 s** — Reset (clear everything).
+
+Two modes (dropdown):
+
+- **Pedal cycle** — tap: record → close loop & play → stop → play… Add more
+  layers with **＋ Rec track** (records one pass into a new track).
+- **Overdub** — tap records the base loop; each later tap finalizes the current
+  take and starts a new track, so you can layer hands-free.
+
+It's **multi-timbral**: a track remembers the instrument it was recorded with,
+so you can lay a bass line, switch to the guitar preset, and overdub on top.
+Each track row has mute, a note timeline with a moving playhead, and delete.
+
 ## Presets
 
 Build a library of instruments in the top bar. A **preset** is a model + its

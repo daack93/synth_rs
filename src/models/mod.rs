@@ -4,7 +4,7 @@
 //! a membrane, a solid — as a finite sum of exponentially-decaying sinusoids
 //! ("modes"). That single representation is the seam we build the plugin system
 //! on: **every model's only job is to fill a [`ModeBuffer`] with partials** for
-//! a struck note. The engine ([`crate::synth`]) owns everything generic —
+//! a struck note. The engine ([`crate::instrument`]) owns everything generic —
 //! polyphony, envelopes, voice-stealing, live parameter rebuilds — and simply
 //! plays whatever bank the active model produced.
 //!

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::pure_string::{Pluck, PureString};
 use crate::models::{model_from_id, FtmModel};
-use crate::synth::EngineParams;
+use crate::instrument::EngineParams;
 
 /// A saved instrument: everything needed to reconstruct a playable sound.
 #[derive(Clone, Serialize, Deserialize)]

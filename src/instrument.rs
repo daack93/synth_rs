@@ -1,15 +1,16 @@
-//! Generic polyphonic engine.
+//! One polyphonic instrument: a voice pool driven by an [`FtmModel`] plugin.
 //!
-//! The engine knows nothing about strings, drums, or excitation shapes. It owns
-//! the things every mode shares — a pool of voices, phase accumulators, the
-//! amplitude envelope, voice-stealing, the retrigger lockout, and live parameter
-//! rebuilds — and delegates the actual *sound* to whatever [`FtmModel`] plugin
-//! is currently active (see [`crate::models`]). A voice is just a bank of
-//! sinusoids whose frequencies/amplitudes/decays the model filled in.
+//! This is the former `Synth` engine, now a reusable building block. A
+//! [`crate::studio::Studio`] hosts several instruments at once (the live one you
+//! play plus one per loop track) and mixes them, so an instrument renders a
+//! single frame at a time via [`Instrument::render_frame`] rather than owning
+//! the output buffer.
+
+use std::sync::Arc;
 
 use crate::models::{default_model, FtmModel, ModeBuffer, MAX_MODES};
 
-/// Number of simultaneously sounding notes.
+/// Number of simultaneously sounding notes per instrument.
 pub const MAX_VOICES: usize = 16;
 /// Ceiling on a mode's envelope, so a "swell" (negative decay) can't run away.
 const ENV_CAP: f32 = 4.0;
@@ -17,6 +18,16 @@ const ENV_CAP: f32 = 4.0;
 const TABLE_SIZE: usize = 4096;
 const TABLE_MASK: usize = TABLE_SIZE - 1;
 const TWO_PI: f32 = std::f32::consts::TAU;
+
+/// Build the shared sine wavetable. One table is made per [`Studio`] and shared
+/// (via `Arc`) by every instrument, so adding tracks costs no extra table memory.
+pub fn make_sine_table() -> Arc<[f32]> {
+    let mut sine = vec![0.0f32; TABLE_SIZE + 1];
+    for (i, s) in sine.iter_mut().enumerate() {
+        *s = (TWO_PI * i as f32 / TABLE_SIZE as f32).sin();
+    }
+    sine.into()
+}
 
 /// Engine-wide (model-independent) parameters.
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -43,37 +54,23 @@ impl Default for EngineParams {
     }
 }
 
-/// Messages from the UI / MIDI threads to the audio thread.
-pub enum Command {
-    NoteOn { note: u8, vel: f32 },
-    NoteOff { note: u8 },
-    /// Swap the active synthesis model (also rebuilds sounding voices live).
-    SetModel(Box<dyn FtmModel>),
-    /// Update engine-wide parameters.
-    SetEngine(EngineParams),
-    AllNotesOff,
-}
-
 struct Voice {
     active: bool,
     note: u8,
     age: u64,
     releasing: bool,
-    /// Fundamental of this note (Hz), kept so the model can re-excite it live.
     f0: f32,
-    /// Strike velocity 0..1.
     vel: f32,
-    /// Seconds since the note started (for placing newly-added modes on rebuild).
     elapsed: f32,
     gate: f32,
     atk_inc: f32,
     rel_mul: f32,
     n_modes: usize,
-    phase: [f32; MAX_MODES], // cycles [0,1)
-    inc: [f32; MAX_MODES],   // cycles per sample
+    phase: [f32; MAX_MODES],
+    inc: [f32; MAX_MODES],
     amp: [f32; MAX_MODES],
     env: [f32; MAX_MODES],
-    dmul: [f32; MAX_MODES], // per-sample decay multiplier
+    dmul: [f32; MAX_MODES],
 }
 
 impl Voice {
@@ -99,29 +96,33 @@ impl Voice {
     }
 }
 
-pub struct Synth {
+pub struct Instrument {
     sr: f32,
     engine: EngineParams,
     model: Box<dyn FtmModel>,
     voices: Vec<Voice>,
-    /// Scratch bank the active model fills; reused to avoid per-note allocation.
     scratch: ModeBuffer,
-    sine: Vec<f32>,
+    sine: Arc<[f32]>,
     age_counter: u64,
     now: u64,
     last_play: u64,
 }
 
-impl Synth {
-    pub fn new(sample_rate: f32) -> Self {
-        let mut sine = vec![0.0f32; TABLE_SIZE + 1];
-        for (i, s) in sine.iter_mut().enumerate() {
-            *s = (TWO_PI * i as f32 / TABLE_SIZE as f32).sin();
-        }
-        Synth {
+impl Instrument {
+    pub fn new(sample_rate: f32, sine: Arc<[f32]>) -> Self {
+        Self::with_config(sample_rate, sine, default_model(), EngineParams::default())
+    }
+
+    pub fn with_config(
+        sample_rate: f32,
+        sine: Arc<[f32]>,
+        model: Box<dyn FtmModel>,
+        engine: EngineParams,
+    ) -> Self {
+        Instrument {
             sr: sample_rate,
-            engine: EngineParams::default(),
-            model: default_model(),
+            engine,
+            model,
             voices: (0..MAX_VOICES).map(|_| Voice::silent()).collect(),
             scratch: ModeBuffer::default(),
             sine,
@@ -129,6 +130,31 @@ impl Synth {
             now: 0,
             last_play: 0,
         }
+    }
+
+    /// A fresh instrument with the same model + engine (independent voices).
+    /// Used to bind a loop track to the instrument that recorded it.
+    pub fn snapshot(&self) -> Instrument {
+        Instrument::with_config(
+            self.sr,
+            self.sine.clone(),
+            self.model.box_clone(),
+            self.engine.clone(),
+        )
+    }
+
+    pub fn model_name(&self) -> &'static str {
+        self.model.display_name()
+    }
+
+    pub fn set_model(&mut self, model: Box<dyn FtmModel>) {
+        self.model = model;
+        self.rebuild_active();
+    }
+
+    pub fn set_engine(&mut self, engine: EngineParams) {
+        self.engine = engine;
+        self.rebuild_active();
     }
 
     #[inline]
@@ -141,27 +167,6 @@ impl Synth {
         a + (b - a) * frac
     }
 
-    pub fn handle(&mut self, cmd: Command) {
-        match cmd {
-            Command::SetModel(m) => {
-                self.model = m;
-                self.rebuild_active();
-            }
-            Command::SetEngine(e) => {
-                self.engine = e;
-                self.rebuild_active();
-            }
-            Command::NoteOn { note, vel } => self.note_on(note, vel),
-            Command::NoteOff { note } => self.note_off(note),
-            Command::AllNotesOff => {
-                for v in &mut self.voices {
-                    v.active = false;
-                }
-            }
-        }
-    }
-
-    /// Re-excite every sounding voice so parameter/model changes are heard live.
     fn rebuild_active(&mut self) {
         for vi in 0..self.voices.len() {
             if self.voices[vi].active {
@@ -174,7 +179,6 @@ impl Synth {
         if let Some(i) = self.voices.iter().position(|v| !v.active) {
             return i;
         }
-        // Steal the oldest.
         let mut best = 0;
         let mut best_age = u64::MAX;
         for (i, v) in self.voices.iter().enumerate() {
@@ -186,8 +190,7 @@ impl Synth {
         best
     }
 
-    fn note_on(&mut self, note: u8, vel: f32) {
-        // Retrigger lockout (PLAY_PERIOD).
+    pub fn note_on(&mut self, note: u8, vel: f32) {
         let lockout = (self.engine.retrigger_ms * 0.001 * self.sr) as u64;
         if lockout > 0 && self.now.saturating_sub(self.last_play) < lockout {
             return;
@@ -197,7 +200,6 @@ impl Synth {
         let idx = self.alloc_voice();
         self.age_counter += 1;
         let age = self.age_counter;
-
         {
             let v = &mut self.voices[idx];
             v.active = true;
@@ -208,26 +210,36 @@ impl Synth {
             v.vel = vel;
         }
         self.build_voice(idx, true);
-
-        // A model may decline a strike (e.g. below PLAY_MAGNITUDE) => no modes.
         if self.voices[idx].n_modes == 0 {
             self.voices[idx].active = false;
         }
     }
 
-    /// (Re)build a voice's oscillator bank from the active model.
-    ///
-    /// `fresh` = a new strike (envelopes reset). Otherwise it's a live rebuild:
-    /// existing modes keep their phase and decayed level; a newly-added mode is
-    /// placed at the level it would have reached had it rung since the strike.
+    pub fn note_off(&mut self, note: u8) {
+        for v in &mut self.voices {
+            if v.active && v.note == note && !v.releasing {
+                v.releasing = true;
+            }
+        }
+    }
+
+    pub fn all_notes_off(&mut self) {
+        for v in &mut self.voices {
+            v.active = false;
+        }
+    }
+
+    #[allow(dead_code)] // used in tests; handy for a future voice meter
+    pub fn active_voices(&self) -> usize {
+        self.voices.iter().filter(|v| v.active).count()
+    }
+
     fn build_voice(&mut self, vi: usize, fresh: bool) {
         let sr = self.sr;
         let (f0, vel) = {
             let v = &self.voices[vi];
             (v.f0, v.vel)
         };
-
-        // Fill the scratch bank on the audio thread (model is pure/allocation-free).
         let mut buf = std::mem::take(&mut self.scratch);
         self.model.excite(f0, vel, sr, &mut buf);
 
@@ -254,43 +266,29 @@ impl Synth {
                 v.phase[i] = 0.0;
                 v.env[i] = (-buf.decay[i] * elapsed).exp().min(ENV_CAP);
             }
-            // Existing modes keep their current phase[i] and env[i].
         }
         v.n_modes = n;
-
-        self.scratch = buf; // return the scratch buffer
+        self.scratch = buf;
     }
 
-    fn note_off(&mut self, note: u8) {
-        for v in &mut self.voices {
-            if v.active && v.note == note && !v.releasing {
-                v.releasing = true;
+    /// Render exactly one (mono) sample, advancing every voice. The returned
+    /// value already has this instrument's gain applied but is **not** clamped —
+    /// the studio sums instruments and clamps the mix.
+    #[inline]
+    pub fn render_frame(&mut self) -> f32 {
+        let mut s = 0.0f32;
+        for vi in 0..self.voices.len() {
+            if self.voices[vi].active {
+                s += self.render_voice(vi);
             }
         }
-    }
-
-    /// Render `out` (interleaved by `channels`) mixing all active voices.
-    pub fn render(&mut self, out: &mut [f32], channels: usize) {
-        let gain = self.engine.gain;
-        for frame in out.chunks_mut(channels) {
-            let mut s = 0.0f32;
-            for vi in 0..self.voices.len() {
-                if self.voices[vi].active {
-                    s += self.render_voice(vi);
-                }
-            }
-            self.now += 1;
-            let sample = (s * gain).clamp(-1.0, 1.0);
-            for ch in frame.iter_mut() {
-                *ch = sample;
-            }
-        }
+        self.now += 1;
+        s * self.engine.gain
     }
 
     #[inline]
     fn render_voice(&mut self, vi: usize) -> f32 {
         let n = self.voices[vi].n_modes;
-
         let mut acc = 0.0f32;
         for i in 0..n {
             let ph = self.voices[vi].phase[i];
@@ -314,7 +312,6 @@ impl Synth {
             }
         }
 
-        // Overall gate: attack ramp, then release ramp on key-up.
         if v.releasing {
             v.gate *= v.rel_mul;
             if v.gate < 1e-4 {
@@ -328,10 +325,9 @@ impl Synth {
                 }
             }
             if !alive {
-                v.active = false; // fully decayed
+                v.active = false;
             }
         }
-
         acc * v.gate
     }
 }
@@ -346,68 +342,61 @@ mod tests {
     use super::*;
     use crate::models::registry;
 
-    fn render_rms(synth: &mut Synth, secs: f32) -> f32 {
-        let n = (synth.sr * secs) as usize;
-        let mut buf = vec![0.0f32; n];
-        synth.render(&mut buf, 1);
-        assert!(buf.iter().all(|s| s.is_finite()), "non-finite sample");
-        assert!(buf.iter().all(|s| s.abs() <= 1.0001), "out of range");
-        let sum: f32 = buf.iter().map(|s| s * s).sum();
+    fn render_rms(inst: &mut Instrument, secs: f32) -> f32 {
+        let n = (inst.sr * secs) as usize;
+        let mut sum = 0.0f32;
+        for _ in 0..n {
+            let s = inst.render_frame().clamp(-4.0, 4.0);
+            assert!(s.is_finite(), "non-finite sample");
+            sum += s * s;
+        }
         (sum / n as f32).sqrt()
+    }
+
+    fn instrument() -> Instrument {
+        Instrument::new(48_000.0, make_sine_table())
     }
 
     #[test]
     fn struck_note_decays() {
-        let mut synth = Synth::new(48_000.0);
-        synth.handle(Command::NoteOn { note: 69, vel: 1.0 });
-        let start = render_rms(&mut synth, 0.1);
-        let _ = render_rms(&mut synth, 3.0);
-        let end = render_rms(&mut synth, 0.1);
+        let mut inst = instrument();
+        inst.note_on(69, 1.0);
+        let start = render_rms(&mut inst, 0.1);
+        let _ = render_rms(&mut inst, 3.0);
+        let end = render_rms(&mut inst, 0.1);
         assert!(start > 0.01, "attack too quiet: {start}");
         assert!(end < start, "expected decay: {start} -> {end}");
     }
 
-    /// Swap through every registered model while a note is held; the engine must
-    /// stay finite and in range across the live rebuilds. Grows as plugins are
-    /// added, so it exercises whatever is registered.
     #[test]
     fn switching_models_live_is_stable() {
-        let mut synth = Synth::new(48_000.0);
-        synth.handle(Command::NoteOn { note: 60, vel: 0.9 });
-        render_rms(&mut synth, 0.05);
+        let mut inst = instrument();
+        inst.note_on(60, 0.9);
+        render_rms(&mut inst, 0.05);
         for model in registry() {
-            synth.handle(Command::SetModel(model));
-            render_rms(&mut synth, 0.05);
+            inst.set_model(model);
+            render_rms(&mut inst, 0.05);
         }
-    }
-
-    #[test]
-    fn big_gain_and_all_notes_off() {
-        let mut synth = Synth::new(48_000.0);
-        for n in [48, 55, 60, 64, 67] {
-            synth.handle(Command::NoteOn { note: n, vel: 1.0 });
-        }
-        synth.handle(Command::SetEngine(EngineParams {
-            gain: 4.0,
-            ..EngineParams::default()
-        }));
-        render_rms(&mut synth, 0.2); // clamped, must stay in range
-        synth.handle(Command::AllNotesOff);
-        assert_eq!(synth.voices.iter().filter(|v| v.active).count(), 0);
     }
 
     #[test]
     fn note_off_frees_the_voice() {
-        let mut synth = Synth::new(48_000.0);
-        synth.handle(Command::NoteOn { note: 60, vel: 1.0 });
-        assert_eq!(synth.voices.iter().filter(|v| v.active).count(), 1);
-        synth.handle(Command::NoteOff { note: 60 });
-        let mut buf = vec![0.0f32; 48_000];
-        synth.render(&mut buf, 1);
-        assert_eq!(
-            synth.voices.iter().filter(|v| v.active).count(),
-            0,
-            "voice should free after release"
-        );
+        let mut inst = instrument();
+        inst.note_on(60, 1.0);
+        assert_eq!(inst.active_voices(), 1);
+        inst.note_off(60);
+        render_rms(&mut inst, 1.0);
+        assert_eq!(inst.active_voices(), 0, "voice should free after release");
+    }
+
+    #[test]
+    fn snapshot_is_independent() {
+        let mut a = instrument();
+        a.note_on(60, 1.0);
+        let mut b = a.snapshot();
+        assert_eq!(b.active_voices(), 0, "snapshot starts silent");
+        b.note_on(64, 1.0);
+        assert_eq!(a.active_voices(), 1);
+        assert_eq!(b.active_voices(), 1);
     }
 }

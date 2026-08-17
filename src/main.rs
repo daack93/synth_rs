@@ -3,21 +3,30 @@
 //! the computer keyboard, and a MIDI controller all play it.
 
 mod audio;
+mod instrument;
 mod midi;
 mod models;
 mod presets;
-mod synth;
+mod studio;
 
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
+use std::sync::Arc;
+use std::time::Instant;
 
 use eframe::egui;
 
 use audio::AudioEngine;
+use instrument::EngineParams;
 use midi::MidiInputHandle;
 use models::FtmModel;
 use presets::Preset;
-use synth::{Command, EngineParams};
+use studio::{Command, LooperMode, NoteSpan, SharedView, TransportState};
+
+/// Spacebar hold thresholds: a quick press taps, a medium hold stops, a long
+/// hold resets.
+const HOLD_STOP: f32 = 0.4;
+const HOLD_RESET: f32 = 1.5;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -37,6 +46,9 @@ struct App {
     tx: Sender<Command>,
     _audio: Option<AudioEngine>,
     audio_err: Option<String>,
+    /// Transport / track state published by the studio (audio thread).
+    view: Option<Arc<SharedView>>,
+    sample_rate: f32,
 
     /// Available synthesis models (plugins); each holds its own parameters.
     models: Vec<Box<dyn FtmModel>>,
@@ -44,6 +56,11 @@ struct App {
     selected: usize,
     /// Engine-wide parameters (gain, envelope, retrigger).
     engine: EngineParams,
+
+    // Looper
+    looper_mode: LooperMode,
+    /// When the spacebar went down (for tap / hold-stop / hold-reset).
+    space_down_at: Option<Instant>,
 
     // Preset library
     /// Presets found in the folder (refreshed on save/load/delete).
@@ -74,6 +91,8 @@ impl App {
             Ok(a) => (Some(a), None),
             Err(e) => (None, Some(e)),
         };
+        let view = audio.as_ref().map(|a| a.view.clone());
+        let sample_rate = audio.as_ref().map(|a| a.sample_rate).unwrap_or(48_000.0);
 
         let models = models::registry();
         let selected = 0;
@@ -90,9 +109,13 @@ impl App {
             tx,
             _audio: audio,
             audio_err,
+            view,
+            sample_rate,
             models,
             selected,
             engine,
+            looper_mode: LooperMode::Pedal,
+            space_down_at: None,
             preset_list,
             preset_name: String::new(),
             preset_status: String::new(),
@@ -198,6 +221,26 @@ impl App {
                 if repeat {
                     continue;
                 }
+                // Spacebar = looper transport pedal: quick tap = primary action,
+                // hold ~0.4s = Stop, hold ~1.5s = Reset.
+                if key == egui::Key::Space {
+                    if pressed {
+                        if self.space_down_at.is_none() {
+                            self.space_down_at = Some(Instant::now());
+                        }
+                    } else if let Some(t0) = self.space_down_at.take() {
+                        let held = t0.elapsed().as_secs_f32();
+                        let cmd = if held >= HOLD_RESET {
+                            Command::Reset
+                        } else if held >= HOLD_STOP {
+                            Command::Stop
+                        } else {
+                            Command::Tap
+                        };
+                        let _ = self.tx.send(cmd);
+                    }
+                    continue;
+                }
                 // Octave shift with Z / X.
                 if pressed && key == egui::Key::Z {
                     self.base_midi = (self.base_midi - 12).max(0);
@@ -271,7 +314,13 @@ impl eframe::App for App {
             });
 
             ui.add_space(10.0);
+            self.transport_bar(ui);
+
+            ui.add_space(10.0);
             self.piano(ui);
+
+            ui.add_space(8.0);
+            self.tracks_panel(ui);
 
             ui.add_space(10.0);
             self.midi_panel(ui);
@@ -470,6 +519,122 @@ impl App {
         ui.label(egui::RichText::new(&self.midi_status).weak());
     }
 
+    /// Transport controls: looper mode, state, and pedal buttons.
+    fn transport_bar(&mut self, ui: &mut egui::Ui) {
+        let (state, loop_secs) = self
+            .view
+            .as_ref()
+            .map(|v| (v.state(), v.loop_seconds(self.sample_rate)))
+            .unwrap_or((TransportState::Idle, 0.0));
+
+        ui.horizontal(|ui| {
+            ui.strong("Looper");
+
+            let mut mode = self.looper_mode;
+            egui::ComboBox::from_id_salt("looper_mode")
+                .selected_text(match mode {
+                    LooperMode::Pedal => "Pedal cycle",
+                    LooperMode::Overdub => "Overdub",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut mode, LooperMode::Pedal, "Pedal cycle");
+                    ui.selectable_value(&mut mode, LooperMode::Overdub, "Overdub");
+                });
+            if mode != self.looper_mode {
+                self.looper_mode = mode;
+                let _ = self.tx.send(Command::SetLooperMode(mode));
+            }
+
+            ui.separator();
+            let (label, color) = match state {
+                TransportState::Idle => ("● Idle", egui::Color32::GRAY),
+                TransportState::Recording => ("⏺ Recording", egui::Color32::from_rgb(230, 80, 80)),
+                TransportState::Playing => ("▶ Playing", egui::Color32::from_rgb(90, 200, 110)),
+                TransportState::Stopped => ("⏸ Stopped", egui::Color32::from_rgb(220, 190, 90)),
+            };
+            ui.colored_label(color, label);
+            if loop_secs > 0.0 {
+                ui.label(format!("loop {loop_secs:.1}s"));
+            }
+
+            ui.separator();
+            if ui.button("Tap").clicked() {
+                let _ = self.tx.send(Command::Tap);
+            }
+            if ui.button("Stop").clicked() {
+                let _ = self.tx.send(Command::Stop);
+            }
+            if ui.button("Reset").clicked() {
+                let _ = self.tx.send(Command::Reset);
+            }
+            if self.looper_mode == LooperMode::Pedal && loop_secs > 0.0 {
+                if ui
+                    .button("＋ Rec track")
+                    .on_hover_text("Record one more pass into a new track")
+                    .clicked()
+                {
+                    let _ = self.tx.send(Command::ArmOverdub);
+                }
+            }
+        });
+
+        let tap_hint = match self.looper_mode {
+            LooperMode::Pedal => "Space: tap = record → play → stop. Hold = Stop · hold longer = Reset.",
+            LooperMode::Overdub => "Space: tap = record base, then each tap layers a new track. Hold = Stop · hold longer = Reset.",
+        };
+        ui.label(egui::RichText::new(tap_hint).weak().small());
+    }
+
+    /// The recorded loop tracks, shown below the keyboard.
+    fn tracks_panel(&mut self, ui: &mut egui::Ui) {
+        let (tracks, play) = match &self.view {
+            Some(v) => (v.tracks(), v.play_fraction()),
+            None => return,
+        };
+
+        ui.horizontal(|ui| {
+            ui.strong("Tracks");
+            ui.label(egui::RichText::new(format!("({})", tracks.len())).weak());
+        });
+        if tracks.is_empty() {
+            ui.label(
+                egui::RichText::new("No loops yet — tap Space (or Tap) to record one.")
+                    .weak()
+                    .small(),
+            );
+            return;
+        }
+
+        let mut toggle_mute = None;
+        let mut delete = None;
+        for (i, t) in tracks.iter().enumerate() {
+            ui.horizontal(|ui| {
+                let mute = if t.muted { "🔇" } else { "🔊" };
+                if ui.button(mute).on_hover_text("Mute / unmute").clicked() {
+                    toggle_mute = Some(i);
+                }
+                ui.allocate_ui_with_layout(
+                    egui::vec2(130.0, 24.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.label(&t.name);
+                        ui.label(egui::RichText::new(&t.instrument).weak().small());
+                    },
+                );
+                draw_track_timeline(ui, &t.notes, play, t.muted);
+                if ui.button("🗑").on_hover_text("Delete track").clicked() {
+                    delete = Some(i);
+                }
+            });
+        }
+        if let Some(i) = toggle_mute {
+            let _ = self.tx.send(Command::ToggleMute(i));
+        }
+        if let Some(i) = delete {
+            let _ = self.tx.send(Command::DeleteTrack(i));
+        }
+    }
+
     /// Draw a clickable two-octave piano and handle mouse input.
     fn piano(&mut self, ui: &mut egui::Ui) {
         let n_octaves = 2;
@@ -587,6 +752,41 @@ impl App {
 
 /// Map a physical keyboard key to a semitone offset within the base octave,
 /// using the common one-octave tracker layout.
+/// Draw a track's recorded notes as bars on a timeline, with a moving playhead.
+fn draw_track_timeline(ui: &mut egui::Ui, notes: &[NoteSpan], play: f32, muted: bool) {
+    let width = (ui.available_width() - 40.0).max(120.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 26.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+
+    painter.rect_filled(rect, 3.0, egui::Color32::from_gray(30));
+
+    // Vertical extent maps MIDI notes 36..=84 (C2..C6) onto the row height.
+    let (lo, hi) = (36.0f32, 84.0f32);
+    let y_for = |note: u8| -> f32 {
+        let t = ((note as f32 - lo) / (hi - lo)).clamp(0.0, 1.0);
+        rect.bottom() - 3.0 - t * (rect.height() - 6.0)
+    };
+    let bar_color = if muted {
+        egui::Color32::from_gray(90)
+    } else {
+        egui::Color32::from_rgb(120, 180, 255)
+    };
+    for n in notes {
+        let x0 = rect.left() + n.start.clamp(0.0, 1.0) * rect.width();
+        let x1 = rect.left() + n.end.clamp(0.0, 1.0) * rect.width();
+        let y = y_for(n.note);
+        let bar = egui::Rect::from_min_max(egui::pos2(x0, y - 2.0), egui::pos2(x1.max(x0 + 2.0), y + 2.0));
+        painter.rect_filled(bar, 1.0, bar_color);
+    }
+
+    // Playhead.
+    let px = rect.left() + play.clamp(0.0, 1.0) * rect.width();
+    painter.line_segment(
+        [egui::pos2(px, rect.top()), egui::pos2(px, rect.bottom())],
+        egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(240, 240, 120)),
+    );
+}
+
 fn key_to_semitone(key: egui::Key) -> Option<i32> {
     use egui::Key::*;
     Some(match key {

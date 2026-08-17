@@ -1,21 +1,22 @@
-//! cpal audio-output wiring. Owns the synth on the real-time thread and drains
-//! command messages from the UI / MIDI threads each callback.
+//! cpal audio-output wiring. Owns the [`Studio`] on the real-time thread and
+//! drains command messages from the UI / MIDI threads each callback.
 
 use std::sync::mpsc::Receiver;
+use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use crate::synth::{Command, Synth};
+use crate::studio::{Command, SharedView, Studio};
 
 pub struct AudioEngine {
     _stream: cpal::Stream,
-    /// Sample rate the stream opened at (kept for display/diagnostics).
-    #[allow(dead_code)]
     pub sample_rate: f32,
+    /// Transport / track state the UI reads.
+    pub view: Arc<SharedView>,
 }
 
 impl AudioEngine {
-    /// Build and start the output stream. `rx` delivers note/param commands.
+    /// Build and start the output stream. `rx` delivers note/transport commands.
     pub fn start(rx: Receiver<Command>) -> Result<Self, String> {
         let host = cpal::default_host();
         let device = host
@@ -30,7 +31,8 @@ impl AudioEngine {
         let sample_format = config.sample_format();
         let stream_config: cpal::StreamConfig = config.into();
 
-        let mut synth = Synth::new(sample_rate);
+        let mut studio = Studio::new(sample_rate);
+        let view = studio.view();
         let err_fn = |e| eprintln!("audio stream error: {e}");
 
         // Shared render closure: drain commands, then fill the buffer.
@@ -40,11 +42,10 @@ impl AudioEngine {
                     &stream_config,
                     move |data: &mut [$t], _: &cpal::OutputCallbackInfo| {
                         while let Ok(cmd) = rx.try_recv() {
-                            synth.handle(cmd);
+                            studio.handle(cmd);
                         }
-                        // Render into a scratch f32 buffer then convert.
                         let mut scratch = vec![0.0f32; data.len()];
-                        synth.render(&mut scratch, channels);
+                        studio.render(&mut scratch, channels);
                         for (o, s) in data.iter_mut().zip(scratch.iter()) {
                             *o = $convert(*s);
                         }
@@ -70,6 +71,7 @@ impl AudioEngine {
         Ok(AudioEngine {
             _stream: stream,
             sample_rate,
+            view,
         })
     }
 }
