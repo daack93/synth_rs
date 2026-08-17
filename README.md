@@ -71,10 +71,11 @@ as starting points to tune by ear. **★ Factory** restores them.
 
 - **Musical String** — a plucked string with music-friendly controls
   (inharmonicity, decay time, a pluck-position sweep from triangle to saw).
-- **Pure String** — the firmware-faithful FTM string, driven by the exact
-  `#define`s from the 2014 `main.h` (stiffness, propagation speed, damping,
-  frequency-dependent damping, length, `DEPTH`, `DAMP_PERIOD`, `TIME_SCALE`),
-  with triangle vs. saw pluck geometry and the accelerometer velocity mapping.
+- **Pure String** — the FTM string driven by the exact `#define`s from the 2014
+  `main.h` (stiffness, propagation speed, damping, frequency-dependent damping,
+  length, `DEPTH`, `DAMP_PERIOD`, `TIME_SCALE`) plus a continuous pluck position
+  (the firmware's triangle and saw are its center and near-end extremes) and the
+  accelerometer velocity mapping.
 - **Basic Wave** — band-limited triangle / sawtooth; the framework's reference
   oscillator.
 

@@ -17,7 +17,7 @@ pub mod musical_string;
 pub mod pure_string;
 
 /// Maximum partials a single voice can hold (hard array bound).
-pub const MAX_MODES: usize = 128;
+pub const MAX_MODES: usize = 512;
 
 /// The 2014 board's timer ran at ~10 kHz ("100 msTicks = 10 ms"), which is also
 /// the firmware `TIME_SCALE`. Named so `DAMP_PERIOD` / `TIME_SCALE` map from

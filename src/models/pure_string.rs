@@ -1,7 +1,7 @@
-//! Firmware-faithful FTM string — the original `set_triangle_string_params` /
-//! `set_saw_string_params` equations, driven by the exact `#define`s from the
-//! 2014 `main.h`. Triangle vs. saw is the pluck geometry (center vs. end), which
-//! only changes the mode weights K[m].
+//! FTM string based on the original `set_triangle/saw_string_params` equations
+//! and the exact `#define`s from the 2014 `main.h`. The firmware exposed only
+//! two pluck geometries (center = triangle, end = saw); here the pluck position
+//! is a continuous control, which those two are just special cases of.
 
 use serde::{Deserialize, Serialize};
 
@@ -9,14 +9,6 @@ use super::{strike_amplitude, unbounded_slider, FtmModel, ModeBuffer, TICK_RATE}
 
 const PI: f32 = std::f32::consts::PI;
 const TWO_PI: f32 = std::f32::consts::TAU;
-
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Pluck {
-    /// `MODE_TRIANGLE_STRING`: plucked at the center — odd modes only.
-    Triangle,
-    /// `MODE_SAW_STRING`: plucked near the end — all modes.
-    Saw,
-}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -27,7 +19,9 @@ pub struct PureString {
     pub freq_dep_damping: f32,  // STRING_FREQ_DEPENDENT_DAMPING (d3)
     pub string_length: f32,     // STRING_LENGTH (l)
     pub depth: usize,           // DEPTH
-    pub pluck: Pluck,           // which MODE_*_STRING
+    /// Pluck position along the string, 0..1. 0.5 = center (triangle, odd modes);
+    /// near an end = saw-like (all modes). The firmware's two modes are the ends.
+    pub pluck_pos: f32,
     pub damp_period: f32,       // DAMP_PERIOD
     pub time_scale: f32,        // TIME_SCALE
     pub play_magnitude: f32,    // PLAY_MAGNITUDE
@@ -38,7 +32,7 @@ pub struct PureString {
 
 impl Default for PureString {
     fn default() -> Self {
-        // Straight from main.h.
+        // Straight from main.h (pluck at center = the old MODE_TRIANGLE_STRING).
         Self {
             stiffness: 1.0,
             prop_speed: 500.0,
@@ -46,7 +40,7 @@ impl Default for PureString {
             freq_dep_damping: -1.0,
             string_length: 10.0,
             depth: 10,
-            pluck: Pluck::Triangle,
+            pluck_pos: 0.5,
             damp_period: 100.0,
             time_scale: 10_000.0,
             play_magnitude: 0.0, // orig 2000; 0 keeps soft keypresses audible
@@ -62,11 +56,11 @@ impl FtmModel for PureString {
     }
 
     fn display_name(&self) -> &'static str {
-        "Pure String (firmware)"
+        "Pure String"
     }
 
     fn description(&self) -> &'static str {
-        "The original set_triangle/saw_string_params equations, driven by the exact main.h #defines."
+        "The original FTM string equations and main.h #defines, with a continuous pluck position."
     }
 
     fn excite(&self, freq_hz: f32, vel: f32, sr: f32, out: &mut ModeBuffer) {
@@ -89,31 +83,29 @@ impl FtmModel for PureString {
         let wm_b = (c * PI).powi(2);
 
         let damp_per = self.damp_period.max(1e-3);
-        let saw = self.pluck == Pluck::Saw;
         let n_req = self.depth.clamp(1, super::MAX_MODES);
+
+        // Pluck weight: Fourier coefficient of a triangular initial displacement
+        // plucked at fraction p of the length, K[m] = 2 sin(mπp) / (m²π² p(1-p)).
+        // At p = 0.5 the even modes vanish (the firmware's triangle); as p → 0
+        // it fills in as ~1/m (the firmware's saw). Guarded away from the poles.
+        let p = self.pluck_pos.clamp(1e-3, 1.0 - 1e-3);
+        let pq = p * (1.0 - p);
 
         // Precompute W, sigma, K per mode (also gives W[0] for key normalization).
         let mut w = [0.0f32; super::MAX_MODES];
         let mut sig = [0.0f32; super::MAX_MODES];
         let mut kk = [0.0f32; super::MAX_MODES];
         let mut amp_sum = 0.0f32;
-        let mut sign = 1.0f32;
         let mut count = 0usize;
         for i in 0..n_req {
-            // Triangle wave: f_m == 0 for even m, so only odd m. Saw: all m.
-            let m = if saw { (i + 1) as f32 } else { (2 * i + 1) as f32 };
+            let m = (i + 1) as f32;
             let m2 = m * m;
             let m4 = m2 * m2;
             let sigma = om_m * m2 + om_c;
             let o_lin = (sigma / damp_per).exp(); // firmware O[i], ~1
             let w2 = (wm_a * m4 + wm_b * m2 - o_lin * o_lin).max(0.0);
-            let k = if saw {
-                -(m * PI / (l_safe * 2.0)).sin() / (m * PI)
-            } else {
-                let v = 8.0 * (m * PI / (l_safe * 2.0)).sin() / (m2 * PI * PI) * sign;
-                sign = -sign;
-                v
-            };
+            let k = (2.0 / (m2 * PI * PI * pq)) * (m * PI * p).sin();
             w[count] = w2.sqrt();
             sig[count] = sigma;
             kk[count] = k;
@@ -150,19 +142,22 @@ impl FtmModel for PureString {
         let mut changed = false;
 
         ui.strong("String Parameters");
-        egui::ComboBox::from_label("Pluck (MODE)")
-            .selected_text(match self.pluck {
-                Pluck::Triangle => "MODE_TRIANGLE_STRING",
-                Pluck::Saw => "MODE_SAW_STRING",
-            })
-            .show_ui(ui, |ui| {
-                changed |= ui
-                    .selectable_value(&mut self.pluck, Pluck::Triangle, "MODE_TRIANGLE_STRING")
-                    .changed();
-                changed |= ui
-                    .selectable_value(&mut self.pluck, Pluck::Saw, "MODE_SAW_STRING")
-                    .changed();
-            });
+        changed |= ui
+            .add(
+                unbounded_slider(&mut self.pluck_pos, 0.0..=1.0, "Pluck position").custom_formatter(
+                    |v, _| {
+                        if (v - 0.5).abs() < 0.02 {
+                            "center (triangle)".into()
+                        } else if v < 0.08 || v > 0.92 {
+                            "near end (saw)".into()
+                        } else {
+                            format!("{v:.2}")
+                        }
+                    },
+                ),
+            )
+            .on_hover_text("Where the string is plucked. Center = odd harmonics (triangle); near an end = fuller, saw-like.")
+            .changed();
 
         changed |= ui
             .add(unbounded_slider(&mut self.stiffness, 0.0..=50.0, "STRING_STIFFNESS (S)"))
@@ -173,13 +168,13 @@ impl FtmModel for PureString {
             .on_hover_text("Wave speed. With length sets the physical pitch (~c/2l).")
             .changed();
         changed |= ui
-            .add(unbounded_slider(&mut self.damping, -5.0..=20.0, "STRING_DAMPING (d1)"))
+            .add(unbounded_slider(&mut self.damping, -50.0..=200.0, "STRING_DAMPING (d1)"))
             .on_hover_text("Uniform decay of every mode. (Firmware required >= 0.)")
             .changed();
         changed |= ui
             .add(unbounded_slider(
                 &mut self.freq_dep_damping,
-                -10.0..=2.0,
+                -100.0..=20.0,
                 "STRING_FREQ_DEP_DAMPING (d3)",
             ))
             .on_hover_text("Extra decay on high modes (negative in the original).")
@@ -235,14 +230,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn triangle_and_saw_both_produce_modes() {
+    fn pluck_position_shapes_the_spectrum() {
         let mut buf = ModeBuffer::default();
-        PureString::default().excite(220.0, 1.0, 48_000.0, &mut buf);
-        assert!(buf.n > 1, "triangle string should have modes");
+        // Center pluck (0.5): even modes vanish, so mode 2 (index 1) is ~silent.
+        let center = PureString { pluck_pos: 0.5, depth: 8, ..PureString::default() };
+        center.excite(220.0, 1.0, 48_000.0, &mut buf);
+        assert!(buf.n > 2);
+        assert!(buf.amp[1].abs() < 1e-3, "even mode should vanish at center pluck");
 
-        let saw = PureString { pluck: Pluck::Saw, ..PureString::default() };
-        saw.excite(220.0, 1.0, 48_000.0, &mut buf);
-        assert!(buf.n > 1, "saw string should have modes");
+        // Off-center pluck: even modes come back.
+        let edge = PureString { pluck_pos: 0.12, depth: 8, ..PureString::default() };
+        edge.excite(220.0, 1.0, 48_000.0, &mut buf);
+        assert!(buf.amp[1].abs() > 1e-3, "even mode present when plucked off-center");
     }
 
     #[test]

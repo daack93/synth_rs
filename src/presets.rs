@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::models::pure_string::{Pluck, PureString};
+use crate::models::pure_string::PureString;
 use crate::models::{model_from_id, FtmModel};
 use crate::instrument::EngineParams;
 
@@ -60,7 +60,7 @@ pub fn factory() -> Vec<Preset> {
         freq_dep_damping: f32,
         string_length: f32,
         depth: usize,
-        pluck: Pluck,
+        pluck_pos: f32,
     ) -> PureString {
         PureString {
             stiffness,
@@ -69,7 +69,7 @@ pub fn factory() -> Vec<Preset> {
             freq_dep_damping,
             string_length,
             depth,
-            pluck,
+            pluck_pos,
             damp_period: 100.0,
             time_scale: 10_000.0,
             play_magnitude: 0.0,
@@ -90,40 +90,40 @@ pub fn factory() -> Vec<Preset> {
     }
 
     vec![
-        // Round upright pizz: hollow triangle pluck, dark, medium sustain.
+        // Round upright pizz: near-center pluck (hollow), dark, medium sustain.
         make(
             "Acoustic Bass",
-            string(1.5, 5.0, -3.0, 6.0, 16, Pluck::Triangle),
+            string(1.5, 5.0, -3.0, 6.0, 24, 0.5),
             eng(0.75, 4.0, 120.0),
         ),
-        // Growly finger bass: fuller saw, a touch brighter and longer.
+        // Growly finger bass: fuller off-center pluck, a touch brighter, longer.
         make(
             "Electric Bass",
-            string(2.0, 4.0, -2.0, 8.0, 20, Pluck::Saw),
+            string(2.0, 4.0, -2.0, 8.0, 20, 0.15),
             eng(0.75, 4.0, 140.0),
         ),
-        // Steel-string body: saw, moderate brightness and sustain.
+        // Steel-string body: moderate brightness and sustain.
         make(
             "Acoustic Guitar",
-            string(1.0, 7.0, -1.8, 12.0, 24, Pluck::Saw),
+            string(1.0, 7.0, -1.8, 12.0, 24, 0.13),
             eng(0.6, 3.0, 120.0),
         ),
         // Clean electric: bright, long sustain, slow tone decay.
         make(
             "Electric Guitar",
-            string(1.2, 2.0, -0.6, 16.0, 28, Pluck::Saw),
+            string(1.2, 2.0, -0.6, 16.0, 28, 0.12),
             eng(0.6, 3.0, 200.0),
         ),
         // Hammered piano: strong inharmonicity (high stiffness), long ring.
         make(
             "Piano",
-            string(6.0, 3.0, -1.2, 12.0, 24, Pluck::Saw),
+            string(6.0, 3.0, -1.2, 12.0, 24, 0.13),
             eng(0.6, 2.0, 150.0),
         ),
         // Banjo: very bright, quick "plink" (fast HF + short sustain).
         make(
             "Banjo",
-            string(3.0, 13.0, -4.0, 20.0, 32, Pluck::Saw),
+            string(3.0, 13.0, -4.0, 20.0, 32, 0.1),
             eng(0.6, 2.0, 80.0),
         ),
     ]
