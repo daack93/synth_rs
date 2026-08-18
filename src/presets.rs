@@ -15,6 +15,7 @@ use crate::models::basic_wave::{BasicWave, Waveform};
 use crate::models::drum_membrane::DrumMembrane;
 use crate::models::metal_bell::MetalBell;
 use crate::models::snare::Snare;
+use crate::models::cymbal::Cymbal;
 use crate::models::musical_string::MusicalString;
 use crate::models::pure_string::PureString;
 use crate::models::webster_horn::{Boundary, Wavefront, WebsterHorn};
@@ -247,6 +248,16 @@ pub fn factory() -> Vec<Preset> {
             Snare { tension: 750.0, damping: 14.0, strike_pos: 0.4, depth: 24, snares: 0.7, snare_decay: 16.0, tone: 0.65, key_tracks_pitch: true },
             eng(0.7, 1.0, 50.0),
         ),
+        make(
+            "Crash Cymbal",
+            Cymbal { size: 17.0, stiffness: 9.0, damping: 1.0, brightness: -0.5, strike_pos: 0.8, modes: 160, shimmer: 0.4, key_tracks_pitch: true },
+            eng(0.5, 1.0, 300.0),
+        ),
+        make(
+            "Ride Cymbal",
+            Cymbal { size: 15.0, stiffness: 7.0, damping: 2.2, brightness: -0.25, strike_pos: 0.35, modes: 100, shimmer: 0.15, key_tracks_pitch: true },
+            eng(0.55, 1.0, 200.0),
+        ),
         // ---- Basic Wave (reference oscillators) ----
         make("Triangle Lead", BasicWave { waveform: Waveform::Triangle, harmonics: 16, decay_time: 1.5 }, eng(0.5, 3.0, 120.0)),
         make("Saw Lead", BasicWave { waveform: Waveform::Saw, harmonics: 40, decay_time: 1.2 }, eng(0.45, 3.0, 120.0)),
@@ -424,7 +435,7 @@ mod tests {
         assert_eq!(names.len(), before, "factory preset names must be unique");
         // Covers every registered model.
         let ids: std::collections::HashSet<_> = kit.iter().map(|p| p.model_id.clone()).collect();
-        for id in ["pure_string", "musical_string", "drum_membrane", "webster_horn", "metal_bell", "basic_wave"] {
+        for id in ["pure_string", "musical_string", "drum_membrane", "webster_horn", "metal_bell", "snare", "cymbal", "basic_wave"] {
             assert!(ids.contains(id), "kit should include a {id} preset");
         }
         // Every factory preset must rebuild into a working model that produces sound.
