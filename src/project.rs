@@ -79,6 +79,11 @@ pub struct LoopTrack {
     /// Stereo pan, -1 (left) … 0 (centre) … +1 (right).
     #[serde(default)]
     pub pan: f32,
+    /// Fade-in / fade-out lengths in seconds (0 = none).
+    #[serde(default)]
+    pub fade_in: f32,
+    #[serde(default)]
+    pub fade_out: f32,
     #[serde(default)]
     pub zones: Vec<ZoneData>,
     /// Recorded parameter automation (per-knob moves over the loop).
@@ -246,6 +251,8 @@ mod tests {
                 muted: false,
                 volume: 1.0,
                 pan: 0.0,
+                fade_in: 0.0,
+                fade_out: 0.0,
                 zones: Vec::new(),
                 automation: vec![
                     AutoPoint { t: 0.1, target: "damping".into(), value: 5.0 },

@@ -1392,6 +1392,20 @@ impl App {
             let _ = self.tx.send(Command::SetTrackEngine(i, te.engine.clone()));
         }
 
+        ui.separator();
+        ui.strong("Fades");
+        let (mut fin, mut fout) = tracks.get(i).map(|tv| (tv.fade_in, tv.fade_out)).unwrap_or((0.0, 0.0));
+        let mut fade_changed = false;
+        ui.horizontal(|ui| {
+            ui.label("In");
+            fade_changed |= ui.add(egui::DragValue::new(&mut fin).range(0.0..=10.0).speed(0.05).suffix(" s")).changed();
+            ui.label("Out");
+            fade_changed |= ui.add(egui::DragValue::new(&mut fout).range(0.0..=10.0).speed(0.05).suffix(" s")).changed();
+        });
+        if fade_changed {
+            let _ = self.tx.send(Command::SetTrackFades { track: i, fade_in: fin, fade_out: fout });
+        }
+
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             if ui.button("← Back to Live").clicked() {
@@ -1614,6 +1628,16 @@ impl App {
                 .clicked()
             {
                 let _ = self.tx.send(Command::Redo);
+            }
+            if !tracks.is_empty() {
+                ui.separator();
+                ui.label("Stretch");
+                if ui.button("½×").on_hover_text("Halve the loop time (faster)").clicked() {
+                    let _ = self.tx.send(Command::TimeStretch(0.5));
+                }
+                if ui.button("2×").on_hover_text("Double the loop time (slower)").clicked() {
+                    let _ = self.tx.send(Command::TimeStretch(2.0));
+                }
             }
         });
         if tracks.is_empty() {

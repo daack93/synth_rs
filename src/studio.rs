@@ -29,6 +29,20 @@ use crate::project::{AutoPoint, LoopData, LoopEvent, LoopTrack, TempoGrid, ZoneD
 const TWO_PI_F64: f64 = std::f64::consts::TAU;
 const FRAC_1_SQRT_2: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
+/// Linear fade-in/out gain at time `secs` into a loop of length `total`, given
+/// fade lengths in seconds (0 = no fade).
+#[inline]
+fn fade_gain(secs: f32, total: f32, fade_in: f32, fade_out: f32) -> f32 {
+    let mut g = 1.0;
+    if fade_in > 0.0 && secs < fade_in {
+        g *= (secs / fade_in).clamp(0.0, 1.0);
+    }
+    if fade_out > 0.0 && total > 0.0 && secs > total - fade_out {
+        g *= ((total - secs) / fade_out).clamp(0.0, 1.0);
+    }
+    g
+}
+
 /// Equal-power stereo pan gains for `pan` in `[-1, 1]` (centre = -3 dB each side,
 /// constant perceived loudness across the sweep).
 #[inline]
@@ -118,6 +132,10 @@ pub enum Command {
     /// Undo / redo the last destructive edit.
     Undo,
     Redo,
+    /// Stretch the whole loop in time by `factor` (>1 = longer/slower).
+    TimeStretch(f32),
+    /// Set a track's fade-in / fade-out length in seconds.
+    SetTrackFades { track: usize, fade_in: f32, fade_out: f32 },
     /// Swap a track's instrument model live (rebuilds its sounding voices).
     SetTrackModel(usize, Box<dyn FtmModel>),
     /// Update a track's engine params live.
@@ -200,6 +218,9 @@ struct Track {
     volume: f32,
     pan: f32,
     solo: bool,
+    /// Fade-in / fade-out lengths in seconds (0 = none).
+    fade_in: f32,
+    fade_out: f32,
     name: String,
     label: String,
 
@@ -247,6 +268,8 @@ pub struct TrackView {
     pub volume: f32,
     pub pan: f32,
     pub solo: bool,
+    pub fade_in: f32,
+    pub fade_out: f32,
 }
 
 /// Lock-free scalars + an occasionally-rebuilt track list for the UI.
@@ -527,6 +550,14 @@ impl Studio {
             Command::SetMasterVolume(v) => self.master = v.max(0.0),
             Command::Undo => self.undo(),
             Command::Redo => self.redo(),
+            Command::TimeStretch(factor) => self.time_stretch(factor),
+            Command::SetTrackFades { track, fade_in, fade_out } => {
+                if let Some(t) = self.tracks.get_mut(track) {
+                    t.fade_in = fade_in.max(0.0);
+                    t.fade_out = fade_out.max(0.0);
+                    self.mark_structure_dirty();
+                }
+            }
             Command::ClearTrackAutomation(i) => {
                 if i < self.tracks.len() {
                     self.push_undo();
@@ -819,6 +850,33 @@ impl Studio {
         self.redo_stack.clear();
     }
 
+    /// Stretch the whole loop in time: scale every event + automation position
+    /// and the loop length by `factor` (>1 = longer/slower).
+    fn time_stretch(&mut self, factor: f32) {
+        let Some(len) = self.loop_len else { return };
+        if !(factor > 0.0) || (factor - 1.0).abs() < 1e-4 {
+            return;
+        }
+        self.push_undo();
+        let f = factor as f64;
+        let new_len = ((len as f64 * f).round() as u64).max(1);
+        let scale = |pos: u64| ((pos as f64 * f).round() as u64).min(new_len - 1);
+        for t in &mut self.tracks {
+            for e in &mut t.events {
+                e.pos = scale(e.pos);
+            }
+            for a in &mut t.auto {
+                a.pos = scale(a.pos);
+            }
+            t.events.sort_by_key(|e| e.pos);
+            t.auto.sort_by_key(|a| a.pos);
+        }
+        self.loop_len = Some(new_len);
+        self.pos = 0;
+        self.reset_cursors();
+        self.mark_structure_dirty();
+    }
+
     /// Start playing the installed song from the top.
     fn play_song(&mut self) {
         if self.song.is_empty() {
@@ -917,6 +975,8 @@ impl Studio {
                 volume: lt.volume,
                 pan: lt.pan,
                 solo: false,
+                fade_in: lt.fade_in,
+                fade_out: lt.fade_out,
                 name: lt.name,
                 label,
                 auto,
@@ -951,6 +1011,8 @@ impl Studio {
                 muted: t.muted,
                 volume: t.volume,
                 pan: t.pan,
+                fade_in: t.fade_in,
+                fade_out: t.fade_out,
                 zones,
                 automation: t
                     .auto
@@ -1013,6 +1075,8 @@ impl Studio {
             volume: 1.0,
             pan: 0.0,
             solo: false,
+            fade_in: 0.0,
+            fade_out: 0.0,
             name: format!("Track {}", idx + 1),
             label,
             auto: Vec::new(),
@@ -1272,6 +1336,8 @@ impl Studio {
             // levelled. Every track is still rendered (to advance envelopes) even
             // when silenced by mute/solo, so unmuting doesn't pop.
             let any_solo = self.tracks.iter().any(|t| t.solo);
+            let secs = self.pos as f32 / self.sr;
+            let total = self.loop_len.unwrap_or(0) as f32 / self.sr;
             let live_s = self.live.render_frame();
             let (mut l, mut r) = (live_s * FRAC_1_SQRT_2, live_s * FRAC_1_SQRT_2);
             for t in &mut self.tracks {
@@ -1279,8 +1345,9 @@ impl Studio {
                 let audible = !t.muted && (!any_solo || t.solo);
                 if audible {
                     let (lg, rg) = pan_gains(t.pan);
-                    l += f * t.volume * lg;
-                    r += f * t.volume * rg;
+                    let g = t.volume * fade_gain(secs, total, t.fade_in, t.fade_out);
+                    l += f * g * lg;
+                    r += f * g * rg;
                 }
             }
             let click = self.click_sample() * FRAC_1_SQRT_2;
@@ -1467,6 +1534,8 @@ impl Studio {
                     volume: t.volume,
                     pan: t.pan,
                     solo: t.solo,
+                    fade_in: t.fade_in,
+                    fade_out: t.fade_out,
                 }
             })
             .collect();
@@ -1862,6 +1931,8 @@ mod tests {
                 muted: false,
                 volume: 1.0,
                 pan: 0.0,
+                fade_in: 0.0,
+                fade_out: 0.0,
                 zones: Vec::new(),
                 // Delta of +100 from the base damping (default 8) → effective 108.
                 automation: vec![AutoPoint { t: 0.005, target: "damping".into(), value: 100.0 }],
@@ -1915,6 +1986,8 @@ mod tests {
                 muted: false,
                 volume: 1.0,
                 pan: 0.0,
+                fade_in: 0.0,
+                fade_out: 0.0,
                 zones: Vec::new(),
                 automation: vec![AutoPoint { t: 0.005, target: "damping".into(), value: 100.0 }],
                 events: vec![LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
@@ -1944,6 +2017,8 @@ mod tests {
                 muted: false,
                 volume: 1.0,
                 pan: 0.0,
+                fade_in: 0.0,
+                fade_out: 0.0,
                 zones: Vec::new(),
                 automation: Vec::new(),
                 events: vec![
@@ -2026,6 +2101,22 @@ mod tests {
     }
 
     #[test]
+    fn time_stretch_scales_positions_and_length() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(two_note_loop())); // length 1.0s
+        s.handle(Command::TimeStretch(2.0));
+        let snap = s.snapshot_loop();
+        assert!((snap.length - 2.0).abs() < 0.01, "length doubled: {}", snap.length);
+        let t62 = snap.tracks[0]
+            .events
+            .iter()
+            .find(|e| e.on && e.note == 62)
+            .map(|e| e.t)
+            .unwrap();
+        assert!((t62 - 1.0).abs() < 0.01, "note 62 (0.5s) pushed to 1.0s: {t62}");
+    }
+
+    #[test]
     fn undo_redo_round_trips_a_region_edit() {
         let mut s = Studio::new(48_000.0);
         s.handle(Command::LoadLoop(two_note_loop()));
@@ -2067,6 +2158,8 @@ mod tests {
                 muted: false,
                 volume,
                 pan,
+                fade_in: 0.0,
+                fade_out: 0.0,
                 zones: Vec::new(),
                 automation: Vec::new(),
                 events: vec![LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
@@ -2148,6 +2241,8 @@ mod tests {
                 muted: false,
                 volume: 1.0,
                 pan: 0.0,
+                fade_in: 0.0,
+                fade_out: 0.0,
                 zones: Vec::new(),
                 automation: Vec::new(),
                 events: vec![
