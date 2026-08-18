@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::basic_wave::{BasicWave, Waveform};
 use crate::models::drum_membrane::DrumMembrane;
+use crate::models::metal_bell::MetalBell;
 use crate::models::musical_string::MusicalString;
 use crate::models::pure_string::PureString;
 use crate::models::webster_horn::{Boundary, Wavefront, WebsterHorn};
@@ -234,6 +235,12 @@ pub fn factory() -> Vec<Preset> {
             WebsterHorn { boundary: Boundary::Brass, r1: 0.005, r2: 0.030, r3: 0.002, length: 1.0, blow_pos: 0.0, depth: 28, resolution: 400, damping: 5.0, freq_dep_damping: -0.08, visco_loss: 1.0, radiation: 1.2, wavefront: Wavefront::Spherical, ..WebsterHorn::default() },
             eng(0.6, 25.0, 80.0),
         ),
+        // ---- Idiophones ----
+        make(
+            "Cowbell",
+            MetalBell { partials: 3, spread: 0.48, inharmonicity: 0.06, brightness: 0.4, decay_time: 0.35, strike_noise: 0.3, key_tracks_pitch: true },
+            eng(0.6, 1.0, 40.0),
+        ),
         // ---- Basic Wave (reference oscillators) ----
         make("Triangle Lead", BasicWave { waveform: Waveform::Triangle, harmonics: 16, decay_time: 1.5 }, eng(0.5, 3.0, 120.0)),
         make("Saw Lead", BasicWave { waveform: Waveform::Saw, harmonics: 40, decay_time: 1.2 }, eng(0.45, 3.0, 120.0)),
@@ -411,7 +418,7 @@ mod tests {
         assert_eq!(names.len(), before, "factory preset names must be unique");
         // Covers every registered model.
         let ids: std::collections::HashSet<_> = kit.iter().map(|p| p.model_id.clone()).collect();
-        for id in ["pure_string", "musical_string", "drum_membrane", "webster_horn", "basic_wave"] {
+        for id in ["pure_string", "musical_string", "drum_membrane", "webster_horn", "metal_bell", "basic_wave"] {
             assert!(ids.contains(id), "kit should include a {id} preset");
         }
         // Every factory preset must rebuild into a working model that produces sound.
