@@ -18,7 +18,7 @@
 //! * **Overdub** — tap: Record base, then each tap finalizes the current take and
 //!   starts a new track, layering hands-free.
 
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::instrument::{make_sine_table, EngineParams, Instrument};
@@ -93,6 +93,17 @@ pub enum Command {
     SetTrackEngine(usize, EngineParams),
     /// Replace the current loop + tracks with a saved loop, and play it.
     LoadLoop(LoopData),
+    /// Install a song arrangement (resolved loops + repeat counts); doesn't play.
+    SetSong(Vec<SongSection>),
+    /// Start playing the installed song from the top.
+    PlaySong,
+}
+
+/// A resolved song section: a loop and how many times to play it. The UI builds
+/// these from `project::Section` + the project's loops.
+pub struct SongSection {
+    pub loop_data: LoopData,
+    pub repeats: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -148,6 +159,8 @@ pub struct SharedView {
     tracks: Mutex<Vec<TrackView>>,
     /// A full serializable snapshot of the current loop (for saving to a project).
     snapshot: Mutex<LoopData>,
+    /// Current song section index while a song plays, else -1.
+    song_section: AtomicI64,
 }
 
 impl SharedView {
@@ -159,6 +172,17 @@ impl SharedView {
             loop_len: AtomicU64::new(0),
             tracks: Mutex::new(Vec::new()),
             snapshot: Mutex::new(LoopData::default()),
+            song_section: AtomicI64::new(-1),
+        }
+    }
+
+    /// The section index currently playing in the song, or `None`.
+    pub fn song_section(&self) -> Option<usize> {
+        let v = self.song_section.load(Ordering::Relaxed);
+        if v < 0 {
+            None
+        } else {
+            Some(v as usize)
         }
     }
 
@@ -209,6 +233,12 @@ pub struct Studio {
     /// Frames elapsed since arming (measures the one-pass window).
     rec_frames: u64,
 
+    // Song arrangement playback
+    song: Vec<SongSection>,
+    song_active: bool,
+    song_pos: usize,
+    song_rep: u32,
+
     view: Arc<SharedView>,
     /// Structure snapshot waiting to be published to the UI (flushed each render).
     pending_structure: Option<Vec<TrackView>>,
@@ -233,6 +263,10 @@ impl Studio {
             defining: false,
             auto_finalize_at: None,
             rec_frames: 0,
+            song: Vec::new(),
+            song_active: false,
+            song_pos: 0,
+            song_rep: 0,
             view: Arc::new(SharedView::new()),
             pending_structure: None,
             pending_snapshot: None,
@@ -299,6 +333,8 @@ impl Studio {
                 }
             }
             Command::LoadLoop(data) => self.load_loop(data),
+            Command::SetSong(sections) => self.song = sections,
+            Command::PlaySong => self.play_song(),
             Command::DeleteTrack(i) => {
                 if i < self.tracks.len() {
                     self.tracks.remove(i);
@@ -388,6 +424,7 @@ impl Studio {
         self.disarm_and_finalize();
         self.playing = false;
         self.defining = false;
+        self.song_active = false;
         self.live.all_notes_off();
         for t in &mut self.tracks {
             t.inst.all_notes_off();
@@ -404,14 +441,36 @@ impl Studio {
         self.loop_len = None;
         self.pos = 0;
         self.playing = false;
+        self.song_active = false;
         self.live.all_notes_off();
         self.mark_structure_dirty();
     }
 
-    /// Replace the current loop + tracks with a saved loop, and start playing it.
-    /// Positions in `data` are in seconds; converted to samples at this rate.
+    /// Load a single saved loop (leaving any song stopped) and play it.
     fn load_loop(&mut self, data: LoopData) {
-        self.live.all_notes_off();
+        self.song_active = false;
+        self.install_loop(data);
+        self.mark_structure_dirty();
+    }
+
+    /// Start playing the installed song from the top.
+    fn play_song(&mut self) {
+        if self.song.is_empty() {
+            return;
+        }
+        self.song_active = true;
+        self.song_pos = 0;
+        self.song_rep = 0;
+        let data = self.song[0].loop_data.clone();
+        self.install_loop(data);
+        self.mark_structure_dirty();
+    }
+
+    /// Rebuild the tracks/instruments from a saved loop and start it playing.
+    /// Positions in `data` are in seconds; converted to samples at this rate.
+    /// Does not touch song-transport state (used by both single-loop load and
+    /// song section advances).
+    fn install_loop(&mut self, data: LoopData) {
         self.tracks.clear();
         self.recording = None;
         self.armed = false;
@@ -422,7 +481,6 @@ impl Studio {
             self.loop_len = None;
             self.pos = 0;
             self.playing = false;
-            self.mark_structure_dirty();
             return;
         }
 
@@ -458,7 +516,7 @@ impl Studio {
         self.pos = 0;
         self.reset_cursors();
         self.playing = true;
-        self.mark_structure_dirty();
+        // Callers (load_loop / play_song / section advance) publish the structure.
     }
 
     /// Build a serializable snapshot of the current loop (positions in seconds).
@@ -619,8 +677,40 @@ impl Studio {
             if self.pos >= len {
                 self.pos = 0;
                 self.reset_cursors();
+                if self.song_active {
+                    self.advance_song();
+                }
             }
         }
+    }
+
+    /// At a loop boundary during song playback, count the repeat and move to the
+    /// next section (or end the song) when this section's repeats are done.
+    fn advance_song(&mut self) {
+        self.song_rep += 1;
+        let reps = self
+            .song
+            .get(self.song_pos)
+            .map(|s| s.repeats.max(1))
+            .unwrap_or(1);
+        if self.song_rep < reps {
+            return; // keep repeating this section
+        }
+        self.song_pos += 1;
+        self.song_rep = 0;
+        if self.song_pos >= self.song.len() {
+            // Song finished.
+            self.song_active = false;
+            self.playing = false;
+            for t in &mut self.tracks {
+                t.inst.all_notes_off();
+            }
+            self.mark_structure_dirty();
+            return;
+        }
+        let data = self.song[self.song_pos].loop_data.clone();
+        self.install_loop(data); // swap in the next section's tracks
+        self.mark_structure_dirty();
     }
 
     // ---- publishing to the UI ----
@@ -645,6 +735,14 @@ impl Studio {
         self.view
             .loop_len
             .store(self.loop_len.unwrap_or(0), Ordering::Relaxed);
+        self.view.song_section.store(
+            if self.song_active {
+                self.song_pos as i64
+            } else {
+                -1
+            },
+            Ordering::Relaxed,
+        );
     }
 
     fn mark_structure_dirty(&mut self) {
@@ -848,6 +946,43 @@ mod tests {
         // Playing from the top fires the recorded note.
         drain(&mut s2, 200);
         assert!(s2.tracks[0].inst.active_voices() > 0, "loaded loop should play");
+    }
+
+    #[test]
+    fn song_plays_through_sections() {
+        use crate::project::{LoopData, LoopEvent, LoopTrack};
+        let mk = |note: u8| LoopData {
+            length: 0.05, // 2400 samples @ 48k
+            tracks: vec![LoopTrack {
+                name: "T".into(),
+                model_id: "musical_string".into(),
+                params: serde_json::json!({}),
+                engine: EngineParams::default(),
+                muted: false,
+                events: vec![
+                    LoopEvent { t: 0.0, on: true, note, vel: 1.0 },
+                    LoopEvent { t: 0.02, on: false, note, vel: 0.0 },
+                ],
+            }],
+        };
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::SetSong(vec![
+            SongSection { loop_data: mk(60), repeats: 2 },
+            SongSection { loop_data: mk(67), repeats: 1 },
+        ]));
+        s.handle(Command::PlaySong);
+        assert!(s.song_active);
+        assert_eq!(s.song_pos, 0);
+
+        // Two repeats of section 0 (2 * 2400 samples) → advance to section 1.
+        drain(&mut s, 2400 * 2 + 50);
+        assert_eq!(s.song_pos, 1, "advanced after section 0's repeats");
+        assert!(s.song_active);
+
+        // One repeat of section 1 → song ends.
+        drain(&mut s, 2400 + 50);
+        assert!(!s.song_active, "song ends after the last section");
+        assert!(!s.playing);
     }
 
     #[test]

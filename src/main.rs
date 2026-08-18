@@ -22,8 +22,8 @@ use instrument::EngineParams;
 use midi::MidiInputHandle;
 use models::FtmModel;
 use presets::Preset;
-use project::{NamedLoop, Project};
-use studio::{Command, LooperMode, NoteSpan, SharedView, TrackView, TransportState};
+use project::{NamedLoop, Project, Section};
+use studio::{Command, LooperMode, NoteSpan, SharedView, SongSection, TrackView, TransportState};
 
 /// Spacebar hold thresholds: a quick press taps, a medium hold stops, a long
 /// hold resets.
@@ -104,6 +104,10 @@ struct App {
     project_list: Vec<String>,
     /// Last project action result.
     project_status: String,
+    /// Arranger: which loop to add as the next section.
+    arrange_loop_sel: usize,
+    /// Arranger: repeat count for the next section.
+    arrange_repeats: u32,
 
     // Keyboard state
     base_midi: i32,
@@ -159,11 +163,14 @@ impl App {
             project: Project {
                 name: "Untitled".to_string(),
                 loops: Vec::new(),
+                arrangement: Vec::new(),
             },
             project_name: "Untitled".to_string(),
             loop_name: String::new(),
             project_list: project::list(),
             project_status: String::new(),
+            arrange_loop_sel: 0,
+            arrange_repeats: 4,
             base_midi: 60, // C4
             mouse_note: None,
             held_keys: HashMap::new(),
@@ -303,6 +310,45 @@ impl App {
             self.track_edit = None;
             self.project_status = format!("Loaded loop “{}”.", nl.name);
         }
+    }
+
+    /// Remove a loop and keep the arrangement's indices valid.
+    fn remove_loop(&mut self, i: usize) {
+        if i >= self.project.loops.len() {
+            return;
+        }
+        self.project.loops.remove(i);
+        self.project.arrangement.retain(|s| s.loop_index != i);
+        for s in &mut self.project.arrangement {
+            if s.loop_index > i {
+                s.loop_index -= 1;
+            }
+        }
+        if self.arrange_loop_sel >= self.project.loops.len() {
+            self.arrange_loop_sel = self.project.loops.len().saturating_sub(1);
+        }
+    }
+
+    /// Resolve the arrangement into runtime sections and play the song.
+    fn play_song(&mut self) {
+        let sections: Vec<SongSection> = self
+            .project
+            .arrangement
+            .iter()
+            .filter_map(|s| {
+                self.project.loops.get(s.loop_index).map(|nl| SongSection {
+                    loop_data: nl.data.clone(),
+                    repeats: s.repeats.max(1),
+                })
+            })
+            .collect();
+        if sections.is_empty() {
+            self.project_status = "Add sections to the song first.".into();
+            return;
+        }
+        let _ = self.tx.send(Command::SetSong(sections));
+        let _ = self.tx.send(Command::PlaySong);
+        self.project_status = "Playing song…".into();
     }
 
     fn connect_midi(&mut self, index: usize) {
@@ -497,6 +543,7 @@ impl App {
                 self.project = Project {
                     name: "Untitled".into(),
                     loops: Vec::new(),
+                    arrangement: Vec::new(),
                 };
                 self.project_name = "Untitled".into();
                 self.project_status = "New project.".into();
@@ -561,14 +608,120 @@ impl App {
                 self.load_loop_into_studio(i);
             }
             if let Some(i) = remove {
-                self.project.loops.remove(i);
+                self.remove_loop(i);
             }
         }
+
+        self.arrangement_ui(ui);
 
         if !self.project_status.is_empty() {
             ui.label(egui::RichText::new(&self.project_status).weak().small());
         }
         ui.add_space(2.0);
+    }
+
+    /// The song arranger: a linear timeline of (loop × repeats) sections.
+    fn arrangement_ui(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        let playing_section = self.view.as_ref().and_then(|v| v.song_section());
+
+        ui.horizontal(|ui| {
+            ui.strong("Song");
+            if ui.button("▶ Play song").clicked() {
+                self.play_song();
+            }
+            if ui.button("■ Stop").clicked() {
+                let _ = self.tx.send(Command::Stop);
+            }
+            ui.separator();
+
+            if self.project.loops.is_empty() {
+                ui.label(egui::RichText::new("add a loop first").weak().small());
+            } else {
+                ui.label("Add:");
+                if self.arrange_loop_sel >= self.project.loops.len() {
+                    self.arrange_loop_sel = 0;
+                }
+                let sel = self.project.loops[self.arrange_loop_sel].name.clone();
+                egui::ComboBox::from_id_salt("arrange_loop")
+                    .selected_text(sel)
+                    .show_ui(ui, |ui| {
+                        for (i, nl) in self.project.loops.iter().enumerate() {
+                            ui.selectable_value(&mut self.arrange_loop_sel, i, &nl.name);
+                        }
+                    });
+                ui.label("×");
+                ui.add(egui::DragValue::new(&mut self.arrange_repeats).range(1..=64));
+                if ui.button("＋ Section").clicked() {
+                    self.project.arrangement.push(Section {
+                        loop_index: self.arrange_loop_sel,
+                        repeats: self.arrange_repeats.max(1),
+                    });
+                }
+            }
+        });
+
+        if self.project.arrangement.is_empty() {
+            ui.label(
+                egui::RichText::new("Song is empty — add sections (loop × repeats) to arrange one.")
+                    .weak()
+                    .small(),
+            );
+            return;
+        }
+
+        let mut remove = None;
+        let mut move_left = None;
+        let mut move_right = None;
+        egui::ScrollArea::horizontal()
+            .id_salt("arrangement_scroll")
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (i, sec) in self.project.arrangement.iter().enumerate() {
+                        let name = self
+                            .project
+                            .loops
+                            .get(sec.loop_index)
+                            .map(|nl| nl.name.as_str())
+                            .unwrap_or("?");
+                        let active = playing_section == Some(i);
+                        let mut frame = egui::Frame::group(ui.style());
+                        if active {
+                            frame = frame.fill(egui::Color32::from_rgb(60, 90, 60));
+                        }
+                        frame.show(ui, |ui| {
+                            let text = format!("{}. {} ×{}", i + 1, name, sec.repeats);
+                            if active {
+                                ui.colored_label(egui::Color32::from_rgb(140, 230, 140), text);
+                            } else {
+                                ui.label(text);
+                            }
+                            if ui.small_button("←").on_hover_text("Move left").clicked() {
+                                move_left = Some(i);
+                            }
+                            if ui.small_button("✕").on_hover_text("Remove section").clicked() {
+                                remove = Some(i);
+                            }
+                            if ui.small_button("→").on_hover_text("Move right").clicked() {
+                                move_right = Some(i);
+                            }
+                        });
+                    }
+                });
+            });
+        if let Some(i) = remove {
+            self.project.arrangement.remove(i);
+        }
+        if let Some(i) = move_left {
+            if i > 0 {
+                self.project.arrangement.swap(i, i - 1);
+            }
+        }
+        if let Some(i) = move_right {
+            if i + 1 < self.project.arrangement.len() {
+                self.project.arrangement.swap(i, i + 1);
+            }
+        }
     }
 
     /// The instrument-library bar: name + save, and load/delete of saved presets.

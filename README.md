@@ -66,7 +66,15 @@ instruments) into the project. Build up several loops, then **💾 Save** the
 project to a JSON file (in `projects/`, or `$FTM_SYNTH_PROJECTS`). **Open…**
 reloads a project; **▶** loads a saved loop back into the tracks to keep playing
 or editing. Loop timings are stored in seconds, so projects are portable across
-sample rates. (Arranging loops into a full song timeline is the next step.)
+sample rates.
+
+### Song arrangement
+
+The **Song** row builds a linear arrangement: pick a loop, set a repeat count,
+and **＋ Section** adds it to the timeline (reorder with ← →, remove with ✕).
+**▶ Play song** runs the sections straight through — loop A, then loop B ×4, then
+loop C ×4 … — switching at loop boundaries (sample-accurate); the playing section
+is highlighted. The arrangement saves with the project.
 
 ## Presets
 

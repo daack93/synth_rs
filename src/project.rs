@@ -61,13 +61,23 @@ pub struct NamedLoop {
     pub data: LoopData,
 }
 
-/// A project: a named collection of loops. (A song arrangement over these loops
-/// is a future addition — `#[serde(default)]` keeps old files loadable.)
+/// One section of a song arrangement: a loop (by index into `Project.loops`)
+/// played a number of times.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct Section {
+    pub loop_index: usize,
+    pub repeats: u32,
+}
+
+/// A project: a named collection of loops plus a song arrangement over them.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
     #[serde(default)]
     pub loops: Vec<NamedLoop>,
+    /// The song: an ordered list of sections played straight through.
+    #[serde(default)]
+    pub arrangement: Vec<Section>,
 }
 
 /// Directory projects are stored in: `$FTM_SYNTH_PROJECTS`, else `projects/`.
@@ -168,6 +178,7 @@ mod tests {
         let mut project = Project {
             name: "My Song".into(),
             loops: Vec::new(),
+            arrangement: Vec::new(),
         };
         project.loops.push(NamedLoop { name: "Groove A".into(), data: sample_loop() });
         let path = save_in(&dir, &project).unwrap();
