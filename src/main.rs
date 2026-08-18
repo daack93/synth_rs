@@ -1015,62 +1015,129 @@ impl App {
             }
         });
         ui.label(
-            egui::RichText::new("Pick each zone's sound from your presets. Overlapping ranges layer; a pad plays one fixed pitch.")
+            egui::RichText::new("Expand a zone to configure its model. Overlapping ranges layer; a pad plays one fixed pitch.")
                 .weak()
                 .small(),
         );
         ui.separator();
 
-        egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+        let reg = models::registry();
+        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
             for (zi, z) in self.kit_zones.iter_mut().enumerate() {
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut z.name).desired_width(110.0));
-                        egui::ComboBox::from_id_salt(("zone_snd", zi))
-                            .selected_text("◈ sound")
-                            .width(150.0)
-                            .show_ui(ui, |ui| {
-                                for p in presets.iter() {
-                                    if ui.selectable_label(p.model_id == z.model_id, &p.name).clicked() {
-                                        z.model_id = p.model_id.clone();
-                                        z.params = p.params.clone();
-                                        z.engine = p.engine.clone();
-                                        z.name = p.name.clone();
-                                        changed = true;
+                // Header summarizes the zone; expand to configure the model.
+                let model_name = reg
+                    .iter()
+                    .find(|m| m.id() == z.model_id)
+                    .map(|m| m.display_name())
+                    .unwrap_or("?");
+                let sound = match z.fixed_note {
+                    Some(n) => format!("pad {}", note_name(n)),
+                    None if z.transpose != 0 => format!("{:+} st", z.transpose),
+                    None => "chromatic".to_string(),
+                };
+                let title = format!(
+                    "{}  ·  {}–{}  ·  {} ({})",
+                    z.name,
+                    note_name(z.lo),
+                    note_name(z.hi),
+                    model_name,
+                    sound
+                );
+                egui::CollapsingHeader::new(title)
+                    .id_salt(("zone_hdr", zi))
+                    .show(ui, |ui| {
+                        // --- Identity + quick preset load + remove ---
+                        ui.horizontal(|ui| {
+                            ui.label("Name");
+                            ui.add(egui::TextEdit::singleline(&mut z.name).desired_width(110.0));
+                            egui::ComboBox::from_id_salt(("zone_preset", zi))
+                                .selected_text("load preset…")
+                                .width(140.0)
+                                .show_ui(ui, |ui| {
+                                    for p in presets.iter() {
+                                        if ui.selectable_label(false, &p.name).clicked() {
+                                            z.model_id = p.model_id.clone();
+                                            z.params = p.params.clone();
+                                            z.engine = p.engine.clone();
+                                            z.name = p.name.clone();
+                                            changed = true;
+                                        }
                                     }
-                                }
-                            });
-                        if ui.button("✕").on_hover_text("Remove zone").clicked() {
-                            remove = Some(zi);
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Keys");
-                        changed |= ui.add(egui::DragValue::new(&mut z.lo).range(0..=127)).changed();
-                        ui.label("–");
-                        changed |= ui.add(egui::DragValue::new(&mut z.hi).range(0..=127)).changed();
-                        ui.label(
-                            egui::RichText::new(format!("{}–{}", note_name(z.lo), note_name(z.hi)))
-                                .weak(),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        let mut pad = z.fixed_note.is_some();
-                        if ui.checkbox(&mut pad, "Pad").on_hover_text("Any key in range plays one fixed pitch (a drum pad).").changed() {
-                            z.fixed_note = if pad { Some(z.lo) } else { None };
+                                });
+                            if ui.button("✕ Remove").clicked() {
+                                remove = Some(zi);
+                            }
+                        });
+
+                        // --- Key range + pad / transpose ---
+                        ui.horizontal(|ui| {
+                            ui.label("Keys");
+                            changed |= ui.add(egui::DragValue::new(&mut z.lo).range(0..=127)).changed();
+                            ui.label("–");
+                            changed |= ui.add(egui::DragValue::new(&mut z.hi).range(0..=127)).changed();
+                            ui.label(
+                                egui::RichText::new(format!("{}–{}", note_name(z.lo), note_name(z.hi)))
+                                    .weak(),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            let mut pad = z.fixed_note.is_some();
+                            if ui
+                                .checkbox(&mut pad, "Pad")
+                                .on_hover_text("Any key in range plays one fixed pitch (a drum pad).")
+                                .changed()
+                            {
+                                z.fixed_note = if pad { Some(z.lo) } else { None };
+                                changed = true;
+                            }
+                            if let Some(fixed) = z.fixed_note.as_mut() {
+                                changed |= ui.add(egui::DragValue::new(fixed).range(0..=127)).changed();
+                                ui.label(egui::RichText::new(note_name(*fixed)).weak());
+                            } else {
+                                ui.label("transpose");
+                                changed |= ui
+                                    .add(egui::DragValue::new(&mut z.transpose).range(-48..=48).suffix(" st"))
+                                    .changed();
+                            }
+                        });
+
+                        ui.separator();
+
+                        // --- Model type + its full parameter editor ---
+                        ui.horizontal(|ui| {
+                            ui.strong("Model");
+                            egui::ComboBox::from_id_salt(("zone_model", zi))
+                                .selected_text(model_name)
+                                .width(200.0)
+                                .show_ui(ui, |ui| {
+                                    for m in reg.iter() {
+                                        if ui
+                                            .selectable_label(m.id() == z.model_id, m.display_name())
+                                            .clicked()
+                                            && m.id() != z.model_id
+                                        {
+                                            z.model_id = m.id().to_string();
+                                            z.params = m.to_json();
+                                            changed = true;
+                                        }
+                                    }
+                                });
+                        });
+                        // Rebuild a live model from the zone's JSON, edit it, write back.
+                        let mut model = models::model_from_id(&z.model_id, &z.params)
+                            .unwrap_or_else(models::default_model);
+                        ui.label(egui::RichText::new(model.description()).weak().small());
+                        if model.params_ui(ui) {
+                            z.params = model.to_json();
                             changed = true;
                         }
-                        if let Some(fixed) = z.fixed_note.as_mut() {
-                            changed |= ui.add(egui::DragValue::new(fixed).range(0..=127)).changed();
-                            ui.label(egui::RichText::new(note_name(*fixed)).weak());
-                        } else {
-                            ui.label("transpose");
-                            changed |= ui
-                                .add(egui::DragValue::new(&mut z.transpose).range(-48..=48).suffix(" st"))
-                                .changed();
+
+                        ui.separator();
+                        ui.strong("Output / Voice");
+                        if engine_sliders(ui, &mut z.engine) {
+                            changed = true;
                         }
                     });
-                });
             }
         });
 
