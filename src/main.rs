@@ -16,7 +16,6 @@ mod wav;
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
-use std::time::Instant;
 
 use eframe::egui;
 
@@ -30,11 +29,6 @@ use studio::{
     ClipView, Command, LiveConfig, LooperMode, NoteSpan, PlayMode, RegionOp, SharedView, TrackView,
     TransportState,
 };
-
-/// Spacebar hold thresholds: a quick press taps, a medium hold stops, a long
-/// hold resets.
-const HOLD_STOP: f32 = 0.4;
-const HOLD_RESET: f32 = 1.5;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -92,8 +86,6 @@ struct App {
 
     // Looper
     looper_mode: LooperMode,
-    /// When the spacebar went down (for tap / hold-stop / hold-reset).
-    space_down_at: Option<Instant>,
 
     // Preset library
     /// Presets found in the folder (refreshed on save/load/delete).
@@ -130,6 +122,10 @@ struct App {
     sel: Option<(usize, f32, f32)>,
     /// Drag anchor (loop fraction) while dragging out a selection.
     drag_start: Option<f32>,
+    /// The track whose controls the contextual panel shows.
+    sel_track: Option<usize>,
+    /// The track whose expanded editor section is open (via ✎ Edit).
+    edit_track_open: Option<usize>,
     /// Selected clip indices in the arrangement editor.
     sel_clips: Vec<usize>,
     /// Active clip drag: (clip index, is_resize, preview_start_s, preview_len_s).
@@ -198,7 +194,6 @@ impl App {
             live_is_kit: false,
             kit_zones: Vec::new(),
             looper_mode: LooperMode::Pedal,
-            space_down_at: None,
             preset_list,
             preset_name: String::new(),
             preset_status: String::new(),
@@ -218,6 +213,8 @@ impl App {
             whammy_up: 2.0,
             sel: None,
             drag_start: None,
+            sel_track: None,
+            edit_track_open: None,
             sel_clips: Vec::new(),
             arr_drag: None,
             region_dest: 0.0,
@@ -412,7 +409,6 @@ impl App {
             for note in stuck {
                 self.note_off(note);
             }
-            self.space_down_at = None;
             return;
         }
 
@@ -433,26 +429,6 @@ impl App {
                 if pressed && modifiers.command && key == egui::Key::Z {
                     let cmd = if modifiers.shift { Command::Redo } else { Command::Undo };
                     let _ = self.tx.send(cmd);
-                    continue;
-                }
-                // Spacebar = looper transport pedal: quick tap = primary action,
-                // hold ~0.4s = Stop, hold ~1.5s = Reset.
-                if key == egui::Key::Space {
-                    if pressed {
-                        if self.space_down_at.is_none() {
-                            self.space_down_at = Some(Instant::now());
-                        }
-                    } else if let Some(t0) = self.space_down_at.take() {
-                        let held = t0.elapsed().as_secs_f32();
-                        let cmd = if held >= HOLD_RESET {
-                            Command::Reset
-                        } else if held >= HOLD_STOP {
-                            Command::Stop
-                        } else {
-                            Command::Tap
-                        };
-                        let _ = self.tx.send(cmd);
-                    }
                     continue;
                 }
                 // Octave shift with Z / X.
@@ -1335,19 +1311,23 @@ impl App {
             }
 
             ui.separator();
-            if ui.button("Tap").clicked() {
+            if ui
+                .button("⏺ Rec / Play")
+                .on_hover_text("Idle → record the first loop → play → record over into a new track → tap again to finish. Each recorded take becomes a track.")
+                .clicked()
+            {
                 let _ = self.tx.send(Command::Tap);
             }
-            if ui.button("Stop").clicked() {
+            if ui.button("⏹ Stop").clicked() {
                 let _ = self.tx.send(Command::Stop);
             }
-            if ui.button("Reset").clicked() {
+            if ui.button("⟲ Reset").on_hover_text("Clear all tracks").clicked() {
                 let _ = self.tx.send(Command::Reset);
             }
             if self.looper_mode == LooperMode::Pedal && loop_secs > 0.0 {
                 if ui
                     .button("＋ Rec track")
-                    .on_hover_text("Record a new layer. In 🎬 Arrange mode it punches in at the playhead; in 🔁 Loop mode it records from the top.")
+                    .on_hover_text("Record another track. In 🎬 Arrange mode it punches in at the playhead; in 🔁 Loop mode it records from the top.")
                     .clicked()
                 {
                     let _ = self.tx.send(Command::ArmOverdub);
@@ -1355,11 +1335,11 @@ impl App {
             }
         });
 
-        let tap_hint = match self.looper_mode {
-            LooperMode::Pedal => "Space: tap = record → play → record over (new take), tap again to finish. Hold = Stop · hold longer = Reset.",
-            LooperMode::Overdub => "Space: tap = record base, then each tap layers a new track. Hold = Stop · hold longer = Reset.",
+        let hint = match self.looper_mode {
+            LooperMode::Pedal => "⏺ Rec/Play: first tap records the base loop, next plays it, next records over into a new track. Each take = a new track shown as a clip in the arrangement.",
+            LooperMode::Overdub => "⏺ Rec/Play: first tap records the base track, then each tap layers another track. Every take shows up as a clip.",
         };
-        ui.label(egui::RichText::new(tap_hint).weak().small());
+        ui.label(egui::RichText::new(hint).weak().small());
 
         self.tempo_bar(ui);
     }
@@ -1506,7 +1486,7 @@ impl App {
         });
         if tracks.is_empty() {
             ui.label(
-                egui::RichText::new("No loops yet — tap Space (or Tap) to record one.")
+                egui::RichText::new("No tracks yet. In 🔁 Loop mode, hit ⏺ Record (or ＋Rec track) to record a loop — it becomes a track shown here as a clip.")
                     .weak()
                     .small(),
             );
@@ -1514,137 +1494,18 @@ impl App {
         }
 
         self.arrangement_editor(ui, &tracks, &clips, loop_secs, play, arrange_mode);
+        self.seek_bar(ui, loop_secs, play);
         ui.separator();
 
-        ui.label(
-            egui::RichText::new("Below: each track's own loop. Drag across it to select a span, then chop/crop/duplicate/move. Move sliders while recording to automate.")
-                .weak()
-                .small(),
-        );
+        // Controls for the selected track / clip.
+        self.contextual_panel(ui, &tracks, &clips, play, loop_secs);
 
-        let mut toggle_mute = None;
-        let mut toggle_solo = None;
-        let mut mix_change: Option<(usize, f32, f32)> = None;
-        let mut delete = None;
-        let mut edit = None;
-        let mut clear_auto = None;
-        let mut drag_start = self.drag_start;
-        let mut new_sel: Option<Option<(usize, f32, f32)>> = None;
-        let pos_secs = play * loop_secs; // global playhead in seconds
-        for (i, t) in tracks.iter().enumerate() {
-            let editing = self.edit_target == Target::Track(i);
-            // The track's timeline is scaled to its own period (it may loop
-            // several times within the song).
-            let period = t.period.max(1e-6);
-            let track_play = (pos_secs % period) / period;
-            let sel_frac = self.sel.filter(|s| s.0 == i).map(|(_, a, b)| (a / period, b / period));
-            ui.horizontal(|ui| {
-                let mute = if t.muted { "🔇" } else { "🔊" };
-                if ui.button(mute).on_hover_text("Mute / unmute").clicked() {
-                    toggle_mute = Some(i);
-                }
-                let solo_btn = egui::Button::new("S").selected(t.solo);
-                if ui.add(solo_btn).on_hover_text("Solo").clicked() {
-                    toggle_solo = Some(i);
-                }
-                // Edit this track's instrument (highlighted when active).
-                let edit_btn = egui::Button::new("✎").selected(editing);
-                if ui
-                    .add(edit_btn)
-                    .on_hover_text("Edit this track's instrument")
-                    .clicked()
-                {
-                    edit = Some(i);
-                }
-                ui.allocate_ui_with_layout(
-                    egui::vec2(130.0, 24.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.label(&t.name);
-                        ui.label(
-                            egui::RichText::new(format!("{} · {:.2}s", t.instrument, t.period))
-                                .weak()
-                                .small(),
-                        );
-                    },
-                );
-                let resp = draw_track_timeline(ui, &t.notes, track_play, t.muted, sel_frac);
-                {
-                    let w = resp.rect.width().max(1.0);
-                    let frac_at = |x: f32| ((x - resp.rect.left()) / w).clamp(0.0, 1.0);
-                    if resp.drag_started() {
-                        if let Some(p) = resp.interact_pointer_pos() {
-                            drag_start = Some(frac_at(p.x));
-                        }
-                    }
-                    if resp.dragged() {
-                        if let (Some(st), Some(p)) = (drag_start, resp.interact_pointer_pos()) {
-                            let cur = frac_at(p.x);
-                            let (a, b) = (st.min(cur), st.max(cur));
-                            new_sel = Some(Some((i, a * period, b * period)));
-                        }
-                    }
-                    if resp.drag_stopped() {
-                        drag_start = None;
-                    }
-                }
-                // Compact per-track mixer: pan + volume.
-                let mut pan = t.pan;
-                let mut vol = t.volume;
-                let pan_resp = ui.add_sized(
-                    [64.0, 18.0],
-                    egui::Slider::new(&mut pan, -1.0..=1.0).show_value(false),
-                );
-                let vol_resp = ui.add_sized(
-                    [64.0, 18.0],
-                    egui::Slider::new(&mut vol, 0.0..=1.5).show_value(false),
-                );
-                if pan_resp.on_hover_text("Pan").changed() || vol_resp.on_hover_text("Volume").changed() {
-                    mix_change = Some((i, vol, pan));
-                }
-                if t.automation > 0
-                    && ui
-                        .button(format!("🎚 {}", t.automation))
-                        .on_hover_text("Recorded parameter automation — click to clear")
-                        .clicked()
-                {
-                    clear_auto = Some(i);
-                }
-                if ui.button("🗑").on_hover_text("Delete track").clicked() {
-                    delete = Some(i);
-                }
-            });
-            // Region-edit toolbar for the selected track.
-            if self.sel.map(|s| s.0) == Some(i) {
-                self.region_ops_row(ui, i, period);
-            }
-        }
-        self.drag_start = drag_start;
-        if let Some(sel) = new_sel {
-            self.sel = sel;
-        }
-        if let Some(i) = toggle_mute {
-            let _ = self.tx.send(Command::ToggleMute(i));
-        }
-        if let Some(i) = toggle_solo {
-            let _ = self.tx.send(Command::ToggleSolo(i));
-        }
-        if let Some((i, volume, pan)) = mix_change {
-            let _ = self.tx.send(Command::SetTrackMix { track: i, volume, pan });
-        }
-        if let Some(i) = clear_auto {
-            let _ = self.tx.send(Command::ClearTrackAutomation(i));
-        }
-        if let Some(i) = edit {
-            self.set_target(Target::Track(i), &tracks);
-        }
-        if let Some(i) = delete {
-            let _ = self.tx.send(Command::DeleteTrack(i));
-            if self.edit_target == Target::Track(i) {
-                self.edit_target = Target::Live;
-            }
-            if self.sel.map(|s| s.0) == Some(i) {
-                self.sel = None;
+        // Expanded editor for the track being edited (via ✎ Edit).
+        if let Some(i) = self.edit_track_open {
+            if i < tracks.len() {
+                self.track_editor_section(ui, i, &tracks);
+            } else {
+                self.edit_track_open = None;
             }
         }
     }
@@ -1672,9 +1533,9 @@ impl App {
         ui.horizontal(|ui| {
             ui.strong("Arrangement");
             let hint = if arrange_mode {
-                "drag to move · right edge to resize · click empty to seek · dbl-click empty lane to place"
+                "click to move the playback cursor · drag a clip to move · right edge to resize · dbl-click empty lane to place"
             } else {
-                "(Loop mode active — playback ignores placement; switch to 🎬 Arrange to hear it)"
+                "(Loop mode — playback ignores placement; switch to 🎬 Arrange to hear it)"
             };
             ui.label(egui::RichText::new(hint).weak().small());
         });
@@ -1860,7 +1721,7 @@ impl App {
                     } else if !self.sel_clips.contains(&ci) {
                         self.sel_clips = vec![ci];
                     }
-                    self.set_target(Target::Track(c.track), tracks);
+                    self.sel_track = Some(c.track);
                 } else {
                     self.arr_drag = None;
                 }
@@ -1909,6 +1770,7 @@ impl App {
             }
         } else if resp.clicked() {
             if let Some(p) = resp.interact_pointer_pos() {
+                // A click selects: a clip if it lands on one, else the lane's track.
                 if let Some((ci, _)) = hit_clip(p) {
                     if shift {
                         if let Some(k) = self.sel_clips.iter().position(|&x| x == ci) {
@@ -1919,85 +1781,220 @@ impl App {
                     } else {
                         self.sel_clips = vec![ci];
                     }
-                    self.set_target(Target::Track(clips[ci].track), tracks);
-                } else if lane_at(p).is_some() {
-                    let _ = self.tx.send(Command::Seek(time_at(p)));
+                    self.sel_track = Some(clips[ci].track);
+                } else if let Some(lane) = lane_at(p) {
                     self.sel_clips.clear();
+                    self.sel_track = Some(lane);
                 }
             }
         }
+        let _ = time_at; // (seeking lives in the seek bar below)
+        ui.add_space(4.0);
+    }
 
-        // Clip toolbar.
+    /// A thin scrubber below the arrangement: click or drag to move the playhead
+    /// across the whole song.
+    fn seek_bar(&mut self, ui: &mut egui::Ui, song_secs: f32, play: f32) {
+        let song = song_secs.max(0.001);
+        let width = ui.available_width().max(120.0);
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 14.0), egui::Sense::click_and_drag());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 3.0, egui::Color32::from_gray(34));
+        // Bar ticks.
+        let bar_secs =
+            60.0 / self.project.tempo.bpm.max(1.0) * self.project.tempo.beats_per_bar.max(1) as f32;
+        if bar_secs > 0.0 {
+            let mut b = 0.0;
+            while b <= song && (b / bar_secs) < 512.0 {
+                let x = rect.left() + (b / song) * rect.width();
+                painter.vline(x, rect.y_range(), egui::Stroke::new(1.0_f32, egui::Color32::from_gray(48)));
+                b += bar_secs;
+            }
+        }
+        // Playhead marker.
+        let px = rect.left() + play.clamp(0.0, 1.0) * rect.width();
+        painter.vline(px, rect.y_range(), egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(240, 240, 120)));
+        if resp.clicked() || resp.dragged() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let frac = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                let _ = self.tx.send(Command::Seek(frac * song));
+            }
+        }
+    }
+
+    /// Controls for the currently-selected track and clip, always on screen.
+    fn contextual_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        tracks: &[TrackView],
+        clips: &[ClipView],
+        play: f32,
+        song_secs: f32,
+    ) {
+        // Keep the selection valid; default to the first track.
+        if self.sel_track.map(|i| i >= tracks.len()).unwrap_or(true) {
+            self.sel_track = (!tracks.is_empty()).then_some(0);
+        }
+        let Some(ti) = self.sel_track else { return };
+        let t = &tracks[ti];
+
+        // --- Track row ---
+        let mut delete = false;
         ui.horizontal(|ui| {
-            let has = !self.sel_clips.is_empty();
-            ui.label(egui::RichText::new(format!("{} clip(s) selected", self.sel_clips.len())).small());
-            if ui.add_enabled(has, egui::Button::new("Duplicate → playhead")).clicked() {
-                let dest = play * song;
-                let first = self.sel_clips[0];
-                let _ = self.tx.send(Command::DuplicateClip { index: first, dest });
+            ui.strong(&t.name);
+            ui.label(egui::RichText::new(format!("· {} · {:.2}s loop", t.instrument, t.period)).weak().small());
+            ui.separator();
+            let mute = if t.muted { "🔇" } else { "🔊" };
+            if ui.button(mute).on_hover_text("Mute / unmute").clicked() {
+                let _ = self.tx.send(Command::ToggleMute(ti));
             }
-            if ui.add_enabled(has, egui::Button::new("🗑 Delete clip")).clicked() {
-                let mut idxs = self.sel_clips.clone();
-                idxs.sort_unstable();
-                for i in idxs.into_iter().rev() {
-                    let _ = self.tx.send(Command::RemoveClip { index: i });
+            if ui.add(egui::Button::new("S").selected(t.solo)).on_hover_text("Solo").clicked() {
+                let _ = self.tx.send(Command::ToggleSolo(ti));
+            }
+            let editing = self.edit_track_open == Some(ti);
+            if ui.add(egui::Button::new("✎ Edit").selected(editing)).on_hover_text("Edit this track's notes + instrument").clicked() {
+                if editing {
+                    self.edit_track_open = None;
+                } else {
+                    self.edit_track_open = Some(ti);
+                    self.set_target(Target::Track(ti), tracks);
                 }
-                self.sel_clips.clear();
             }
-            if has && ui.button("Clear sel").clicked() {
-                self.sel_clips.clear();
+            if t.automation > 0
+                && ui.button(format!("🎚 {}", t.automation)).on_hover_text("Clear recorded automation").clicked()
+            {
+                let _ = self.tx.send(Command::ClearTrackAutomation(ti));
+            }
+            if ui.button("🗑 Delete track").clicked() {
+                delete = true;
+            }
+        });
+        ui.horizontal(|ui| {
+            let mut vol = t.volume;
+            let mut pan = t.pan;
+            let vc = ui.add(egui::Slider::new(&mut vol, 0.0..=1.5).text("Vol").clamping(egui::SliderClamping::Never)).changed();
+            let pc = ui.add(egui::Slider::new(&mut pan, -1.0..=1.0).text("Pan")).changed();
+            if vc || pc {
+                let _ = self.tx.send(Command::SetTrackMix { track: ti, volume: vol, pan });
+            }
+            let mut fi = t.fade_in;
+            let mut fo = t.fade_out;
+            ui.separator();
+            ui.label("Fade");
+            let fic = ui.add(egui::DragValue::new(&mut fi).range(0.0..=10.0).speed(0.05).prefix("in ").suffix("s")).changed();
+            let foc = ui.add(egui::DragValue::new(&mut fo).range(0.0..=10.0).speed(0.05).prefix("out ").suffix("s")).changed();
+            if fic || foc {
+                let _ = self.tx.send(Command::SetTrackFades { track: ti, fade_in: fi, fade_out: fo });
             }
         });
 
-        // Per-clip edit layer (one clip selected).
+        // --- Clip row ---
         if self.sel_clips.len() == 1 {
-            let ci = self.sel_clips[0];
-            if let Some(c) = clips.get(ci).cloned() {
-                let tname = tracks.get(c.track).map(|t| t.name.clone()).unwrap_or_default();
+            if let Some(c) = clips.get(self.sel_clips[0]).cloned() {
+                let ci = self.sel_clips[0];
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(format!("Clip · {tname}:")).small());
+                    ui.label(egui::RichText::new("Clip:").small());
                     let mut tr = c.transpose;
                     let mut vl = c.vel;
-                    let a = ui.add(egui::DragValue::new(&mut tr).range(-24..=24).suffix(" st"))
-                        .on_hover_text("Transpose this clip (stays linked to the loop)");
-                    let b = ui.add(egui::DragValue::new(&mut vl).range(0.0..=2.0).speed(0.02).prefix("×"))
-                        .on_hover_text("Velocity scale for this clip");
-                    if a.changed() || b.changed() {
+                    let ca = ui.add(egui::DragValue::new(&mut tr).range(-24..=24).suffix(" st")).on_hover_text("Transpose (linked to the loop)").changed();
+                    let cb = ui.add(egui::DragValue::new(&mut vl).range(0.0..=2.0).speed(0.02).prefix("×")).on_hover_text("Velocity").changed();
+                    if ca || cb {
                         let _ = self.tx.send(Command::SetClipLayer { index: ci, transpose: tr, vel: vl });
                     }
-                    ui.separator();
                     if c.unique {
-                        ui.label(egui::RichText::new("🔓 unique notes").small());
-                    } else if ui
-                        .button("Make unique")
-                        .on_hover_text("Fork this clip's notes so edits don't touch the loop or other clips")
-                        .clicked()
-                    {
+                        ui.label(egui::RichText::new("🔓 unique").small());
+                    } else if ui.button("Make unique").on_hover_text("Fork this clip's notes for independent editing").clicked() {
                         let _ = self.tx.send(Command::MakeClipUnique { index: ci });
                     }
+                    ui.separator();
+                    if ui.button("Duplicate →").on_hover_text("Copy to the playhead").clicked() {
+                        let _ = self.tx.send(Command::DuplicateClip { index: ci, dest: play * song_secs.max(0.001) });
+                    }
+                    if ui.button("🗑 Delete clip").clicked() {
+                        let _ = self.tx.send(Command::RemoveClip { index: ci });
+                        self.sel_clips.clear();
+                    }
                 });
-                // Chop this clip using the loop-editor selection, if it's on this track.
+                // Per-clip chop, using a range selected in the track editor (✎).
                 if let Some((st, sa, sb)) = self.sel {
                     if st == c.track {
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(format!("chop clip ⟦{sa:.2}–{sb:.2}s⟧:")).small());
+                            ui.label(egui::RichText::new(format!("chop this clip ⟦{sa:.2}–{sb:.2}s⟧:")).small());
                             if ui.button("Crop").clicked() {
                                 let _ = self.tx.send(Command::ClipRegionEdit { index: ci, op: RegionOp::Keep { a: sa, b: sb } });
                             }
-                            if ui.button("Delete").clicked() {
+                            if ui.button("Delete range").clicked() {
                                 let _ = self.tx.send(Command::ClipRegionEdit { index: ci, op: RegionOp::Delete { a: sa, b: sb } });
                             }
                             if ui.button("Reverse").clicked() {
                                 let _ = self.tx.send(Command::ClipRegionEdit { index: ci, op: RegionOp::Reverse { a: sa, b: sb } });
                             }
                         });
-                    } else {
-                        ui.label(egui::RichText::new("(select a range on this clip's track below to chop it)").weak().small());
                     }
                 }
             }
+        } else if self.sel_clips.len() > 1 {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("{} clips selected", self.sel_clips.len())).small());
+                if ui.button("🗑 Delete clips").clicked() {
+                    let mut idxs = self.sel_clips.clone();
+                    idxs.sort_unstable();
+                    for i in idxs.into_iter().rev() {
+                        let _ = self.tx.send(Command::RemoveClip { index: i });
+                    }
+                    self.sel_clips.clear();
+                }
+            });
         }
-        ui.add_space(4.0);
+
+        if delete {
+            let _ = self.tx.send(Command::DeleteTrack(ti));
+            if self.edit_track_open == Some(ti) {
+                self.edit_track_open = None;
+            }
+            if self.edit_target == Target::Track(ti) {
+                self.edit_target = Target::Live;
+            }
+            self.sel_track = None;
+            self.sel_clips.clear();
+        }
+    }
+
+    /// The expanded editor for one track: its loop's note timeline + chop tools
+    /// (its instrument is edited in the right-hand panel).
+    fn track_editor_section(&mut self, ui: &mut egui::Ui, i: usize, tracks: &[TrackView]) {
+        let t = &tracks[i];
+        let period = t.period.max(1e-6);
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.strong(format!("Editing loop: {}", t.name));
+            ui.label(egui::RichText::new("drag across the loop to select a range, then chop below · instrument on the right").weak().small());
+        });
+        // Note timeline for this track's loop, with drag-to-select.
+        let pos_secs = self.view.as_ref().map(|v| v.play_fraction() * v.loop_seconds(self.sample_rate)).unwrap_or(0.0);
+        let track_play = (pos_secs % period) / period;
+        let sel_frac = self.sel.filter(|s| s.0 == i).map(|(_, a, b)| (a / period, b / period));
+        let resp = draw_track_timeline(ui, &t.notes, track_play, t.muted, sel_frac);
+        let w = resp.rect.width().max(1.0);
+        let frac_at = |x: f32| ((x - resp.rect.left()) / w).clamp(0.0, 1.0);
+        if resp.drag_started() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                self.drag_start = Some(frac_at(p.x));
+            }
+        }
+        if resp.dragged() {
+            if let (Some(st), Some(p)) = (self.drag_start, resp.interact_pointer_pos()) {
+                let cur = frac_at(p.x);
+                self.sel = Some((i, st.min(cur) * period, st.max(cur) * period));
+            }
+        }
+        if resp.drag_stopped() {
+            self.drag_start = None;
+        }
+        // Chop toolbar (targets this track's loop, or the selected clip if unique).
+        if self.sel.map(|s| s.0) == Some(i) {
+            self.region_ops_row(ui, i, period);
+        }
     }
 
     /// The chop/crop/rearrange toolbar shown under the selected track.
