@@ -15,7 +15,7 @@ use crate::models::basic_wave::{BasicWave, Waveform};
 use crate::models::drum_membrane::DrumMembrane;
 use crate::models::musical_string::MusicalString;
 use crate::models::pure_string::PureString;
-use crate::models::webster_horn::{Boundary, WebsterHorn};
+use crate::models::webster_horn::{Boundary, Wavefront, WebsterHorn};
 use crate::models::{model_from_id, FtmModel};
 use crate::instrument::EngineParams;
 
@@ -149,8 +149,9 @@ pub fn factory() -> Vec<Preset> {
                 resolution: 512,
                 damping: 10.0,
                 freq_dep_damping: -0.08,
-                visco_loss: 1.5,  // narrow leadpipe = warm boundary-layer loss
-                radiation: 1.0,   // bright, open bell
+                visco_loss: 1.5,             // narrow leadpipe = warm boundary-layer loss
+                radiation: 1.6,              // bright, open bell
+                wavefront: Wavefront::Spherical, // real bore: curved wavefronts at the bell
                 ..WebsterHorn::default()
             },
             eng(0.6, 30.0, 45.0),
@@ -169,16 +170,18 @@ pub fn factory() -> Vec<Preset> {
                 resolution: 400,
                 damping: 8.0,
                 freq_dep_damping: -0.10,
-                visco_loss: 2.0,  // long narrow tubing = mellow, stuffed
-                radiation: 0.7,
+                visco_loss: 2.5,             // long narrow tubing = mellow, stuffed
+                radiation: 0.5,              // dark, backward-facing bell
+                wavefront: Wavefront::Spherical,
                 ..WebsterHorn::default()
             },
             eng(0.55, 30.0, 150.0),
         ),
-        // Didgeridoo: near-lossless drone — barely damps, rings on and on.
+        // Didgeridoo: near-lossless drone — barely damps, rings on and on. A
+        // touch of wall loss for wooden warmth; almost no bell radiation.
         make(
             "Didgeridoo",
-            WebsterHorn { boundary: Boundary::Open, blow_pos: 0.10, r2: 0.5, r3: 0.5, length: 3.0, damping: 0.25, freq_dep_damping: -0.03, depth: 20, ..WebsterHorn::default() },
+            WebsterHorn { boundary: Boundary::Open, blow_pos: 0.10, r2: 0.5, r3: 0.5, length: 3.0, damping: 0.25, freq_dep_damping: -0.03, visco_loss: 0.6, radiation: 0.15, depth: 20, ..WebsterHorn::default() },
             eng(0.6, 20.0, 400.0),
         ),
         // ---- Basic Wave (reference oscillators) ----
