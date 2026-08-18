@@ -438,10 +438,17 @@ impl App {
                 key,
                 pressed,
                 repeat,
+                modifiers,
                 ..
             } = ev
             {
                 if repeat {
+                    continue;
+                }
+                // Undo / redo: ⌘Z (Ctrl+Z), ⌘⇧Z (Ctrl+Shift+Z).
+                if pressed && modifiers.command && key == egui::Key::Z {
+                    let cmd = if modifiers.shift { Command::Redo } else { Command::Undo };
+                    let _ = self.tx.send(cmd);
                     continue;
                 }
                 // Spacebar = looper transport pedal: quick tap = primary action,
@@ -1571,6 +1578,26 @@ impl App {
             {
                 self.master_volume = m;
                 let _ = self.tx.send(Command::SetMasterVolume(m));
+            }
+            ui.separator();
+            let (can_undo, can_redo) = self
+                .view
+                .as_ref()
+                .map(|v| (v.undo_depth() > 0, v.redo_depth() > 0))
+                .unwrap_or((false, false));
+            if ui
+                .add_enabled(can_undo, egui::Button::new("↶ Undo"))
+                .on_hover_text("Undo the last edit (⌘Z)")
+                .clicked()
+            {
+                let _ = self.tx.send(Command::Undo);
+            }
+            if ui
+                .add_enabled(can_redo, egui::Button::new("↷ Redo"))
+                .on_hover_text("Redo (⌘⇧Z)")
+                .clicked()
+            {
+                let _ = self.tx.send(Command::Redo);
             }
         });
         if tracks.is_empty() {

@@ -18,7 +18,7 @@
 //! * **Overdub** — tap: Record base, then each tap finalizes the current take and
 //!   starts a new track, layering hands-free.
 
-use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::instrument::{make_sine_table, EngineParams, Instrument};
@@ -112,6 +112,9 @@ pub enum Command {
     ToggleSolo(usize),
     /// Master output level (linear).
     SetMasterVolume(f32),
+    /// Undo / redo the last destructive edit.
+    Undo,
+    Redo,
     /// Swap a track's instrument model live (rebuilds its sounding voices).
     SetTrackModel(usize, Box<dyn FtmModel>),
     /// Update a track's engine params live.
@@ -244,6 +247,9 @@ pub struct SharedView {
     snapshot: Mutex<LoopData>,
     /// Current song section index while a song plays, else -1.
     song_section: AtomicI64,
+    /// Depth of the undo / redo stacks (for enabling the UI buttons).
+    undo_depth: AtomicUsize,
+    redo_depth: AtomicUsize,
 }
 
 impl SharedView {
@@ -256,7 +262,16 @@ impl SharedView {
             tracks: Mutex::new(Vec::new()),
             snapshot: Mutex::new(LoopData::default()),
             song_section: AtomicI64::new(-1),
+            undo_depth: AtomicUsize::new(0),
+            redo_depth: AtomicUsize::new(0),
         }
+    }
+
+    pub fn undo_depth(&self) -> usize {
+        self.undo_depth.load(Ordering::Relaxed)
+    }
+    pub fn redo_depth(&self) -> usize {
+        self.redo_depth.load(Ordering::Relaxed)
     }
 
     /// The section index currently playing in the song, or `None`.
@@ -340,6 +355,10 @@ pub struct Studio {
     /// Master output level (linear).
     master: f32,
 
+    /// Loop snapshots for undo / redo of destructive edits.
+    undo_stack: Vec<LoopData>,
+    redo_stack: Vec<LoopData>,
+
     view: Arc<SharedView>,
     /// Structure snapshot waiting to be published to the UI (flushed each render).
     pending_structure: Option<Vec<TrackView>>,
@@ -378,6 +397,8 @@ impl Studio {
             click_freq: 1000.0,
             click_decay: (-1.0 / (0.03 * sample_rate)).exp(),
             master: 1.0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             view: Arc::new(SharedView::new()),
             pending_structure: None,
             pending_snapshot: None,
@@ -479,7 +500,12 @@ impl Studio {
                 }
             }
             Command::SetMasterVolume(v) => self.master = v.max(0.0),
+            Command::Undo => self.undo(),
+            Command::Redo => self.redo(),
             Command::ClearTrackAutomation(i) => {
+                if i < self.tracks.len() {
+                    self.push_undo();
+                }
                 if let Some(t) = self.tracks.get_mut(i) {
                     t.auto.clear();
                     t.auto_cursor = 0;
@@ -490,6 +516,7 @@ impl Studio {
             }
             Command::DeleteTrack(i) => {
                 if i < self.tracks.len() {
+                    self.push_undo();
                     self.tracks.remove(i);
                     // Fix up the recording index if needed.
                     self.recording = match self.recording {
@@ -748,6 +775,7 @@ impl Studio {
         self.song_active = false;
         self.pre_roll = 0;
         self.pending_record = false;
+        self.clear_history();
         self.live.all_notes_off();
         self.mark_structure_dirty();
     }
@@ -755,8 +783,15 @@ impl Studio {
     /// Load a single saved loop (leaving any song stopped) and play it.
     fn load_loop(&mut self, data: LoopData) {
         self.song_active = false;
+        self.clear_history();
         self.install_loop(data);
         self.mark_structure_dirty();
+    }
+
+    /// Drop undo/redo history (called when the editing context changes).
+    fn clear_history(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
     }
 
     /// Start playing the installed song from the top.
@@ -767,6 +802,7 @@ impl Studio {
         self.song_active = true;
         self.song_pos = 0;
         self.song_rep = 0;
+        self.clear_history();
         let data = self.song[0].loop_data.clone();
         self.install_loop(data);
         self.mark_structure_dirty();
@@ -1007,9 +1043,40 @@ impl Studio {
         }
     }
 
+    /// Snapshot the current loop onto the undo stack before a destructive edit
+    /// (and drop the redo history). Bounded so it can't grow without limit.
+    fn push_undo(&mut self) {
+        const CAP: usize = 64;
+        let snap = self.snapshot_loop();
+        self.undo_stack.push(snap);
+        if self.undo_stack.len() > CAP {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    fn undo(&mut self) {
+        if let Some(prev) = self.undo_stack.pop() {
+            let cur = self.snapshot_loop();
+            self.redo_stack.push(cur);
+            self.install_loop(prev);
+            self.mark_structure_dirty();
+        }
+    }
+
+    fn redo(&mut self) {
+        if let Some(next) = self.redo_stack.pop() {
+            let cur = self.snapshot_loop();
+            self.undo_stack.push(cur);
+            self.install_loop(next);
+            self.mark_structure_dirty();
+        }
+    }
+
     /// Chop / crop / rearrange a track's timeline. Positions and loop length are
     /// preserved; only the selected notes + automation move.
     fn region_edit(&mut self, i: usize, op: RegionOp) {
+        self.push_undo();
         let sr = self.sr;
         let Some(len) = self.loop_len else { return };
         let pos = self.pos;
@@ -1249,6 +1316,7 @@ impl Studio {
             self.mark_structure_dirty();
             return;
         }
+        self.clear_history();
         let data = self.song[self.song_pos].loop_data.clone();
         self.install_loop(data); // swap in the next section's tracks
         self.mark_structure_dirty();
@@ -1284,6 +1352,8 @@ impl Studio {
             },
             Ordering::Relaxed,
         );
+        self.view.undo_depth.store(self.undo_stack.len(), Ordering::Relaxed);
+        self.view.redo_depth.store(self.redo_stack.len(), Ordering::Relaxed);
     }
 
     fn mark_structure_dirty(&mut self) {
@@ -1818,6 +1888,19 @@ mod tests {
             .map(|e| (e.t * 10.0).round() as i32)
             .collect();
         assert_eq!(n60, vec![5], "note 60 moved from 0.0 to 0.5, not duplicated");
+    }
+
+    #[test]
+    fn undo_redo_round_trips_a_region_edit() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(two_note_loop()));
+        assert_eq!(ons_of(&s), vec![60, 62]);
+        s.handle(Command::RegionEdit { track: 0, op: RegionOp::Delete { a: 0.4, b: 0.7 } });
+        assert_eq!(ons_of(&s), vec![60]);
+        s.handle(Command::Undo);
+        assert_eq!(ons_of(&s), vec![60, 62], "undo restores the deleted note");
+        s.handle(Command::Redo);
+        assert_eq!(ons_of(&s), vec![60], "redo re-applies the delete");
     }
 
     #[test]
