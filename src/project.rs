@@ -54,6 +54,10 @@ pub struct AutoPoint {
     pub value: f32,
 }
 
+fn default_volume() -> f32 {
+    1.0
+}
+
 /// One track of a loop: its instrument plus the notes it plays.
 ///
 /// A track is either a **single instrument** (`zones` empty — the top-level
@@ -69,6 +73,12 @@ pub struct LoopTrack {
     pub engine: EngineParams,
     #[serde(default)]
     pub muted: bool,
+    /// Mixer level (linear, 1.0 = unity).
+    #[serde(default = "default_volume")]
+    pub volume: f32,
+    /// Stereo pan, -1 (left) … 0 (centre) … +1 (right).
+    #[serde(default)]
+    pub pan: f32,
     #[serde(default)]
     pub zones: Vec<ZoneData>,
     /// Recorded parameter automation (per-knob moves over the loop).
@@ -234,6 +244,8 @@ mod tests {
                 params: serde_json::json!({}),
                 engine: EngineParams::default(),
                 muted: false,
+                volume: 1.0,
+                pan: 0.0,
                 zones: Vec::new(),
                 automation: vec![
                     AutoPoint { t: 0.1, target: "damping".into(), value: 5.0 },

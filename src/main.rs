@@ -119,6 +119,9 @@ struct App {
     /// Arranger: repeat count for the next section.
     arrange_repeats: u32,
 
+    /// Master output level (linear).
+    master_volume: f32,
+
     // Region editing (chop / crop / rearrange)
     /// Current timeline selection: (track index, start secs, end secs).
     sel: Option<(usize, f32, f32)>,
@@ -201,6 +204,7 @@ impl App {
             project_status: String::new(),
             arrange_loop_sel: 0,
             arrange_repeats: 4,
+            master_volume: 1.0,
             sel: None,
             drag_start: None,
             region_dest: 0.0,
@@ -1557,6 +1561,17 @@ impl App {
         ui.horizontal(|ui| {
             ui.strong("Tracks");
             ui.label(egui::RichText::new(format!("({})", tracks.len())).weak());
+            ui.separator();
+            ui.label("Master");
+            let mut m = self.master_volume;
+            if ui
+                .add(egui::Slider::new(&mut m, 0.0..=1.5).show_value(false))
+                .on_hover_text(format!("Master volume ({:.0}%)", m * 100.0))
+                .changed()
+            {
+                self.master_volume = m;
+                let _ = self.tx.send(Command::SetMasterVolume(m));
+            }
         });
         if tracks.is_empty() {
             ui.label(
@@ -1574,6 +1589,8 @@ impl App {
         );
 
         let mut toggle_mute = None;
+        let mut toggle_solo = None;
+        let mut mix_change: Option<(usize, f32, f32)> = None;
         let mut delete = None;
         let mut edit = None;
         let mut clear_auto = None;
@@ -1590,6 +1607,10 @@ impl App {
                 let mute = if t.muted { "🔇" } else { "🔊" };
                 if ui.button(mute).on_hover_text("Mute / unmute").clicked() {
                     toggle_mute = Some(i);
+                }
+                let solo_btn = egui::Button::new("S").selected(t.solo);
+                if ui.add(solo_btn).on_hover_text("Solo").clicked() {
+                    toggle_solo = Some(i);
                 }
                 // Edit this track's instrument (highlighted when active).
                 let edit_btn = egui::Button::new("✎").selected(editing);
@@ -1628,6 +1649,20 @@ impl App {
                         drag_start = None;
                     }
                 }
+                // Compact per-track mixer: pan + volume.
+                let mut pan = t.pan;
+                let mut vol = t.volume;
+                let pan_resp = ui.add_sized(
+                    [64.0, 18.0],
+                    egui::Slider::new(&mut pan, -1.0..=1.0).show_value(false),
+                );
+                let vol_resp = ui.add_sized(
+                    [64.0, 18.0],
+                    egui::Slider::new(&mut vol, 0.0..=1.5).show_value(false),
+                );
+                if pan_resp.on_hover_text("Pan").changed() || vol_resp.on_hover_text("Volume").changed() {
+                    mix_change = Some((i, vol, pan));
+                }
                 if t.automation > 0
                     && ui
                         .button(format!("🎚 {}", t.automation))
@@ -1651,6 +1686,12 @@ impl App {
         }
         if let Some(i) = toggle_mute {
             let _ = self.tx.send(Command::ToggleMute(i));
+        }
+        if let Some(i) = toggle_solo {
+            let _ = self.tx.send(Command::ToggleSolo(i));
+        }
+        if let Some((i, volume, pan)) = mix_change {
+            let _ = self.tx.send(Command::SetTrackMix { track: i, volume, pan });
         }
         if let Some(i) = clear_auto {
             let _ = self.tx.send(Command::ClearTrackAutomation(i));

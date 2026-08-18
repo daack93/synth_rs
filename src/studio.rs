@@ -27,6 +27,15 @@ use crate::models::{default_model, model_from_id, FtmModel};
 use crate::project::{AutoPoint, LoopData, LoopEvent, LoopTrack, TempoGrid, ZoneData};
 
 const TWO_PI_F64: f64 = std::f64::consts::TAU;
+const FRAC_1_SQRT_2: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
+/// Equal-power stereo pan gains for `pan` in `[-1, 1]` (centre = -3 dB each side,
+/// constant perceived loudness across the sweep).
+#[inline]
+fn pan_gains(pan: f32) -> (f32, f32) {
+    let angle = (pan.clamp(-1.0, 1.0) + 1.0) * (std::f32::consts::FRAC_PI_4);
+    (angle.cos(), angle.sin())
+}
 
 /// Which spacebar-tap behavior is active.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -97,6 +106,12 @@ pub enum Command {
     ClearTrackAutomation(usize),
     /// Chop / crop / rearrange a track's timeline.
     RegionEdit { track: usize, op: RegionOp },
+    /// Set a track's mixer level (linear) and pan (-1..=1).
+    SetTrackMix { track: usize, volume: f32, pan: f32 },
+    /// Toggle a track's solo.
+    ToggleSolo(usize),
+    /// Master output level (linear).
+    SetMasterVolume(f32),
     /// Swap a track's instrument model live (rebuilds its sounding voices).
     SetTrackModel(usize, Box<dyn FtmModel>),
     /// Update a track's engine params live.
@@ -165,6 +180,10 @@ struct Track {
     events: Vec<Event>,
     cursor: usize,
     muted: bool,
+    /// Mixer level (linear) and stereo pan (-1..=1), plus solo.
+    volume: f32,
+    pan: f32,
+    solo: bool,
     name: String,
     label: String,
 
@@ -208,6 +227,10 @@ pub struct TrackView {
     pub zones: Vec<ZoneData>,
     /// Number of recorded automation points on this track.
     pub automation: usize,
+    /// Mixer state.
+    pub volume: f32,
+    pub pan: f32,
+    pub solo: bool,
 }
 
 /// Lock-free scalars + an occasionally-rebuilt track list for the UI.
@@ -314,6 +337,9 @@ pub struct Studio {
     click_freq: f32,
     click_decay: f32,
 
+    /// Master output level (linear).
+    master: f32,
+
     view: Arc<SharedView>,
     /// Structure snapshot waiting to be published to the UI (flushed each render).
     pending_structure: Option<Vec<TrackView>>,
@@ -351,6 +377,7 @@ impl Studio {
             click_phase: 0.0,
             click_freq: 1000.0,
             click_decay: (-1.0 / (0.03 * sample_rate)).exp(),
+            master: 1.0,
             view: Arc::new(SharedView::new()),
             pending_structure: None,
             pending_snapshot: None,
@@ -438,6 +465,20 @@ impl Studio {
             Command::PlaySong => self.play_song(),
             Command::SetTempo(t) => self.tempo = t,
             Command::RegionEdit { track, op } => self.region_edit(track, op),
+            Command::SetTrackMix { track, volume, pan } => {
+                if let Some(t) = self.tracks.get_mut(track) {
+                    t.volume = volume;
+                    t.pan = pan.clamp(-1.0, 1.0);
+                    self.mark_structure_dirty();
+                }
+            }
+            Command::ToggleSolo(i) => {
+                if let Some(t) = self.tracks.get_mut(i) {
+                    t.solo = !t.solo;
+                    self.mark_structure_dirty();
+                }
+            }
+            Command::SetMasterVolume(v) => self.master = v.max(0.0),
             Command::ClearTrackAutomation(i) => {
                 if let Some(t) = self.tracks.get_mut(i) {
                     t.auto.clear();
@@ -812,6 +853,9 @@ impl Studio {
                 events,
                 cursor: 0,
                 muted: lt.muted,
+                volume: lt.volume,
+                pan: lt.pan,
+                solo: false,
                 name: lt.name,
                 label,
                 auto,
@@ -844,6 +888,8 @@ impl Studio {
                 params,
                 engine,
                 muted: t.muted,
+                volume: t.volume,
+                pan: t.pan,
                 zones,
                 automation: t
                     .auto
@@ -903,6 +949,9 @@ impl Studio {
             events: Vec::new(),
             cursor: 0,
             muted: false,
+            volume: 1.0,
+            pan: 0.0,
+            solo: false,
             name: format!("Track {}", idx + 1),
             label,
             auto: Vec::new(),
@@ -1065,17 +1114,33 @@ impl Studio {
                 self.metro_tick();
             }
 
-            let mut s = self.live.render_frame();
+            // Mix into a stereo bus: live is centred; each track is panned and
+            // levelled. Every track is still rendered (to advance envelopes) even
+            // when silenced by mute/solo, so unmuting doesn't pop.
+            let any_solo = self.tracks.iter().any(|t| t.solo);
+            let live_s = self.live.render_frame();
+            let (mut l, mut r) = (live_s * FRAC_1_SQRT_2, live_s * FRAC_1_SQRT_2);
             for t in &mut self.tracks {
                 let f = t.inst.render_frame();
-                if !t.muted {
-                    s += f;
+                let audible = !t.muted && (!any_solo || t.solo);
+                if audible {
+                    let (lg, rg) = pan_gains(t.pan);
+                    l += f * t.volume * lg;
+                    r += f * t.volume * rg;
                 }
             }
-            s += self.click_sample();
-            let sample = s.clamp(-1.0, 1.0);
-            for ch in frame.iter_mut() {
-                *ch = sample;
+            let click = self.click_sample() * FRAC_1_SQRT_2;
+            l = (l + click) * self.master;
+            r = (r + click) * self.master;
+            let (l, r) = (l.clamp(-1.0, 1.0), r.clamp(-1.0, 1.0));
+            for (ch, out) in frame.iter_mut().enumerate() {
+                *out = if channels < 2 {
+                    (l + r) * 0.5
+                } else if ch % 2 == 0 {
+                    l
+                } else {
+                    r
+                };
             }
         }
         self.publish_scalars();
@@ -1238,6 +1303,9 @@ impl Studio {
                     engine,
                     zones,
                     automation: t.auto.len(),
+                    volume: t.volume,
+                    pan: t.pan,
+                    solo: t.solo,
                 }
             })
             .collect();
@@ -1631,6 +1699,8 @@ mod tests {
                 params: DrumMembrane::default().to_json(),
                 engine: EngineParams::default(),
                 muted: false,
+                volume: 1.0,
+                pan: 0.0,
                 zones: Vec::new(),
                 // Delta of +100 from the base damping (default 8) → effective 108.
                 automation: vec![AutoPoint { t: 0.005, target: "damping".into(), value: 100.0 }],
@@ -1663,6 +1733,8 @@ mod tests {
                 params: DrumMembrane::default().to_json(),
                 engine: EngineParams::default(),
                 muted: false,
+                volume: 1.0,
+                pan: 0.0,
                 zones: Vec::new(),
                 automation: vec![AutoPoint { t: 0.005, target: "damping".into(), value: 100.0 }],
                 events: vec![LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
@@ -1690,6 +1762,8 @@ mod tests {
                 params: serde_json::json!({}),
                 engine: EngineParams::default(),
                 muted: false,
+                volume: 1.0,
+                pan: 0.0,
                 zones: Vec::new(),
                 automation: Vec::new(),
                 events: vec![
@@ -1763,6 +1837,58 @@ mod tests {
         assert!(got.contains(&(62, 0)), "note 62 → wrapped to 0.0s: {got:?}");
     }
 
+    fn held_note_loop(pan: f32, volume: f32) -> crate::project::LoopData {
+        use crate::project::{LoopData, LoopEvent, LoopTrack};
+        LoopData {
+            length: 0.1,
+            tracks: vec![LoopTrack {
+                name: "T".into(),
+                model_id: "musical_string".into(),
+                params: serde_json::json!({}),
+                engine: EngineParams::default(),
+                muted: false,
+                volume,
+                pan,
+                zones: Vec::new(),
+                automation: Vec::new(),
+                events: vec![LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
+            }],
+        }
+    }
+
+    fn stereo_energy(s: &mut Studio, frames: usize) -> (f32, f32) {
+        let mut buf = vec![0.0f32; frames * 2];
+        s.render(&mut buf, 2);
+        let (mut le, mut re) = (0.0f32, 0.0f32);
+        for f in buf.chunks(2) {
+            le += f[0].abs();
+            re += f[1].abs();
+        }
+        (le, re)
+    }
+
+    #[test]
+    fn pan_splits_the_stereo_field() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(held_note_loop(-1.0, 1.0)));
+        let (le, re) = stereo_energy(&mut s, 512);
+        assert!(le > re * 5.0 + 1.0, "hard-left: L≫R (L={le}, R={re})");
+    }
+
+    #[test]
+    fn master_volume_scales_output() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        let (l1, _) = stereo_energy(&mut s, 512);
+        assert!(l1 > 0.0, "makes sound at unity");
+
+        let mut s2 = Studio::new(48_000.0);
+        s2.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        s2.handle(Command::SetMasterVolume(0.0));
+        let (l0, r0) = stereo_energy(&mut s2, 512);
+        assert!(l0 + r0 < 1e-3, "silenced at master 0");
+    }
+
     #[test]
     fn loop_snapshot_and_load_roundtrip() {
         let mut s = Studio::new(48_000.0);
@@ -1802,6 +1928,8 @@ mod tests {
                 params: serde_json::json!({}),
                 engine: EngineParams::default(),
                 muted: false,
+                volume: 1.0,
+                pan: 0.0,
                 zones: Vec::new(),
                 automation: Vec::new(),
                 events: vec![
