@@ -397,6 +397,11 @@ impl Studio {
                         relabel = true;
                         t.label = m.display_name().to_string();
                     }
+                    // Re-tune the automation base so live edits stick and any
+                    // recorded deltas ride on top of the new base.
+                    t.model_id = m.id().to_string();
+                    t.base_json = m.to_json();
+                    t.cur_json = t.base_json.clone();
                     t.inst.set_model(m);
                 }
                 if relabel {
@@ -405,6 +410,8 @@ impl Studio {
             }
             Command::SetTrackEngine(i, e) => {
                 if let Some(t) = self.tracks.get_mut(i) {
+                    t.base_engine = e.clone();
+                    t.cur_engine = e.clone();
                     t.inst.set_engine(e);
                 }
             }
@@ -460,35 +467,38 @@ impl Studio {
     }
 
     /// While recording a single-instrument track, capture the model params that
-    /// changed (vs the live model's current values) as automation on that track.
+    /// changed as automation — stored as a **delta from the track's base value**,
+    /// so re-tuning the base later shifts the whole automated move with it.
     fn capture_model_auto(&mut self, new_model: &dyn FtmModel) {
         let Some(r) = self.recording else { return };
-        let old = self.live.parts().1; // Null for a kit → no numeric fields
+        let old = self.live.parts().1; // detect which field the user moved
         let new = new_model.to_json();
         let pos = self.pos;
         for (id, val) in numeric_fields(&new) {
             let changed = numeric_at(&old, &id).map(|o| o != val).unwrap_or(true);
             if changed {
-                self.tracks[r].auto.push(AutoEv { pos, target: id, value: val as f32 });
+                let base = numeric_at(&self.tracks[r].base_json, &id).unwrap_or(val);
+                self.tracks[r].auto.push(AutoEv { pos, target: id, value: (val - base) as f32 });
             }
         }
     }
 
-    /// While recording, capture engine parameters that changed as automation.
+    /// While recording, capture changed engine params as a delta from the base.
     fn capture_engine_auto(&mut self, new_engine: &EngineParams) {
         let Some(r) = self.recording else { return };
-        let (_, _, old, _) = self.live.parts();
+        let (_, _, live_old, _) = self.live.parts();
         let pos = self.pos;
-        let push = |name: &str, ov: f32, nv: f32, t: &mut Track| {
+        let base = self.tracks[r].base_engine.clone();
+        let t = &mut self.tracks[r];
+        let mut push = |name: &str, ov: f32, nv: f32, base_v: f32| {
             if ov != nv {
-                t.auto.push(AutoEv { pos, target: format!("eng:{name}"), value: nv });
+                t.auto.push(AutoEv { pos, target: format!("eng:{name}"), value: nv - base_v });
             }
         };
-        let t = &mut self.tracks[r];
-        push("gain", old.gain, new_engine.gain, t);
-        push("attack", old.attack_ms, new_engine.attack_ms, t);
-        push("release", old.release_ms, new_engine.release_ms, t);
-        push("retrigger", old.retrigger_ms, new_engine.retrigger_ms, t);
+        push("gain", live_old.gain, new_engine.gain, base.gain);
+        push("attack", live_old.attack_ms, new_engine.attack_ms, base.attack_ms);
+        push("release", live_old.release_ms, new_engine.release_ms, base.release_ms);
+        push("retrigger", live_old.retrigger_ms, new_engine.retrigger_ms, base.retrigger_ms);
     }
 
     // ---- tempo / grid helpers ----
@@ -1014,7 +1024,14 @@ impl Studio {
                         let ev = &t.auto[t.auto_cursor];
                         (ev.target.clone(), ev.value)
                     };
-                    let (m, e) = apply_auto(&mut t.cur_json, &mut t.cur_engine, &target, value);
+                    let (m, e) = apply_auto(
+                        &mut t.cur_json,
+                        &mut t.cur_engine,
+                        &t.base_json,
+                        &t.base_engine,
+                        &target,
+                        value,
+                    );
                     model_dirty |= m;
                     engine_dirty |= e;
                     t.auto_cursor += 1;
@@ -1175,33 +1192,51 @@ fn numeric_at(v: &serde_json::Value, id: &str) -> Option<f64> {
     v.get(id).and_then(|x| x.as_f64())
 }
 
-/// Apply one automation move to the evolving state, returning whether the model
-/// or the engine needs rebuilding. Integer-valued fields (mode counts) keep
-/// their integer JSON type so the model still deserializes.
+/// Apply one automation move — a **delta from the base** — to the evolving
+/// state (`effective = base + delta`), returning whether the model or the engine
+/// needs rebuilding. Because the delta rides on the current base, editing the
+/// track's base value shifts the automated move with it. Integer-valued fields
+/// (mode counts) keep their integer JSON type so the model still deserializes.
 fn apply_auto(
     cur_json: &mut serde_json::Value,
     cur_engine: &mut EngineParams,
+    base_json: &serde_json::Value,
+    base_engine: &EngineParams,
     target: &str,
-    value: f32,
+    delta: f32,
 ) -> (bool, bool) {
     if let Some(name) = target.strip_prefix("eng:") {
-        match name {
-            "gain" => cur_engine.gain = value,
-            "attack" => cur_engine.attack_ms = value,
-            "release" => cur_engine.release_ms = value,
-            "retrigger" => cur_engine.retrigger_ms = value,
+        let base = match name {
+            "gain" => base_engine.gain,
+            "attack" => base_engine.attack_ms,
+            "release" => base_engine.release_ms,
+            "retrigger" => base_engine.retrigger_ms,
             _ => return (false, false),
+        };
+        let v = base + delta;
+        match name {
+            "gain" => cur_engine.gain = v,
+            "attack" => cur_engine.attack_ms = v,
+            "release" => cur_engine.release_ms = v,
+            "retrigger" => cur_engine.retrigger_ms = v,
+            _ => {}
         }
         return (false, true);
     }
-    if let Some(slot) = cur_json.get_mut(target) {
-        let is_int = slot.is_i64() || slot.is_u64();
-        *slot = if is_int {
-            serde_json::json!(value.round() as i64)
-        } else {
-            serde_json::json!(value as f64)
+    if let Some(base_slot) = base_json.get(target) {
+        let (Some(base), is_int) = (base_slot.as_f64(), base_slot.is_i64() || base_slot.is_u64())
+        else {
+            return (false, false);
         };
-        return (true, false);
+        let v = base + delta as f64;
+        if let Some(slot) = cur_json.get_mut(target) {
+            *slot = if is_int {
+                serde_json::json!(v.round() as i64)
+            } else {
+                serde_json::json!(v)
+            };
+            return (true, false);
+        }
     }
     (false, false)
 }
@@ -1398,9 +1433,12 @@ mod tests {
         s.handle(Command::Tap); // close
 
         assert_eq!(s.tracks.len(), 1);
-        let targets: Vec<_> = s.tracks[0].auto.iter().map(|a| a.target.clone()).collect();
-        assert!(targets.iter().any(|t| t == "damping"), "model move captured: {targets:?}");
-        assert!(targets.iter().any(|t| t == "eng:gain"), "engine move captured: {targets:?}");
+        // Captured as deltas from the track's base: damping moved +10, gain to 1.5
+        // (base 0.6 → +0.9).
+        let damp = s.tracks[0].auto.iter().find(|a| a.target == "damping");
+        assert!(damp.is_some_and(|a| (a.value - 10.0).abs() < 1e-3), "damping delta ~+10");
+        let gain = s.tracks[0].auto.iter().find(|a| a.target == "eng:gain");
+        assert!(gain.is_some_and(|a| (a.value - 0.9).abs() < 1e-3), "gain delta ~+0.9");
 
         let snap = s.snapshot_loop();
         assert!(snap.tracks[0].automation.iter().any(|a| a.target == "damping"));
@@ -1420,20 +1458,52 @@ mod tests {
                 engine: EngineParams::default(),
                 muted: false,
                 zones: Vec::new(),
-                automation: vec![AutoPoint { t: 0.005, target: "damping".into(), value: 123.0 }],
+                // Delta of +100 from the base damping (default 8) → effective 108.
+                automation: vec![AutoPoint { t: 0.005, target: "damping".into(), value: 100.0 }],
                 events: vec![LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
             }],
         };
+        let base = DrumMembrane::default().to_json().get("damping").and_then(|v| v.as_f64()).unwrap();
         let mut s = Studio::new(48_000.0);
         s.handle(Command::LoadLoop(data));
         // Before the automation point (t=0.005 → 240 samples) it sits at the base.
         drain(&mut s, 100);
         let before = s.tracks[0].inst.parts().1.get("damping").and_then(|v| v.as_f64());
-        assert_ne!(before, Some(123.0), "not yet automated");
-        // After the point, the model has been rebuilt with the automated value.
+        assert_eq!(before, Some(base), "still at base before the point");
+        // After the point, effective = base + delta.
         drain(&mut s, 300);
         let after = s.tracks[0].inst.parts().1.get("damping").and_then(|v| v.as_f64());
-        assert_eq!(after, Some(123.0), "automation drove the param");
+        assert_eq!(after, Some(base + 100.0), "automation delta rides on the base");
+    }
+
+    #[test]
+    fn editing_the_base_shifts_the_automated_value() {
+        use crate::models::drum_membrane::DrumMembrane;
+        use crate::models::FtmModel;
+        use crate::project::{AutoPoint, LoopData, LoopEvent, LoopTrack};
+        let data = LoopData {
+            length: 0.05,
+            tracks: vec![LoopTrack {
+                name: "T".into(),
+                model_id: "drum_membrane".into(),
+                params: DrumMembrane::default().to_json(),
+                engine: EngineParams::default(),
+                muted: false,
+                zones: Vec::new(),
+                automation: vec![AutoPoint { t: 0.005, target: "damping".into(), value: 100.0 }],
+                events: vec![LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
+            }],
+        };
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(data));
+        // Re-tune the base live: damping 8 → 20.
+        let mut d = DrumMembrane::default();
+        d.damping = 20.0;
+        s.handle(Command::SetTrackModel(0, Box::new(d)));
+        // Past the point, effective = new base (20) + delta (100) = 120.
+        drain(&mut s, 400);
+        let after = s.tracks[0].inst.parts().1.get("damping").and_then(|v| v.as_f64());
+        assert_eq!(after, Some(120.0), "the recorded delta rides on the edited base");
     }
 
     #[test]
