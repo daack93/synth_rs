@@ -28,6 +28,19 @@ use super::{strike_amplitude, unbounded_slider, FtmModel, ModeBuffer, TICK_RATE}
 const TWO_PI: f64 = std::f64::consts::TAU;
 const SQRT_2: f64 = std::f64::consts::SQRT_2;
 
+/// How the keyboard drives the horn.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlayMode {
+    /// The whole instrument resizes so its fundamental resonance lands on the
+    /// played key — chromatic, like a valve/slide instrument.
+    Chromatic,
+    /// A fixed tube: the key selects (overblows) the nearest natural resonance,
+    /// and the tone is that resonance's harmonic series filtered by the tube —
+    /// a bugle/natural horn. Snaps pitch to the resonance ladder; the fixed
+    /// cutoff makes low notes dark/resonant and high notes bright.
+    Overblow,
+}
+
 /// Wavefront geometry used to build the horn potential.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Wavefront {
@@ -88,10 +101,16 @@ pub struct WebsterHorn {
     /// Wavefront geometry: flat discs, or curved spherical caps.
     #[serde(default = "default_wavefront")]
     pub wavefront: Wavefront,
+    /// Chromatic (resize per note) or Overblow (fixed tube, select a resonance).
+    #[serde(default = "default_playmode")]
+    pub play_mode: PlayMode,
 }
 
 fn default_wavefront() -> Wavefront {
     Wavefront::Planar
+}
+fn default_playmode() -> PlayMode {
+    PlayMode::Chromatic
 }
 
 impl Default for WebsterHorn {
@@ -115,6 +134,7 @@ impl Default for WebsterHorn {
             key_tracks_pitch: true,
             boundary: Boundary::Open,
             wavefront: Wavefront::Planar,
+            play_mode: PlayMode::Chromatic,
         }
     }
 }
@@ -276,6 +296,59 @@ impl FtmModel for WebsterHorn {
         // Empirical scales so a coefficient of ~1 gives a musical amount.
         const KEEFE_C: f64 = 0.02;
         const RAD_C: f64 = 5.0;
+        let keefe_rad = |fh: f64| KEEFE_C * visco * flare_loss * fh.sqrt() + RAD_C * radiation * (fh * 1e-3).powi(2);
+
+        // --- Overblow: fixed tube, the key selects a natural resonance ---
+        if self.play_mode == PlayMode::Overblow {
+            // Resonances at absolute Hz (fixed geometry).
+            let res: Vec<f64> = modes
+                .iter()
+                .map(|&(k, _)| c * k / TWO_PI)
+                .filter(|&f| f > 0.0)
+                .collect();
+            if res.is_empty() {
+                return;
+            }
+            // Snap the played note to the nearest resonance (log distance).
+            let ft = (freq_hz as f64).max(1.0).ln();
+            let f_sel = *res
+                .iter()
+                .min_by(|a, b| (a.ln() - ft).abs().partial_cmp(&(b.ln() - ft).abs()).unwrap())
+                .unwrap();
+            // Synthesize that resonance's harmonic series, each harmonic boosted
+            // when it lands on a tube resonance (so a harmonic tube sounds full,
+            // an odd-resonance tube like a cylinder-closed clarinet loses its
+            // even harmonics → hollow).
+            let width = 0.4; // resonance capture width, in units of f_sel
+            let mut amp_sum = 0.0f64;
+            let mut kept: Vec<(f64, f64, f64)> = Vec::new();
+            for h in 1..=self.depth.clamp(1, super::MAX_MODES) {
+                let fh = f_sel * h as f64;
+                if fh >= nyq {
+                    break;
+                }
+                let dist = res
+                    .iter()
+                    .map(|&fr| (fr - fh).abs())
+                    .fold(f64::INFINITY, f64::min)
+                    / f_sel;
+                let gain = (-(dist * dist) / (2.0 * width * width)).exp();
+                let amp = gain / h as f64;
+                if amp < 1e-3 {
+                    continue;
+                }
+                kept.push((fh, amp, d1.max(0.0) + keefe_rad(fh)));
+                amp_sum += amp;
+            }
+            if kept.is_empty() {
+                return;
+            }
+            let norm = if amp_sum > 1e-9 { amp_strike as f64 / amp_sum } else { amp_strike as f64 };
+            for (f, a, d) in kept {
+                out.push(f as f32, (a * norm) as f32, d as f32);
+            }
+            return;
+        }
 
         // First pass: frequency + weight, tracking the amplitude sum for normalizing.
         let mut kept: Vec<(f64, f64, f64)> = Vec::new(); // (freq, weight, decay)
@@ -340,6 +413,21 @@ impl FtmModel for WebsterHorn {
                 changed |= ui
                     .selectable_value(&mut self.wavefront, Wavefront::Spherical, "Spherical (curved)")
                     .on_hover_text("Curved spherical-cap wavefronts — more accurate high partials where the flare is steep.")
+                    .changed();
+            });
+        egui::ComboBox::from_label("Play")
+            .selected_text(match self.play_mode {
+                PlayMode::Chromatic => "Chromatic (resize)",
+                PlayMode::Overblow => "Overblow (fixed tube)",
+            })
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(&mut self.play_mode, PlayMode::Chromatic, "Chromatic (resize)")
+                    .on_hover_text("Instrument resizes per note — plays any pitch.")
+                    .changed();
+                changed |= ui
+                    .selectable_value(&mut self.play_mode, PlayMode::Overblow, "Overblow (fixed tube)")
+                    .on_hover_text("Fixed tube: the key selects the nearest natural resonance (a bugle). Pitch snaps to the resonance ladder.")
                     .changed();
             });
         ui.add_space(4.0);
@@ -684,6 +772,32 @@ mod tests {
         let flr_s = WebsterHorn { wavefront: Wavefront::Spherical, ..flr_p.clone() };
         let (fp, fs) = (ratio(&flr_p, &mut buf), ratio(&flr_s, &mut buf));
         assert!((fp - fs).abs() > 1e-2, "flared horn: spherical shifts partials ({fp} vs {fs})");
+    }
+
+    #[test]
+    fn overblow_snaps_and_shapes_by_resonances() {
+        let mut buf = ModeBuffer::default();
+        // Cylindrical closed-open tube (odd resonances only), played near its
+        // fundamental. Overblow should sound a harmonic series with the even
+        // harmonics suppressed (they fall between the odd resonances) — hollow.
+        let h = WebsterHorn {
+            play_mode: PlayMode::Overblow,
+            boundary: Boundary::Brass,
+            r1: 1.0,
+            r2: 0.0,
+            r3: 0.0,
+            length: 1.0,
+            wave_speed: 343.0,
+            depth: 8,
+            ..WebsterHorn::default()
+        };
+        h.excite(90.0, 1.0, 48_000.0, &mut buf); // ~ the fundamental resonance
+        assert!(buf.n >= 3, "expected a harmonic series");
+        // buf.freq[0] = fundamental (h=1), [1] = 2nd (even), [2] = 3rd (odd).
+        assert!((buf.freq[1] / buf.freq[0] - 2.0).abs() < 0.05, "2nd harmonic at 2×");
+        assert!(buf.amp[1].abs() < buf.amp[0].abs() * 0.25, "even harmonic suppressed");
+        assert!(buf.amp[2].abs() > buf.amp[1].abs() * 2.0, "odd harmonic present");
+        assert!(buf.sustain, "horn is sustained");
     }
 
     #[test]
