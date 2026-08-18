@@ -77,6 +77,17 @@ pub struct ModeBuffer {
     /// release, and `decay` shapes the steady-state spectrum instead of ending
     /// the note. Struck/plucked models (string, drum) leave this false.
     pub sustain: bool,
+
+    // --- Optional filtered-noise component (snare wires, cymbal wash, stick
+    // click, breath). `noise_level == 0` means none. ---
+    /// Overall noise amplitude (0 = no noise).
+    pub noise_level: f32,
+    /// Per-second decay of the noise burst (ignored when `sustain` holds it).
+    pub noise_decay: f32,
+    /// Band edges in Hz: the noise is high-passed at `noise_hp` and low-passed
+    /// at `noise_lp` (a band-pass).
+    pub noise_hp: f32,
+    pub noise_lp: f32,
 }
 
 impl Default for ModeBuffer {
@@ -87,6 +98,10 @@ impl Default for ModeBuffer {
             amp: [0.0; MAX_MODES],
             decay: [0.0; MAX_MODES],
             sustain: false,
+            noise_level: 0.0,
+            noise_decay: 0.0,
+            noise_hp: 20.0,
+            noise_lp: 20_000.0,
         }
     }
 }
@@ -95,6 +110,10 @@ impl ModeBuffer {
     pub fn clear(&mut self) {
         self.n = 0;
         self.sustain = false;
+        self.noise_level = 0.0;
+        self.noise_decay = 0.0;
+        self.noise_hp = 20.0;
+        self.noise_lp = 20_000.0;
     }
 
     /// Append one mode. Silently ignores modes past `MAX_MODES`.

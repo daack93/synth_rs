@@ -74,6 +74,15 @@ struct Voice {
     amp: [f32; MAX_MODES],
     env: [f32; MAX_MODES],
     dmul: [f32; MAX_MODES],
+    // Filtered-noise component.
+    noise_level: f32,
+    noise_env: f32,
+    noise_dmul: f32,
+    noise_hp_a: f32,
+    noise_lp_a: f32,
+    noise_hp_s: f32,
+    noise_lp_s: f32,
+    rng: u32,
 }
 
 impl Voice {
@@ -95,6 +104,14 @@ impl Voice {
             amp: [0.0; MAX_MODES],
             env: [0.0; MAX_MODES],
             dmul: [0.0; MAX_MODES],
+            noise_level: 0.0,
+            noise_env: 0.0,
+            noise_dmul: 0.0,
+            noise_hp_a: 0.0,
+            noise_lp_a: 0.0,
+            noise_hp_s: 0.0,
+            noise_lp_s: 0.0,
+            rng: 1,
         }
     }
 }
@@ -296,6 +313,30 @@ impl Instrument {
             }
         }
         v.n_modes = n;
+
+        // Filtered-noise component (snare wires, stick click, breath…).
+        v.noise_level = buf.noise_level.max(0.0);
+        if v.noise_level > 1e-6 {
+            let cutoff_a = |hz: f32| 1.0 - (-2.0 * std::f32::consts::PI * hz.max(1.0) / sr).exp();
+            v.noise_hp_a = cutoff_a(buf.noise_hp);
+            v.noise_lp_a = cutoff_a(buf.noise_lp);
+            v.noise_dmul = if buf.sustain {
+                1.0
+            } else {
+                (-buf.noise_decay.max(0.0) / sr).exp()
+            };
+            if fresh {
+                v.noise_env = 1.0;
+                v.noise_hp_s = 0.0;
+                v.noise_lp_s = 0.0;
+                // Seed the per-voice noise RNG (never zero).
+                v.rng = (self.age_counter as u32)
+                    .wrapping_mul(2_654_435_761)
+                    .wrapping_add(vi as u32 + 1)
+                    | 1;
+            }
+        }
+
         self.scratch = buf;
     }
 
@@ -336,6 +377,22 @@ impl Instrument {
                 v.env[i] = ENV_CAP;
             }
             if v.env[i] > 1e-4 {
+                alive = true;
+            }
+        }
+
+        // Filtered-noise component: white noise → band-pass (one-pole HP then LP).
+        if v.noise_level > 1e-6 {
+            v.rng ^= v.rng << 13;
+            v.rng ^= v.rng >> 17;
+            v.rng ^= v.rng << 5;
+            let white = (v.rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+            v.noise_hp_s += v.noise_hp_a * (white - v.noise_hp_s);
+            let hp = white - v.noise_hp_s;
+            v.noise_lp_s += v.noise_lp_a * (hp - v.noise_lp_s);
+            acc += v.noise_lp_s * v.noise_env * v.noise_level;
+            v.noise_env *= v.noise_dmul;
+            if v.noise_env > 1e-4 {
                 alive = true;
             }
         }
