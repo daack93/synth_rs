@@ -134,11 +134,18 @@ pub enum Command {
     Redo,
     /// Stretch the whole loop in time by `factor` (>1 = longer/slower).
     TimeStretch(f32),
-    /// Place a track's clip on the arrangement: `start` and `span` in seconds
-    /// (`span` 0 = fill/loop to the song end).
-    SetTrackPlacement { track: usize, start: f32, span: f32 },
     /// Switch the transport between Loop (all tracks from 0) and Arrange (clips).
     SetPlayMode(PlayMode),
+    /// Add a clip placing `track` at `start` for `length` seconds (0 = fill).
+    AddClip { track: usize, start: f32, length: f32 },
+    /// Move/resize the clip at `index`: new `start` and `length` (seconds).
+    SetClip { index: usize, start: f32, length: f32 },
+    /// Copy the clip at `index` to start at `dest` (seconds).
+    DuplicateClip { index: usize, dest: f32 },
+    /// Remove the clip at `index`.
+    RemoveClip { index: usize },
+    /// Set the playhead position (seconds).
+    Seek(f32),
     /// Set a track's fade-in / fade-out length in seconds.
     SetTrackFades { track: usize, fade_in: f32, fade_out: f32 },
     /// Swap a track's instrument model live (rebuilds its sounding voices).
@@ -301,9 +308,14 @@ pub struct TrackView {
     pub fade_out: f32,
     /// This track's own loop length in seconds.
     pub period: f32,
-    /// Clip placement on the arrangement (seconds); `span` 0 = fill.
+}
+
+/// One clip placement, for the arrangement editor (positions in seconds).
+#[derive(Clone)]
+pub struct ClipView {
+    pub track: usize,
     pub start: f32,
-    pub span: f32,
+    pub length: f32,
 }
 
 /// Lock-free scalars + an occasionally-rebuilt track list for the UI.
@@ -313,6 +325,8 @@ pub struct SharedView {
     pos: AtomicU64,
     loop_len: AtomicU64,
     tracks: Mutex<Vec<TrackView>>,
+    /// The clip arrangement, for the arrangement editor.
+    arrangement: Mutex<Vec<ClipView>>,
     /// A full serializable snapshot of the current loop (for saving to a project).
     snapshot: Mutex<LoopData>,
     /// Current song section index while a song plays, else -1.
@@ -320,6 +334,8 @@ pub struct SharedView {
     /// Depth of the undo / redo stacks (for enabling the UI buttons).
     undo_depth: AtomicUsize,
     redo_depth: AtomicUsize,
+    /// Play mode (0 = Loop, 1 = Arrange).
+    play_mode: AtomicU8,
 }
 
 impl SharedView {
@@ -330,10 +346,12 @@ impl SharedView {
             pos: AtomicU64::new(0),
             loop_len: AtomicU64::new(0),
             tracks: Mutex::new(Vec::new()),
+            arrangement: Mutex::new(Vec::new()),
             snapshot: Mutex::new(LoopData::default()),
             song_section: AtomicI64::new(-1),
             undo_depth: AtomicUsize::new(0),
             redo_depth: AtomicUsize::new(0),
+            play_mode: AtomicU8::new(1),
         }
     }
 
@@ -342,6 +360,12 @@ impl SharedView {
     }
     pub fn redo_depth(&self) -> usize {
         self.redo_depth.load(Ordering::Relaxed)
+    }
+    pub fn arrangement(&self) -> Vec<ClipView> {
+        self.arrangement.lock().map(|a| a.clone()).unwrap_or_default()
+    }
+    pub fn is_arrange_mode(&self) -> bool {
+        self.play_mode.load(Ordering::Relaxed) == 1
     }
 
     /// The section index currently playing in the song, or `None`.
@@ -441,6 +465,7 @@ pub struct Studio {
     view: Arc<SharedView>,
     /// Structure snapshot waiting to be published to the UI (flushed each render).
     pending_structure: Option<Vec<TrackView>>,
+    pending_arrangement: Option<Vec<ClipView>>,
     /// Serializable loop snapshot waiting to be published (for saving).
     pending_snapshot: Option<LoopData>,
 }
@@ -484,6 +509,7 @@ impl Studio {
             redo_stack: Vec::new(),
             view: Arc::new(SharedView::new()),
             pending_structure: None,
+            pending_arrangement: None,
             pending_snapshot: None,
         }
     }
@@ -609,22 +635,55 @@ impl Studio {
                 self.reset_cursors();
                 self.mark_structure_dirty();
             }
-            Command::SetTrackPlacement { track, start, span } => {
+            Command::AddClip { track, start, length } => {
                 if track < self.tracks.len() {
                     self.push_undo();
-                    let start = (start.max(0.0) * self.sr).round() as u64;
-                    let length = (span.max(0.0) * self.sr).round() as u64;
-                    // Edit this track's (first) clip, or create one.
-                    if let Some(c) = self.arrangement.iter_mut().find(|c| c.track == track) {
-                        c.start = start;
-                        c.length = length;
-                    } else {
-                        self.arrangement.push(Clip { track, start, length, was_active: false });
-                    }
-                    self.rebuild_playlist();
-                    self.recompute_song_len();
-                    self.mark_structure_dirty();
+                    let sr = self.sr;
+                    self.arrangement.push(Clip {
+                        track,
+                        start: (start.max(0.0) * sr).round() as u64,
+                        length: (length.max(0.0) * sr).round() as u64,
+                        was_active: false,
+                    });
+                    self.after_arrangement_change();
                 }
+            }
+            Command::SetClip { index, start, length } => {
+                if index < self.arrangement.len() {
+                    self.push_undo();
+                    let sr = self.sr;
+                    let c = &mut self.arrangement[index];
+                    c.start = (start.max(0.0) * sr).round() as u64;
+                    c.length = (length.max(0.0) * sr).round() as u64;
+                    self.after_arrangement_change();
+                }
+            }
+            Command::DuplicateClip { index, dest } => {
+                if index < self.arrangement.len() {
+                    self.push_undo();
+                    let sr = self.sr;
+                    let mut c = self.arrangement[index].clone();
+                    c.start = (dest.max(0.0) * sr).round() as u64;
+                    c.was_active = false;
+                    self.arrangement.push(c);
+                    self.after_arrangement_change();
+                }
+            }
+            Command::RemoveClip { index } => {
+                if index < self.arrangement.len() {
+                    self.push_undo();
+                    self.arrangement.remove(index);
+                    self.after_arrangement_change();
+                }
+            }
+            Command::Seek(secs) => {
+                let p = (secs.max(0.0) * self.sr).round() as u64;
+                self.pos = self.loop_len.map(|l| p.min(l.saturating_sub(1))).unwrap_or(0);
+                for t in &mut self.tracks {
+                    t.inst.all_notes_off();
+                }
+                self.reset_cursors();
+                self.publish_scalars();
             }
             Command::SetTrackFades { track, fade_in, fade_out } => {
                 if let Some(t) = self.tracks.get_mut(track) {
@@ -1295,6 +1354,13 @@ impl Studio {
         }
     }
 
+    /// Refresh runtime state after the arrangement (clips) changed.
+    fn after_arrangement_change(&mut self) {
+        self.rebuild_playlist();
+        self.recompute_song_len();
+        self.mark_structure_dirty();
+    }
+
     /// Rebuild the firing list for the current play mode: one clip per track from
     /// 0 in Loop mode, or the arrangement's clips in Arrange mode.
     fn rebuild_playlist(&mut self) {
@@ -1704,23 +1770,19 @@ impl Studio {
         );
         self.view.undo_depth.store(self.undo_stack.len(), Ordering::Relaxed);
         self.view.redo_depth.store(self.redo_stack.len(), Ordering::Relaxed);
+        self.view
+            .play_mode
+            .store(if self.play_mode == PlayMode::Arrange { 1 } else { 0 }, Ordering::Relaxed);
     }
 
     fn mark_structure_dirty(&mut self) {
         let sr = self.sr;
-        let arrangement = &self.arrangement;
         let views = self
             .tracks
             .iter()
-            .enumerate()
-            .map(|(ti, t)| {
+            .map(|t| {
                 let (model_id, params, engine, zones) = t.inst.parts();
                 let period = t.period.max(1) as f32;
-                // Surface the track's first clip placement for the current UI.
-                let clip = arrangement.iter().find(|c| c.track == ti);
-                let (start, span) = clip
-                    .map(|c| (c.start as f32 / sr, c.length as f32 / sr))
-                    .unwrap_or((0.0, 0.0));
                 TrackView {
                     name: t.name.clone(),
                     instrument: t.label.clone(),
@@ -1737,14 +1799,22 @@ impl Studio {
                     fade_in: t.fade_in,
                     fade_out: t.fade_out,
                     period: period / sr,
-                    start,
-                    span,
                 }
             })
             .collect();
         let snap = self.snapshot_loop();
+        let arr: Vec<ClipView> = self
+            .arrangement
+            .iter()
+            .map(|c| ClipView {
+                track: c.track,
+                start: c.start as f32 / self.sr,
+                length: c.length as f32 / self.sr,
+            })
+            .collect();
         self.pending_structure = Some(views);
         self.pending_snapshot = Some(snap);
+        self.pending_arrangement = Some(arr);
         self.publish_scalars();
     }
 
@@ -1752,6 +1822,11 @@ impl Studio {
         if self.pending_structure.is_some() {
             if let Ok(mut guard) = self.view.tracks.try_lock() {
                 *guard = self.pending_structure.take().unwrap();
+            }
+        }
+        if self.pending_arrangement.is_some() {
+            if let Ok(mut guard) = self.view.arrangement.try_lock() {
+                *guard = self.pending_arrangement.take().unwrap();
             }
         }
         if self.pending_snapshot.is_some() {
@@ -2445,6 +2520,23 @@ mod tests {
         assert_eq!(s.tracks[0].inst.active_voices(), 0, "silent before its start");
         drain(&mut s, 5_200); // ~0.208s — the clip has started
         assert!(s.tracks[0].inst.active_voices() > 0, "plays once its start is reached");
+    }
+
+    #[test]
+    fn clip_ops_edit_the_arrangement() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        assert_eq!(s.arrangement.len(), 1, "one clip auto-placed on load");
+        s.handle(Command::AddClip { track: 0, start: 0.4, length: 0.0 });
+        assert_eq!(s.arrangement.len(), 2);
+        s.handle(Command::SetClip { index: 1, start: 0.6, length: 0.2 });
+        assert_eq!(s.arrangement[1].start, (0.6 * 48_000.0) as u64);
+        assert_eq!(s.arrangement[1].length, (0.2 * 48_000.0) as u64);
+        s.handle(Command::DuplicateClip { index: 0, dest: 0.8 });
+        assert_eq!(s.arrangement.len(), 3);
+        assert_eq!(s.arrangement[2].start, (0.8 * 48_000.0) as u64);
+        s.handle(Command::RemoveClip { index: 0 });
+        assert_eq!(s.arrangement.len(), 2);
     }
 
     #[test]

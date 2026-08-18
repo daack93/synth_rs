@@ -27,8 +27,8 @@ use models::FtmModel;
 use presets::Preset;
 use project::{NamedLoop, Project, Section, TempoGrid, ZoneData};
 use studio::{
-    Command, LiveConfig, LooperMode, NoteSpan, PlayMode, RegionOp, SharedView, SongSection,
-    TrackView, TransportState,
+    ClipView, Command, LiveConfig, LooperMode, NoteSpan, PlayMode, RegionOp, SharedView,
+    SongSection, TrackView, TransportState,
 };
 
 /// Spacebar hold thresholds: a quick press taps, a medium hold stops, a long
@@ -134,8 +134,10 @@ struct App {
     sel: Option<(usize, f32, f32)>,
     /// Drag anchor (loop fraction) while dragging out a selection.
     drag_start: Option<f32>,
-    /// While dragging a clip in the arrangement: (track index, previewed start s).
-    drag_clip: Option<(usize, f32)>,
+    /// Selected clip indices in the arrangement editor.
+    sel_clips: Vec<usize>,
+    /// Active clip drag: (clip index, is_resize, preview_start_s, preview_len_s).
+    arr_drag: Option<(usize, bool, f32, f32)>,
     /// Destination time (secs) for duplicate / move.
     region_dest: f32,
     /// Note-edit params for the selection: transpose semitones, velocity factor.
@@ -223,7 +225,8 @@ impl App {
             whammy_up: 2.0,
             sel: None,
             drag_start: None,
-            drag_clip: None,
+            sel_clips: Vec::new(),
+            arr_drag: None,
             region_dest: 0.0,
             region_transpose: 0,
             region_vel: 1.0,
@@ -538,6 +541,7 @@ impl eframe::App for App {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.heading("FTM Synth");
             ui.label(
                 "A modal physical-modeling synth (Function Transformation Method). \
@@ -580,6 +584,7 @@ impl eframe::App for App {
 
             ui.add_space(10.0);
             self.midi_panel(ui);
+            });
         });
     }
 }
@@ -1596,8 +1601,14 @@ impl App {
 
     /// The recorded loop tracks, shown below the keyboard.
     fn tracks_panel(&mut self, ui: &mut egui::Ui) {
-        let (tracks, play, loop_secs) = match &self.view {
-            Some(v) => (v.tracks(), v.play_fraction(), v.loop_seconds(self.sample_rate)),
+        let (tracks, play, loop_secs, clips, arrange_mode) = match &self.view {
+            Some(v) => (
+                v.tracks(),
+                v.play_fraction(),
+                v.loop_seconds(self.sample_rate),
+                v.arrangement(),
+                v.is_arrange_mode(),
+            ),
             None => return,
         };
 
@@ -1672,7 +1683,8 @@ impl App {
             return;
         }
 
-        self.arrangement_overview(ui, &tracks, loop_secs, play);
+        self.arrangement_editor(ui, &tracks, &clips, loop_secs, play, arrange_mode);
+        ui.separator();
 
         ui.label(
             egui::RichText::new("Below: each track's own loop. Drag across it to select a span, then chop/crop/duplicate/move. Move sliders while recording to automate.")
@@ -1683,7 +1695,6 @@ impl App {
         let mut toggle_mute = None;
         let mut toggle_solo = None;
         let mut mix_change: Option<(usize, f32, f32)> = None;
-        let mut place_change: Option<(usize, f32, f32)> = None;
         let mut delete = None;
         let mut edit = None;
         let mut clear_auto = None;
@@ -1761,23 +1772,6 @@ impl App {
                 if pan_resp.on_hover_text("Pan").changed() || vol_resp.on_hover_text("Volume").changed() {
                     mix_change = Some((i, vol, pan));
                 }
-                // Precise clip placement: start + length (0 = loop to song end).
-                let mut start = t.start;
-                let mut span = t.span;
-                let s_resp = ui.add_sized(
-                    [56.0, 18.0],
-                    egui::DragValue::new(&mut start).range(0.0..=600.0).speed(0.01).prefix("@").suffix("s"),
-                );
-                let l_resp = ui.add_sized(
-                    [56.0, 18.0],
-                    egui::DragValue::new(&mut span).range(0.0..=600.0).speed(0.01).suffix("s")
-                        .custom_formatter(|n, _| if n < 0.005 { "loop".into() } else { format!("{n:.2}") }),
-                );
-                if s_resp.on_hover_text("Clip start").changed()
-                    || l_resp.on_hover_text("Clip length (loop = fill to song end)").changed()
-                {
-                    place_change = Some((i, start, span));
-                }
                 if t.automation > 0
                     && ui
                         .button(format!("🎚 {}", t.automation))
@@ -1808,9 +1802,6 @@ impl App {
         if let Some((i, volume, pan)) = mix_change {
             let _ = self.tx.send(Command::SetTrackMix { track: i, volume, pan });
         }
-        if let Some((i, start, span)) = place_change {
-            let _ = self.tx.send(Command::SetTrackPlacement { track: i, start, span });
-        }
         if let Some(i) = clear_auto {
             let _ = self.tx.send(Command::ClearTrackAutomation(i));
         }
@@ -1828,48 +1819,61 @@ impl App {
         }
     }
 
-    /// The arrangement: every track drawn as a clip on one shared time axis.
-    /// Drag a clip to move where it starts (snapped to bars); click to select.
-    fn arrangement_overview(
+    /// The arrangement editor: one lane per track on a shared time axis; clips
+    /// can be dragged to move, edge-dragged to resize, duplicated, and deleted.
+    /// Clicking empty timeline seeks; clicking a clip selects its track.
+    fn arrangement_editor(
         &mut self,
         ui: &mut egui::Ui,
         tracks: &[TrackView],
+        clips: &[ClipView],
         song_secs: f32,
         play: f32,
+        arrange_mode: bool,
     ) {
-        if song_secs <= 0.0 || tracks.is_empty() {
+        if tracks.is_empty() {
             return;
         }
-        ui.label(egui::RichText::new("Arrangement — drag a clip to move it, click to select").weak().small());
-        let lane_h = 22.0;
-        let label_w = 96.0;
-        let width = ui.available_width().max(240.0);
+        self.sel_clips.retain(|&i| i < clips.len());
+        let song = song_secs.max(0.001);
+        ui.horizontal(|ui| {
+            ui.strong("Arrangement");
+            let hint = if arrange_mode {
+                "drag to move · right edge to resize · click a clip to select · click empty to seek"
+            } else {
+                "(Loop mode active — playback ignores placement; switch to 🎬 Arrange to hear it)"
+            };
+            ui.label(egui::RichText::new(hint).weak().small());
+        });
+
+        let lane_h = 28.0;
+        let label_w = 110.0;
+        let width = ui.available_width().max(320.0);
         let (rect, resp) = ui.allocate_exact_size(
-            egui::vec2(width, tracks.len() as f32 * lane_h),
+            egui::vec2(width, tracks.len() as f32 * lane_h + 2.0),
             egui::Sense::click_and_drag(),
         );
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 3.0, egui::Color32::from_gray(24));
+        painter.rect_filled(rect, 3.0, egui::Color32::from_gray(22));
         let tl_x = rect.left() + label_w;
-        let tl_w = (rect.right() - tl_x - 4.0).max(10.0);
-        let x_of = |secs: f32| tl_x + (secs / song_secs).clamp(0.0, 1.0) * tl_w;
-        let secs_of = |x: f32| ((x - tl_x) / tl_w).clamp(0.0, 1.0) * song_secs;
+        let tl_w = (rect.right() - tl_x - 6.0).max(20.0);
+        let x_of = |s: f32| tl_x + (s / song).clamp(0.0, 1.0) * tl_w;
+        let secs_of = |x: f32| ((x - tl_x) / tl_w).clamp(0.0, 1.0) * song;
         let bar_secs =
             60.0 / self.project.tempo.bpm.max(1.0) * self.project.tempo.beats_per_bar.max(1) as f32;
+        let snap = |s: f32| if bar_secs > 0.0 { (s / bar_secs).round() * bar_secs } else { s };
 
-        // Bar gridlines.
-        if bar_secs > 0.0 {
-            let mut b = 0.0;
-            while b <= song_secs && (b / bar_secs) < 512.0 {
-                let x = x_of(b);
-                painter.vline(x, rect.y_range(), egui::Stroke::new(1.0_f32, egui::Color32::from_gray(40)));
-                b += bar_secs;
-            }
-        }
-
+        // Lane backgrounds + labels.
         let font = egui::FontId::proportional(11.0);
         for (i, t) in tracks.iter().enumerate() {
             let y0 = rect.top() + i as f32 * lane_h;
+            if i % 2 == 1 {
+                painter.rect_filled(
+                    egui::Rect::from_min_size(egui::pos2(tl_x, y0), egui::vec2(tl_w, lane_h)),
+                    0.0,
+                    egui::Color32::from_gray(30),
+                );
+            }
             painter.text(
                 egui::pos2(rect.left() + 3.0, y0 + lane_h * 0.5),
                 egui::Align2::LEFT_CENTER,
@@ -1877,37 +1881,61 @@ impl App {
                 font.clone(),
                 egui::Color32::from_gray(180),
             );
-            let start = match self.drag_clip {
-                Some((di, ds)) if di == i => ds,
-                _ => t.start,
+        }
+        // Bar gridlines.
+        if bar_secs > 0.0 {
+            let mut b = 0.0;
+            while b <= song && (b / bar_secs) < 512.0 {
+                painter.vline(x_of(b), rect.y_range(), egui::Stroke::new(1.0_f32, egui::Color32::from_gray(40)));
+                b += bar_secs;
+            }
+        }
+
+        // Clips.
+        for (ci, c) in clips.iter().enumerate() {
+            if c.track >= tracks.len() {
+                continue;
+            }
+            let t = &tracks[c.track];
+            let y0 = rect.top() + c.track as f32 * lane_h;
+            let default_len = if c.length > 0.0 { c.length } else { (song - c.start).max(0.0) };
+            // Live preview while dragging (this clip, or others in a multi-move).
+            let (start, len) = match self.arr_drag {
+                Some((di, resize, ps, pl)) if di == ci => (ps, if resize { pl } else { default_len }),
+                Some((di, false, ps, _)) if self.sel_clips.contains(&ci) && self.sel_clips.contains(&di) => {
+                    let delta = ps - clips.get(di).map(|d| d.start).unwrap_or(0.0);
+                    ((c.start + delta).max(0.0), default_len)
+                }
+                _ => (c.start, default_len),
             };
-            let span_secs = if t.span > 0.0 { t.span } else { (song_secs - start).max(0.0) };
             let cx0 = x_of(start);
-            let cx1 = x_of(start + span_secs);
-            let clip = egui::Rect::from_min_max(
+            let cx1 = x_of(start + len);
+            let clip_rect = egui::Rect::from_min_max(
                 egui::pos2(cx0, y0 + 2.0),
-                egui::pos2(cx1.max(cx0 + 3.0), y0 + lane_h - 2.0),
+                egui::pos2(cx1.max(cx0 + 4.0), y0 + lane_h - 2.0),
             );
-            let selected = self.edit_target == Target::Track(i);
+            let selected = self.sel_clips.contains(&ci);
             let fill = if t.muted {
                 egui::Color32::from_gray(70)
             } else if selected {
-                egui::Color32::from_rgb(80, 130, 90)
+                egui::Color32::from_rgb(90, 140, 100)
             } else {
                 egui::Color32::from_rgb(60, 90, 130)
             };
-            painter.rect_filled(clip, 2.0, fill);
-            // Notes, repeated across the clip's span (period-relative fractions).
+            painter.rect_filled(clip_rect, 3.0, fill);
+            if selected {
+                painter.rect_stroke(clip_rect, 3.0, egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(210, 235, 210)));
+            }
             let period = t.period.max(1e-6);
-            let reps = ((span_secs / period).ceil() as i32).clamp(1, 256);
+            let reps = ((len / period).ceil() as i32).clamp(1, 256);
             for r in 0..reps {
                 let base = start + r as f32 * period;
                 for n in &t.notes {
                     let ns = base + n.start * period;
-                    if ns >= start + span_secs {
+                    if ns >= start + len {
                         continue;
                     }
-                    let ne = (base + n.end * period).min(start + span_secs);
+                    let ne = (base + n.end * period).min(start + len);
                     let y = y0 + lane_h * 0.5;
                     painter.line_segment(
                         [egui::pos2(x_of(ns), y), egui::pos2(x_of(ne).max(x_of(ns) + 1.0), y)],
@@ -1917,42 +1945,134 @@ impl App {
             }
         }
         // Playhead.
-        let px = x_of(play * song_secs);
-        painter.vline(px, rect.y_range(), egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(240, 240, 120)));
+        painter.vline(x_of(play * song), rect.y_range(), egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(240, 240, 120)));
 
-        // Interaction.
-        let lane_at = |p: egui::Pos2| -> Option<usize> {
-            if p.x < tl_x {
-                return None;
+        // Topmost clip under a point (and whether over its right-edge resize zone).
+        let hit_clip = |p: egui::Pos2| -> Option<(usize, bool)> {
+            for (ci, c) in clips.iter().enumerate().rev() {
+                if c.track >= tracks.len() {
+                    continue;
+                }
+                let y0 = rect.top() + c.track as f32 * lane_h;
+                if p.y < y0 + 2.0 || p.y > y0 + lane_h - 2.0 {
+                    continue;
+                }
+                let len = if c.length > 0.0 { c.length } else { (song - c.start).max(0.0) };
+                let cx0 = x_of(c.start);
+                let cx1 = x_of(c.start + len).max(cx0 + 4.0);
+                if p.x >= cx0 && p.x <= cx1 {
+                    return Some((ci, p.x >= cx1 - 6.0));
+                }
             }
-            let i = ((p.y - rect.top()) / lane_h) as usize;
-            (i < tracks.len()).then_some(i)
+            None
         };
+
+        let shift = ui.input(|i| i.modifiers.shift);
         if resp.drag_started() {
             if let Some(p) = resp.interact_pointer_pos() {
-                if let Some(i) = lane_at(p) {
-                    self.drag_clip = Some((i, tracks[i].start));
-                    self.set_target(Target::Track(i), tracks);
+                if let Some((ci, resize)) = hit_clip(p) {
+                    let c = &clips[ci];
+                    let len = if c.length > 0.0 { c.length } else { (song - c.start).max(0.0) };
+                    self.arr_drag = Some((ci, resize, c.start, len));
+                    if shift {
+                        if let Some(k) = self.sel_clips.iter().position(|&x| x == ci) {
+                            self.sel_clips.remove(k);
+                        } else {
+                            self.sel_clips.push(ci);
+                        }
+                    } else if !self.sel_clips.contains(&ci) {
+                        self.sel_clips = vec![ci];
+                    }
+                    self.set_target(Target::Track(c.track), tracks);
+                } else {
+                    self.arr_drag = None;
                 }
             }
         }
         if resp.dragged() {
-            if let (Some((i, _)), Some(p)) = (self.drag_clip, resp.interact_pointer_pos()) {
-                let raw = secs_of(p.x);
-                let snapped = if bar_secs > 0.0 { (raw / bar_secs).round() * bar_secs } else { raw };
-                self.drag_clip = Some((i, snapped.max(0.0)));
+            if let (Some((ci, resize, _, _)), Some(p)) = (self.arr_drag, resp.interact_pointer_pos()) {
+                if resize {
+                    let len = snap((secs_of(p.x) - clips[ci].start).max(bar_secs.max(0.05)));
+                    self.arr_drag = Some((ci, true, clips[ci].start, len));
+                } else {
+                    let len = self.arr_drag.map(|d| d.3).unwrap_or(0.0);
+                    self.arr_drag = Some((ci, false, snap(secs_of(p.x)).max(0.0), len));
+                }
             }
         }
         if resp.drag_stopped() {
-            if let Some((i, start)) = self.drag_clip.take() {
-                let span = tracks.get(i).map(|t| t.span).unwrap_or(0.0);
-                let _ = self.tx.send(Command::SetTrackPlacement { track: i, start, span });
+            if let Some((ci, resize, start, len)) = self.arr_drag.take() {
+                if resize {
+                    let _ = self.tx.send(Command::SetClip { index: ci, start, length: len });
+                } else {
+                    let delta = start - clips[ci].start;
+                    let sel = if self.sel_clips.contains(&ci) { self.sel_clips.clone() } else { vec![ci] };
+                    for si in sel {
+                        if let Some(c) = clips.get(si) {
+                            let _ = self.tx.send(Command::SetClip {
+                                index: si,
+                                start: (c.start + delta).max(0.0),
+                                length: c.length,
+                            });
+                        }
+                    }
+                }
+            }
+        } else if resp.double_clicked() {
+            // Double-click an empty spot on a lane → place that track there.
+            if let Some(p) = resp.interact_pointer_pos() {
+                if hit_clip(p).is_none() && p.x >= tl_x {
+                    let lane = ((p.y - rect.top()) / lane_h) as usize;
+                    if lane < tracks.len() {
+                        let _ = self.tx.send(Command::AddClip {
+                            track: lane,
+                            start: snap(secs_of(p.x)).max(0.0),
+                            length: 0.0,
+                        });
+                    }
+                }
             }
         } else if resp.clicked() {
-            if let Some(i) = resp.interact_pointer_pos().and_then(lane_at) {
-                self.set_target(Target::Track(i), tracks);
+            if let Some(p) = resp.interact_pointer_pos() {
+                if let Some((ci, _)) = hit_clip(p) {
+                    if shift {
+                        if let Some(k) = self.sel_clips.iter().position(|&x| x == ci) {
+                            self.sel_clips.remove(k);
+                        } else {
+                            self.sel_clips.push(ci);
+                        }
+                    } else {
+                        self.sel_clips = vec![ci];
+                    }
+                    self.set_target(Target::Track(clips[ci].track), tracks);
+                } else if p.x >= tl_x {
+                    let _ = self.tx.send(Command::Seek(secs_of(p.x)));
+                    self.sel_clips.clear();
+                }
             }
         }
+
+        // Clip toolbar.
+        ui.horizontal(|ui| {
+            let has = !self.sel_clips.is_empty();
+            ui.label(egui::RichText::new(format!("{} clip(s) selected", self.sel_clips.len())).small());
+            if ui.add_enabled(has, egui::Button::new("Duplicate → playhead")).clicked() {
+                let dest = play * song;
+                let first = self.sel_clips[0];
+                let _ = self.tx.send(Command::DuplicateClip { index: first, dest });
+            }
+            if ui.add_enabled(has, egui::Button::new("🗑 Delete clip")).clicked() {
+                let mut idxs = self.sel_clips.clone();
+                idxs.sort_unstable();
+                for i in idxs.into_iter().rev() {
+                    let _ = self.tx.send(Command::RemoveClip { index: i });
+                }
+                self.sel_clips.clear();
+            }
+            if has && ui.button("Clear sel").clicked() {
+                self.sel_clips.clear();
+            }
+        });
         ui.add_space(4.0);
     }
 
