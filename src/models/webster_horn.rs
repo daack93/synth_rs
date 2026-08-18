@@ -112,7 +112,7 @@ impl FtmModel for WebsterHorn {
 
         let l = self.length.max(1e-3) as f64;
         let (r1, r2, r3) = (self.r1 as f64, self.r2 as f64, self.r3 as f64);
-        let n = self.resolution.clamp(16, 400);
+        let n = self.resolution.clamp(16, 512);
         let h = l / n as f64;
         let inv_h2 = 1.0 / (h * h);
         let v_at = |x: f64| {
@@ -137,13 +137,6 @@ impl FtmModel for WebsterHorn {
         let (m, node_start) = if brass { (n, 0usize) } else { (n - 1, 1usize) };
         let mut diag = vec![0.0f64; m];
         let mut off = vec![inv_h2; m];
-        let mut z: Vec<Vec<f64>> = (0..m)
-            .map(|i| {
-                let mut row = vec![0.0f64; m];
-                row[i] = 1.0;
-                row
-            })
-            .collect();
         for j in 0..m {
             let x = (j + node_start) as f64 * h;
             diag[j] = -2.0 * inv_h2 - v_at(x);
@@ -156,8 +149,12 @@ impl FtmModel for WebsterHorn {
             }
         }
 
-        if !tqli(&mut diag, &mut off, &mut z) {
-            return; // solver failed to converge (pathological params)
+        // Eigenvalues only — O(m²), so high resolution stays cheap. Keep `diag`
+        // and `off` intact for inverse iteration below.
+        let mut ev_d = diag.clone();
+        let mut ev_e = off.clone();
+        if !tqli(&mut ev_d, &mut ev_e, None) {
+            return; // failed to converge (pathological params)
         }
 
         // Excitation point → nearest unknown node (throat node gets the √2 scale
@@ -167,19 +164,21 @@ impl FtmModel for WebsterHorn {
             .clamp(0, m as i64 - 1) as usize;
         let throat_scale = if brass && blow_idx == 0 { SQRT_2 } else { 1.0 };
 
-        // Collect propagating modes (λ < 0): wavenumber k = √(−λ) and the
-        // eigenvector value at the blow point (excitation weight).
-        let mut modes: Vec<(f64, f64)> = Vec::with_capacity(m);
-        for j in 0..m {
-            if diag[j] < -1e-9 {
-                let k = (-diag[j]).sqrt();
-                modes.push((k, z[blow_idx][j] * throat_scale));
-            }
-        }
-        if modes.is_empty() {
+        // Propagating modes (λ < 0), lowest wavenumber first (λ nearest 0). For
+        // each kept mode, recover just its blow-point weight by inverse iteration
+        // (a couple of tridiagonal solves) — far cheaper than all eigenvectors.
+        let mut lambdas: Vec<f64> = ev_d.into_iter().filter(|&x| x < -1e-9).collect();
+        if lambdas.is_empty() {
             return;
         }
-        modes.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        lambdas.sort_by(|a, b| b.partial_cmp(a).unwrap()); // descending λ ⇒ ascending k
+        let take = self.depth.clamp(1, super::MAX_MODES).min(lambdas.len());
+        let mut modes: Vec<(f64, f64)> = Vec::with_capacity(take);
+        for &lambda in lambdas.iter().take(take) {
+            let k = (-lambda).sqrt();
+            let w = eigenvector_at(&diag, &off, lambda, blow_idx) * throat_scale;
+            modes.push((k, w));
+        }
 
         let k0 = modes[0].0;
         let c = self.wave_speed as f64;
@@ -264,7 +263,7 @@ impl FtmModel for WebsterHorn {
             .add(unbounded_slider(&mut self.depth, 1..=super::MAX_MODES, "Modes (DEPTH)"))
             .changed();
         changed |= ui
-            .add(unbounded_slider(&mut self.resolution, 16..=400, "Resolution"))
+            .add(unbounded_slider(&mut self.resolution, 16..=512, "Resolution"))
             .on_hover_text("Eigensolve grid size (accuracy vs. cost at note-on).")
             .changed();
         changed |= ui
@@ -304,6 +303,64 @@ impl FtmModel for WebsterHorn {
     }
 }
 
+/// Solve a symmetric tridiagonal system `A·x = rhs`, where `A` has diagonal
+/// `diag` and off-diagonals `off` (`off[j]` between rows `j-1` and `j`), via the
+/// Thomas algorithm. Returns false on a zero pivot.
+fn tridiag_solve(off: &[f64], diag: &[f64], rhs: &[f64], out: &mut [f64]) -> bool {
+    let n = diag.len();
+    if n == 0 {
+        return true;
+    }
+    let mut cp = vec![0.0f64; n];
+    let mut dp = vec![0.0f64; n];
+    let mut b = diag[0];
+    if b.abs() < 1e-300 {
+        return false;
+    }
+    cp[0] = if n > 1 { off[1] / b } else { 0.0 };
+    dp[0] = rhs[0] / b;
+    for j in 1..n {
+        b = diag[j] - off[j] * cp[j - 1];
+        if b.abs() < 1e-300 {
+            b = 1e-300;
+        }
+        cp[j] = if j < n - 1 { off[j + 1] / b } else { 0.0 };
+        dp[j] = (rhs[j] - off[j] * dp[j - 1]) / b;
+    }
+    out[n - 1] = dp[n - 1];
+    for j in (0..n - 1).rev() {
+        out[j] = dp[j] - cp[j] * out[j + 1];
+    }
+    true
+}
+
+/// The component at `node` of the (unit-norm) eigenvector for eigenvalue
+/// `lambda`, found by a couple of inverse-iteration steps on the shifted
+/// tridiagonal `(A − λ')`. Cheap: O(m) per step vs. O(m²) for a full solve.
+fn eigenvector_at(diag: &[f64], off: &[f64], lambda: f64, node: usize) -> f64 {
+    let m = diag.len();
+    if m == 0 {
+        return 0.0;
+    }
+    let shift = lambda + lambda.abs().max(1.0) * 1e-9 + 1e-12;
+    let dsh: Vec<f64> = diag.iter().map(|&d| d - shift).collect();
+    let mut x = vec![1.0 / (m as f64).sqrt(); m];
+    let mut y = vec![0.0f64; m];
+    for _ in 0..2 {
+        if !tridiag_solve(off, &dsh, &x, &mut y) {
+            break;
+        }
+        let norm = y.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if norm < 1e-300 {
+            break;
+        }
+        for (xi, yi) in x.iter_mut().zip(y.iter()) {
+            *xi = yi / norm;
+        }
+    }
+    x[node]
+}
+
 #[inline]
 fn pythag(a: f64, b: f64) -> f64 {
     let (a, b) = (a.abs(), b.abs());
@@ -321,9 +378,10 @@ fn pythag(a: f64, b: f64) -> f64 {
 ///
 /// `d`: diagonal (length n) → eigenvalues on output.
 /// `e`: off-diagonal (length n); `e[i]` connects `d[i-1]` and `d[i]` — destroyed.
-/// `z`: n×n identity on input → column `j` is the eigenvector for `d[j]`.
+/// `z`: `Some(n×n identity)` → columns become eigenvectors; `None` computes
+/// eigenvalues only (O(n²), used when eigenvectors are found separately).
 /// Returns false if it fails to converge.
-fn tqli(d: &mut [f64], e: &mut [f64], z: &mut [Vec<f64>]) -> bool {
+fn tqli(d: &mut [f64], e: &mut [f64], mut z: Option<&mut [Vec<f64>]>) -> bool {
     let n = d.len();
     if n == 0 {
         return true;
@@ -365,7 +423,7 @@ fn tqli(d: &mut [f64], e: &mut [f64], z: &mut [Vec<f64>]) -> bool {
             let mut broke_zero = false;
             let mut i = mm - 1;
             loop {
-                let mut f = s * e[i];
+                let f = s * e[i];
                 let b = c * e[i];
                 r = pythag(f, g);
                 e[i + 1] = r;
@@ -382,10 +440,12 @@ fn tqli(d: &mut [f64], e: &mut [f64], z: &mut [Vec<f64>]) -> bool {
                 p = s * r;
                 d[i + 1] = g + p;
                 g = c * r - b;
-                for k in 0..n {
-                    f = z[k][i + 1];
-                    z[k][i + 1] = s * z[k][i] + c * f;
-                    z[k][i] = c * z[k][i] - s * f;
+                if let Some(zz) = z.as_mut() {
+                    for k in 0..n {
+                        let f2 = zz[k][i + 1];
+                        zz[k][i + 1] = s * zz[k][i] + c * f2;
+                        zz[k][i] = c * zz[k][i] - s * f2;
+                    }
                 }
                 if i == l {
                     break;
@@ -424,7 +484,7 @@ mod tests {
                 row
             })
             .collect();
-        assert!(tqli(&mut d, &mut e, &mut z));
+        assert!(tqli(&mut d, &mut e, Some(&mut z)));
         let mut ks: Vec<f64> = d.iter().filter(|&&x| x < 0.0).map(|&x| (-x).sqrt()).collect();
         ks.sort_by(|a, b| a.partial_cmp(b).unwrap());
         // Fundamental ~ π/L, second ~ 2π/L.
