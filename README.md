@@ -113,7 +113,9 @@ as starting points to tune by ear. **★ Factory** restores them.
   A quadratic bore `r(x) = r1 + r2·x + r3·x²` becomes a geometric potential
   `V(x) = 2r3/r(x)`; the synth numerically solves the eigenproblem
   `φ'' − V(x)φ = λφ` for the resonances (its own symmetric-tridiagonal
-  eigensolver). Dial the three radius coefficients, length, and blow position.
+  eigensolver). Dial the three radius coefficients, length, and blow position,
+  and choose **Open** ends or a **Brass** closed mouthpiece (odd-harmonic base
+  the flare fills in).
 - **Basic Wave** — band-limited triangle / sawtooth; the framework's reference
   oscillator.
 

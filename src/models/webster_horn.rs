@@ -26,6 +26,17 @@ use serde::{Deserialize, Serialize};
 use super::{strike_amplitude, unbounded_slider, FtmModel, ModeBuffer, TICK_RATE};
 
 const TWO_PI: f64 = std::f64::consts::TAU;
+const SQRT_2: f64 = std::f64::consts::SQRT_2;
+
+/// Boundary conditions at the two ends of the bore.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Boundary {
+    /// Open at both ends (Dirichlet) — a full harmonic-style series.
+    Open,
+    /// Closed throat (mouthpiece) + open bell — brass-like. A straight tube then
+    /// gives odd harmonics; the flare fills the series back in.
+    Brass,
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -53,6 +64,8 @@ pub struct WebsterHorn {
     pub max_magnitude: f32,
     /// If true the key sets the pitch (fundamental resonance on the played note).
     pub key_tracks_pitch: bool,
+    /// End conditions: open both ends, or a closed (brass) mouthpiece.
+    pub boundary: Boundary,
 }
 
 impl Default for WebsterHorn {
@@ -72,6 +85,7 @@ impl Default for WebsterHorn {
             play_magnitude: 0.0,
             max_magnitude: 2500.0,
             key_tracks_pitch: true,
+            boundary: Boundary::Open,
         }
     }
 }
@@ -98,14 +112,31 @@ impl FtmModel for WebsterHorn {
 
         let l = self.length.max(1e-3) as f64;
         let (r1, r2, r3) = (self.r1 as f64, self.r2 as f64, self.r3 as f64);
-        // Grid: n intervals, m = n-1 interior unknowns (Dirichlet at both ends).
         let n = self.resolution.clamp(16, 400);
-        let m = n - 1;
         let h = l / n as f64;
         let inv_h2 = 1.0 / (h * h);
+        let v_at = |x: f64| {
+            let r = r1 + r2 * x + r3 * x * x;
+            if r.abs() > 1e-9 {
+                2.0 * r3 / r
+            } else {
+                0.0
+            }
+        };
 
+        // Build the discretized operator φ'' − V(x)φ. The bell (x = L) is always
+        // open (Dirichlet). The throat is either open (Open) or closed (Brass),
+        // which changes the unknown set and the first row.
+        //
+        //  * Open:  unknowns are interior nodes i = 1..n-1 (x = i·h).
+        //  * Brass: the throat node i = 0 is an unknown with a Robin condition
+        //    ψ'(0) = (r'(0)/r(0))·ψ(0) = (r2/r1)·ψ(0). The one-sided second
+        //    difference makes row 0 asymmetric; a diagonal similarity restores
+        //    symmetry (off-diagonal → √2/h², eigenvector[0] scales by √2).
+        let brass = self.boundary == Boundary::Brass;
+        let (m, node_start) = if brass { (n, 0usize) } else { (n - 1, 1usize) };
         let mut diag = vec![0.0f64; m];
-        let mut off = vec![0.0f64; m];
+        let mut off = vec![inv_h2; m];
         let mut z: Vec<Vec<f64>> = (0..m)
             .map(|i| {
                 let mut row = vec![0.0f64; m];
@@ -114,26 +145,35 @@ impl FtmModel for WebsterHorn {
             })
             .collect();
         for j in 0..m {
-            let x = (j + 1) as f64 * h;
-            let r = r1 + r2 * x + r3 * x * x;
-            let v = if r.abs() > 1e-9 { 2.0 * r3 / r } else { 0.0 };
-            diag[j] = -2.0 * inv_h2 - v;
-            off[j] = inv_h2;
+            let x = (j + node_start) as f64 * h;
+            diag[j] = -2.0 * inv_h2 - v_at(x);
+        }
+        if brass {
+            let beta = if r1.abs() > 1e-9 { r2 / r1 } else { 0.0 }; // r'(0)/r(0)
+            diag[0] = -2.0 * (1.0 + h * beta) * inv_h2 - v_at(0.0);
+            if m > 1 {
+                off[1] = SQRT_2 * inv_h2; // symmetrized (0,1) off-diagonal
+            }
         }
 
         if !tqli(&mut diag, &mut off, &mut z) {
             return; // solver failed to converge (pathological params)
         }
 
+        // Excitation point → nearest unknown node (throat node gets the √2 scale
+        // in the brass case, from the similarity transform above).
+        let blow_x = (self.blow_pos.clamp(0.0, 1.0) as f64) * l;
+        let blow_idx = ((blow_x / h).round() as i64 - node_start as i64)
+            .clamp(0, m as i64 - 1) as usize;
+        let throat_scale = if brass && blow_idx == 0 { SQRT_2 } else { 1.0 };
+
         // Collect propagating modes (λ < 0): wavenumber k = √(−λ) and the
         // eigenvector value at the blow point (excitation weight).
-        let blow_idx = ((self.blow_pos.clamp(0.0, 1.0) as f64) * (m as f64 - 1.0)).round() as usize;
-        let blow_idx = blow_idx.min(m - 1);
         let mut modes: Vec<(f64, f64)> = Vec::with_capacity(m);
         for j in 0..m {
             if diag[j] < -1e-9 {
                 let k = (-diag[j]).sqrt();
-                modes.push((k, z[blow_idx][j]));
+                modes.push((k, z[blow_idx][j] * throat_scale));
             }
         }
         if modes.is_empty() {
@@ -183,6 +223,20 @@ impl FtmModel for WebsterHorn {
 
     fn params_ui(&mut self, ui: &mut egui::Ui) -> bool {
         let mut changed = false;
+        egui::ComboBox::from_label("Ends")
+            .selected_text(match self.boundary {
+                Boundary::Open => "Open (both ends)",
+                Boundary::Brass => "Brass (closed throat)",
+            })
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(&mut self.boundary, Boundary::Open, "Open (both ends)")
+                    .changed();
+                changed |= ui
+                    .selectable_value(&mut self.boundary, Boundary::Brass, "Brass (closed throat)")
+                    .changed();
+            });
+        ui.add_space(4.0);
         ui.strong("Bore  r(x) = r1 + r2·x + r3·x²");
         changed |= ui
             .add(unbounded_slider(&mut self.r1, 0.01..=10.0, "r1  (throat)"))
@@ -391,6 +445,28 @@ mod tests {
         // The flare pushes the second resonance off a pure 2:1 (it's a horn, not a tube).
         let ratio = buf.freq[1] / buf.freq[0];
         assert!(ratio > 1.5, "upper resonance above the fundamental: {ratio}");
+    }
+
+    #[test]
+    fn brass_straight_tube_is_odd_harmonics() {
+        // Closed throat + open bell, straight tube (r3 = 0 → V = 0, r2 = 0 →
+        // Neumann throat) gives the odd-harmonic series 1 : 3 : 5.
+        let mut buf = ModeBuffer::default();
+        let h = WebsterHorn {
+            boundary: Boundary::Brass,
+            r1: 1.0,
+            r2: 0.0,
+            r3: 0.0,
+            depth: 6,
+            resolution: 200,
+            blow_pos: 0.0,
+            ..WebsterHorn::default()
+        };
+        h.excite(200.0, 1.0, 48_000.0, &mut buf);
+        assert!(buf.n >= 3, "expected several modes");
+        assert!((buf.freq[0] - 200.0).abs() < 2.0, "fundamental tracks key: {}", buf.freq[0]);
+        let ratio = buf.freq[1] / buf.freq[0];
+        assert!((ratio - 3.0).abs() < 0.15, "closed-open 2nd mode ~3×, got {ratio}");
     }
 
     #[test]
