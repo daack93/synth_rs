@@ -53,7 +53,10 @@ Two modes (dropdown):
 
 It's **multi-timbral**: a track remembers the instrument it was recorded with,
 so you can lay a bass line, switch to the guitar preset, and overdub on top.
-Each track row has mute, a note timeline with a moving playhead, and delete.
+Each track row has mute, a note timeline with a moving playhead, delete, and an
+**✎ edit** button — pick a track and the right-hand panel edits *that track's*
+instrument (model, parameters, engine, or load a preset onto it) live while the
+loop keeps playing.
 
 ## Presets
 

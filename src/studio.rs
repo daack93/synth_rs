@@ -86,6 +86,10 @@ pub enum Command {
     ArmOverdub,
     ToggleMute(usize),
     DeleteTrack(usize),
+    /// Swap a track's instrument model live (rebuilds its sounding voices).
+    SetTrackModel(usize, Box<dyn FtmModel>),
+    /// Update a track's engine params live.
+    SetTrackEngine(usize, EngineParams),
 }
 
 #[derive(Clone, Copy)]
@@ -125,6 +129,11 @@ pub struct TrackView {
     pub instrument: String,
     pub muted: bool,
     pub notes: Vec<NoteSpan>,
+    /// The track instrument's plugin id + serialized params + engine, so the UI
+    /// can open it in the editor.
+    pub model_id: String,
+    pub params: serde_json::Value,
+    pub engine: EngineParams,
 }
 
 /// Lock-free scalars + an occasionally-rebuilt track list for the UI.
@@ -251,6 +260,24 @@ impl Studio {
                         t.inst.all_notes_off();
                     }
                     self.mark_structure_dirty();
+                }
+            }
+            Command::SetTrackModel(i, m) => {
+                let mut relabel = false;
+                if let Some(t) = self.tracks.get_mut(i) {
+                    if t.label != m.display_name() {
+                        relabel = true;
+                        t.label = m.display_name().to_string();
+                    }
+                    t.inst.set_model(m);
+                }
+                if relabel {
+                    self.mark_structure_dirty(); // instrument name changed
+                }
+            }
+            Command::SetTrackEngine(i, e) => {
+                if let Some(t) = self.tracks.get_mut(i) {
+                    t.inst.set_engine(e);
                 }
             }
             Command::DeleteTrack(i) => {
@@ -529,6 +556,9 @@ impl Studio {
                 instrument: t.label.clone(),
                 muted: t.muted,
                 notes: note_spans(&t.events, len),
+                model_id: t.inst.model_id().to_string(),
+                params: t.inst.model_json(),
+                engine: t.inst.engine_params(),
             })
             .collect();
         self.pending_structure = Some(views);
@@ -663,6 +693,26 @@ mod tests {
         drain(&mut s, 4800);
         s.handle(Command::Tap); // close
         assert_eq!(s.tracks.len(), 0, "a silent take is dropped");
+    }
+
+    #[test]
+    fn set_track_model_swaps_instrument_live() {
+        use crate::models::drum_membrane::DrumMembrane;
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::Tap);
+        s.handle(Command::NoteOn { note: 60, vel: 1.0 });
+        drain(&mut s, 2400);
+        s.handle(Command::NoteOff { note: 60 });
+        s.handle(Command::Tap); // close loop
+        assert_eq!(s.tracks.len(), 1);
+        let before = s.tracks[0].inst.model_id();
+        assert_ne!(before, "drum_membrane");
+
+        // Swap the track's instrument to a drum while it loops.
+        s.handle(Command::SetTrackModel(0, Box::new(DrumMembrane::default())));
+        assert_eq!(s.tracks[0].inst.model_id(), "drum_membrane");
+        assert_eq!(s.tracks[0].label, "Drum (2D membrane)");
+        drain(&mut s, 4800); // must keep rendering finite / in range
     }
 
     #[test]

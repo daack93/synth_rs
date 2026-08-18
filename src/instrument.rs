@@ -147,6 +147,18 @@ impl Instrument {
         self.model.display_name()
     }
 
+    pub fn model_id(&self) -> &'static str {
+        self.model.id()
+    }
+
+    pub fn model_json(&self) -> serde_json::Value {
+        self.model.to_json()
+    }
+
+    pub fn engine_params(&self) -> EngineParams {
+        self.engine.clone()
+    }
+
     pub fn set_model(&mut self, model: Box<dyn FtmModel>) {
         self.model = model;
         self.rebuild_active();

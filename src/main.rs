@@ -21,7 +21,7 @@ use instrument::EngineParams;
 use midi::MidiInputHandle;
 use models::FtmModel;
 use presets::Preset;
-use studio::{Command, LooperMode, NoteSpan, SharedView, TransportState};
+use studio::{Command, LooperMode, NoteSpan, SharedView, TrackView, TransportState};
 
 /// Spacebar hold thresholds: a quick press taps, a medium hold stops, a long
 /// hold resets.
@@ -42,10 +42,31 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+/// Which instrument the right-hand parameter panel is editing.
+#[derive(Clone, Copy, PartialEq)]
+enum Target {
+    /// The live instrument you play from the keyboard.
+    Live,
+    /// A loop track's instrument.
+    Track(usize),
+}
+
+/// Editable copy of a track's instrument (the track's real instrument lives on
+/// the audio thread; edits are pushed to it via commands).
+struct TrackEdit {
+    idx: usize,
+    model: Box<dyn FtmModel>,
+    engine: EngineParams,
+}
+
 struct App {
     tx: Sender<Command>,
     _audio: Option<AudioEngine>,
     audio_err: Option<String>,
+    /// Which instrument the parameter panel edits.
+    edit_target: Target,
+    /// Working copy of the track instrument being edited (when `edit_target` is a track).
+    track_edit: Option<TrackEdit>,
     /// Transport / track state published by the studio (audio thread).
     view: Option<Arc<SharedView>>,
     sample_rate: f32,
@@ -109,6 +130,8 @@ impl App {
             tx,
             _audio: audio,
             audio_err,
+            edit_target: Target::Live,
+            track_edit: None,
             view,
             sample_rate,
             models,
@@ -134,14 +157,20 @@ impl App {
         let _ = self.tx.send(Command::SetModel(self.models[self.selected].box_clone()));
     }
 
-    /// Save the current model + engine as a preset under `preset_name`.
+    /// Save the currently-edited instrument (live or a track) as a preset.
     fn save_preset(&mut self) {
         let name = self.preset_name.trim().to_string();
         if name.is_empty() {
             self.preset_status = "Enter a name first.".into();
             return;
         }
-        let preset = Preset::capture(&name, self.models[self.selected].as_ref(), &self.engine);
+        let preset = match self.edit_target {
+            Target::Track(i) => match &self.track_edit {
+                Some(te) if te.idx == i => Preset::capture(&name, te.model.as_ref(), &te.engine),
+                _ => Preset::capture(&name, self.models[self.selected].as_ref(), &self.engine),
+            },
+            Target::Live => Preset::capture(&name, self.models[self.selected].as_ref(), &self.engine),
+        };
         match presets::save(&preset) {
             Ok(path) => {
                 self.preset_status = format!("Saved “{name}” → {}", path.display());
@@ -151,14 +180,28 @@ impl App {
         }
     }
 
-    /// Load a preset: swap in its model + params + engine and start playing it.
+    /// Load a preset onto the current target (the live instrument or a track).
     fn apply_preset(&mut self, preset: &Preset) {
         let Some(model) = preset.build_model() else {
             self.preset_status =
                 format!("Can't load “{}”: unknown model “{}”.", preset.name, preset.model_id);
             return;
         };
-        // Replace the matching registry slot so the editor shows these params.
+
+        if let Target::Track(i) = self.edit_target {
+            // Swap this track's instrument live.
+            let _ = self.tx.send(Command::SetTrackModel(i, model.box_clone()));
+            let _ = self.tx.send(Command::SetTrackEngine(i, preset.engine.clone()));
+            self.track_edit = Some(TrackEdit {
+                idx: i,
+                model,
+                engine: preset.engine.clone(),
+            });
+            self.preset_status = format!("Loaded “{}” onto track {}.", preset.name, i + 1);
+            return;
+        }
+
+        // Live: replace the matching registry slot so the editor shows these params.
         match self.models.iter().position(|m| m.id() == preset.model_id) {
             Some(idx) => {
                 self.models[idx] = model;
@@ -411,16 +454,86 @@ impl App {
         ui.add_space(2.0);
     }
 
+    /// Point the parameter panel at the live instrument or a specific track,
+    /// loading that track's current instrument into an editable working copy.
+    fn set_target(&mut self, target: Target, tracks: &[TrackView]) {
+        match target {
+            Target::Live => {
+                self.edit_target = Target::Live;
+                self.track_edit = None;
+            }
+            Target::Track(i) => {
+                if let Some(tv) = tracks.get(i) {
+                    let model =
+                        models::model_from_id(&tv.model_id, &tv.params).unwrap_or_else(models::default_model);
+                    self.track_edit = Some(TrackEdit {
+                        idx: i,
+                        model,
+                        engine: tv.engine.clone(),
+                    });
+                    self.edit_target = Target::Track(i);
+                }
+            }
+        }
+    }
+
     fn params_panel(&mut self, ui: &mut egui::Ui) {
-        let unbounded = egui::SliderClamping::Never;
+        let tracks = self.view.as_ref().map(|v| v.tracks()).unwrap_or_default();
+        // If the edited track vanished (deleted / reset), fall back to Live.
+        if let Target::Track(i) = self.edit_target {
+            if i >= tracks.len() {
+                self.edit_target = Target::Live;
+                self.track_edit = None;
+            }
+        }
 
         ui.add_space(6.0);
-        ui.heading("Synthesis model");
-        ui.add_space(2.0);
+        ui.heading("Instrument");
 
-        // --- Model (plugin) picker ---
+        // --- Target selector: Live or a track ---
+        ui.horizontal(|ui| {
+            ui.label("Editing:");
+            let current = match self.edit_target {
+                Target::Live => "Live (keyboard)".to_string(),
+                Target::Track(i) => format!("{} · {}", tracks[i].name, tracks[i].instrument),
+            };
+            let mut choose: Option<Target> = None;
+            egui::ComboBox::from_id_salt("edit_target")
+                .width(230.0)
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(self.edit_target == Target::Live, "Live (keyboard)")
+                        .clicked()
+                    {
+                        choose = Some(Target::Live);
+                    }
+                    for (i, t) in tracks.iter().enumerate() {
+                        let sel = self.edit_target == Target::Track(i);
+                        if ui
+                            .selectable_label(sel, format!("{} · {}", t.name, t.instrument))
+                            .clicked()
+                        {
+                            choose = Some(Target::Track(i));
+                        }
+                    }
+                });
+            if let Some(t) = choose {
+                self.set_target(t, &tracks);
+            }
+        });
+        ui.separator();
+
+        match self.edit_target {
+            Target::Live => self.edit_live(ui),
+            Target::Track(i) => self.edit_track(ui, i),
+        }
+    }
+
+    /// Edit the live (keyboard) instrument.
+    fn edit_live(&mut self, ui: &mut egui::Ui) {
         let mut new_selection = self.selected;
-        egui::ComboBox::from_id_salt("model_pick")
+        egui::ComboBox::from_id_salt("model_pick_live")
             .width(260.0)
             .selected_text(self.models[self.selected].display_name())
             .show_ui(ui, |ui| {
@@ -435,14 +548,12 @@ impl App {
         );
         if new_selection != self.selected {
             self.selected = new_selection;
-            self.push_model(); // swap live; the engine re-excites held notes
+            self.push_model();
         }
 
         ui.separator();
-
-        // --- The active model's own parameter editor ---
         egui::ScrollArea::vertical()
-            .max_height(360.0)
+            .max_height(320.0)
             .show(ui, |ui| {
                 if self.models[self.selected].params_ui(ui) {
                     self.push_model();
@@ -450,25 +561,8 @@ impl App {
             });
 
         ui.separator();
-
-        // --- Engine-wide (shared) parameters ---
         ui.strong("Output / Voice");
-        let e = &mut self.engine;
-        let mut eng_changed = false;
-        eng_changed |= ui
-            .add(egui::Slider::new(&mut e.gain, 0.0..=4.0).clamping(unbounded).text("Master gain (SPEAKER_GAIN)"))
-            .changed();
-        eng_changed |= ui
-            .add(egui::Slider::new(&mut e.attack_ms, 0.0..=2000.0).clamping(unbounded).text("Attack (ms)"))
-            .changed();
-        eng_changed |= ui
-            .add(egui::Slider::new(&mut e.release_ms, 1.0..=5000.0).clamping(unbounded).text("Release (ms)"))
-            .changed();
-        eng_changed |= ui
-            .add(egui::Slider::new(&mut e.retrigger_ms, 0.0..=2000.0).clamping(unbounded).text("Retrigger lockout (PLAY_PERIOD)"))
-            .on_hover_text("Minimum time between strikes. Firmware: 2000 ms; 0 = off (playable).")
-            .changed();
-        if eng_changed {
+        if engine_sliders(ui, &mut self.engine) {
             let _ = self.tx.send(Command::SetEngine(self.engine.clone()));
         }
 
@@ -482,6 +576,74 @@ impl App {
                 let _ = self.tx.send(Command::AllNotesOff);
             }
         });
+    }
+
+    /// Edit a loop track's instrument live; edits are pushed to the audio thread.
+    fn edit_track(&mut self, ui: &mut egui::Ui, i: usize) {
+        // Take the working copy out to sidestep borrow conflicts with self.tx.
+        let Some(mut te) = self.track_edit.take() else {
+            return;
+        };
+        if te.idx != i {
+            self.track_edit = Some(te);
+            return;
+        }
+
+        let reg = models::registry();
+        let mut model_changed = false;
+
+        egui::ComboBox::from_id_salt("model_pick_track")
+            .width(260.0)
+            .selected_text(te.model.display_name())
+            .show_ui(ui, |ui| {
+                let mut pick = None;
+                for (k, m) in reg.iter().enumerate() {
+                    if ui
+                        .selectable_label(m.id() == te.model.id(), m.display_name())
+                        .clicked()
+                    {
+                        pick = Some(k);
+                    }
+                }
+                if let Some(k) = pick {
+                    if reg[k].id() != te.model.id() {
+                        te.model = reg[k].box_clone(); // switch plugin -> fresh defaults
+                        model_changed = true;
+                    }
+                }
+            });
+        ui.label(egui::RichText::new(te.model.description()).weak().small());
+
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .max_height(320.0)
+            .show(ui, |ui| {
+                if te.model.params_ui(ui) {
+                    model_changed = true;
+                }
+            });
+        if model_changed {
+            let _ = self.tx.send(Command::SetTrackModel(i, te.model.box_clone()));
+        }
+
+        ui.separator();
+        ui.strong("Output / Voice");
+        if engine_sliders(ui, &mut te.engine) {
+            let _ = self.tx.send(Command::SetTrackEngine(i, te.engine.clone()));
+        }
+
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui.button("← Back to Live").clicked() {
+                self.edit_target = Target::Live;
+            }
+            if ui.button("🗑 Delete track").clicked() {
+                let _ = self.tx.send(Command::DeleteTrack(i));
+                self.edit_target = Target::Live;
+            }
+        });
+
+        self.track_edit = Some(te);
     }
 
     fn midi_panel(&mut self, ui: &mut egui::Ui) {
@@ -607,11 +769,22 @@ impl App {
 
         let mut toggle_mute = None;
         let mut delete = None;
+        let mut edit = None;
         for (i, t) in tracks.iter().enumerate() {
+            let editing = self.edit_target == Target::Track(i);
             ui.horizontal(|ui| {
                 let mute = if t.muted { "🔇" } else { "🔊" };
                 if ui.button(mute).on_hover_text("Mute / unmute").clicked() {
                     toggle_mute = Some(i);
+                }
+                // Edit this track's instrument (highlighted when active).
+                let edit_btn = egui::Button::new("✎").selected(editing);
+                if ui
+                    .add(edit_btn)
+                    .on_hover_text("Edit this track's instrument")
+                    .clicked()
+                {
+                    edit = Some(i);
                 }
                 ui.allocate_ui_with_layout(
                     egui::vec2(130.0, 24.0),
@@ -630,8 +803,14 @@ impl App {
         if let Some(i) = toggle_mute {
             let _ = self.tx.send(Command::ToggleMute(i));
         }
+        if let Some(i) = edit {
+            self.set_target(Target::Track(i), &tracks);
+        }
         if let Some(i) = delete {
             let _ = self.tx.send(Command::DeleteTrack(i));
+            if self.edit_target == Target::Track(i) {
+                self.edit_target = Target::Live;
+            }
         }
     }
 
@@ -752,6 +931,27 @@ impl App {
 
 /// Map a physical keyboard key to a semitone offset within the base octave,
 /// using the common one-octave tracker layout.
+/// Shared engine-parameter sliders (gain, envelope, retrigger). Returns true if
+/// anything changed. Used by both the live and per-track editors.
+fn engine_sliders(ui: &mut egui::Ui, e: &mut EngineParams) -> bool {
+    let unbounded = egui::SliderClamping::Never;
+    let mut c = false;
+    c |= ui
+        .add(egui::Slider::new(&mut e.gain, 0.0..=4.0).clamping(unbounded).text("Gain (SPEAKER_GAIN)"))
+        .changed();
+    c |= ui
+        .add(egui::Slider::new(&mut e.attack_ms, 0.0..=2000.0).clamping(unbounded).text("Attack (ms)"))
+        .changed();
+    c |= ui
+        .add(egui::Slider::new(&mut e.release_ms, 1.0..=5000.0).clamping(unbounded).text("Release (ms)"))
+        .changed();
+    c |= ui
+        .add(egui::Slider::new(&mut e.retrigger_ms, 0.0..=2000.0).clamping(unbounded).text("Retrigger (PLAY_PERIOD)"))
+        .on_hover_text("Minimum time between strikes. Firmware: 2000 ms; 0 = off.")
+        .changed();
+    c
+}
+
 /// Draw a track's recorded notes as bars on a timeline, with a moving playhead.
 fn draw_track_timeline(ui: &mut egui::Ui, notes: &[NoteSpan], play: f32, muted: bool) {
     let width = (ui.available_width() - 40.0).max(120.0);
