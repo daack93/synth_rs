@@ -4,6 +4,7 @@
 
 mod audio;
 mod instrument;
+mod kit;
 mod midi;
 mod models;
 mod presets;
@@ -22,8 +23,10 @@ use instrument::EngineParams;
 use midi::MidiInputHandle;
 use models::FtmModel;
 use presets::Preset;
-use project::{NamedLoop, Project, Section, TempoGrid};
-use studio::{Command, LooperMode, NoteSpan, SharedView, SongSection, TrackView, TransportState};
+use project::{NamedLoop, Project, Section, TempoGrid, ZoneData};
+use studio::{
+    Command, LiveConfig, LooperMode, NoteSpan, SharedView, SongSection, TrackView, TransportState,
+};
 
 /// Spacebar hold thresholds: a quick press taps, a medium hold stops, a long
 /// hold resets.
@@ -79,6 +82,10 @@ struct App {
     selected: usize,
     /// Engine-wide parameters (gain, envelope, retrigger).
     engine: EngineParams,
+    /// Live "kit mode": the keyboard is split/mapped across several instruments.
+    live_is_kit: bool,
+    /// Zones for the live kit (each an instrument mapped to a key range).
+    kit_zones: Vec<ZoneData>,
 
     // Looper
     looper_mode: LooperMode,
@@ -156,6 +163,8 @@ impl App {
             models,
             selected,
             engine,
+            live_is_kit: false,
+            kit_zones: Vec::new(),
             looper_mode: LooperMode::Pedal,
             space_down_at: None,
             preset_list,
@@ -886,8 +895,61 @@ impl App {
         }
     }
 
-    /// Edit the live (keyboard) instrument.
+    /// A default zone from the current live instrument, spanning the keyboard.
+    fn default_zone(&self) -> ZoneData {
+        let m = self.models[self.selected].as_ref();
+        ZoneData {
+            name: m.display_name().to_string(),
+            lo: 0,
+            hi: 127,
+            fixed_note: None,
+            transpose: 0,
+            model_id: m.id().to_string(),
+            params: m.to_json(),
+            engine: self.engine.clone(),
+        }
+    }
+
+    /// Push the current kit to the audio thread.
+    fn send_live_kit(&self) {
+        let _ = self.tx.send(Command::SetLive(LiveConfig::Kit { zones: self.kit_zones.clone() }));
+    }
+
+    /// Switch the live slot back to the single selected instrument.
+    fn send_live_single(&self) {
+        let m = self.models[self.selected].as_ref();
+        let _ = self.tx.send(Command::SetLive(LiveConfig::Single {
+            model_id: m.id().to_string(),
+            params: m.to_json(),
+            engine: self.engine.clone(),
+        }));
+    }
+
+    /// Edit the live (keyboard) instrument — single instrument or a kit.
     fn edit_live(&mut self, ui: &mut egui::Ui) {
+        let mut kit_mode = self.live_is_kit;
+        if ui
+            .checkbox(&mut kit_mode, "Kit mode (split / map keys to instruments)")
+            .on_hover_text("Route key ranges to different instruments — drum kits, splits, layers.")
+            .changed()
+        {
+            self.live_is_kit = kit_mode;
+            if kit_mode {
+                if self.kit_zones.is_empty() {
+                    self.kit_zones.push(self.default_zone());
+                }
+                self.send_live_kit();
+            } else {
+                self.send_live_single();
+            }
+        }
+        ui.separator();
+
+        if self.live_is_kit {
+            self.edit_kit(ui);
+            return;
+        }
+
         let mut new_selection = self.selected;
         egui::ComboBox::from_id_salt("model_pick_live")
             .width(260.0)
@@ -934,8 +996,139 @@ impl App {
         });
     }
 
+    /// Edit the live kit: a list of key-range → instrument zones.
+    fn edit_kit(&mut self, ui: &mut egui::Ui) {
+        let presets = self.preset_list.clone();
+        let mut changed = false;
+        let mut remove: Option<usize> = None;
+
+        ui.horizontal(|ui| {
+            ui.label(format!("{} zone(s)", self.kit_zones.len()));
+            if ui.button("+ Zone").clicked() {
+                let z = self.default_zone();
+                self.kit_zones.push(z);
+                changed = true;
+            }
+            if ui.button("Clear").clicked() {
+                self.kit_zones.clear();
+                changed = true;
+            }
+        });
+        ui.label(
+            egui::RichText::new("Pick each zone's sound from your presets. Overlapping ranges layer; a pad plays one fixed pitch.")
+                .weak()
+                .small(),
+        );
+        ui.separator();
+
+        egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+            for (zi, z) in self.kit_zones.iter_mut().enumerate() {
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut z.name).desired_width(110.0));
+                        egui::ComboBox::from_id_salt(("zone_snd", zi))
+                            .selected_text("◈ sound")
+                            .width(150.0)
+                            .show_ui(ui, |ui| {
+                                for p in presets.iter() {
+                                    if ui.selectable_label(p.model_id == z.model_id, &p.name).clicked() {
+                                        z.model_id = p.model_id.clone();
+                                        z.params = p.params.clone();
+                                        z.engine = p.engine.clone();
+                                        z.name = p.name.clone();
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        if ui.button("✕").on_hover_text("Remove zone").clicked() {
+                            remove = Some(zi);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Keys");
+                        changed |= ui.add(egui::DragValue::new(&mut z.lo).range(0..=127)).changed();
+                        ui.label("–");
+                        changed |= ui.add(egui::DragValue::new(&mut z.hi).range(0..=127)).changed();
+                        ui.label(
+                            egui::RichText::new(format!("{}–{}", note_name(z.lo), note_name(z.hi)))
+                                .weak(),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        let mut pad = z.fixed_note.is_some();
+                        if ui.checkbox(&mut pad, "Pad").on_hover_text("Any key in range plays one fixed pitch (a drum pad).").changed() {
+                            z.fixed_note = if pad { Some(z.lo) } else { None };
+                            changed = true;
+                        }
+                        if let Some(fixed) = z.fixed_note.as_mut() {
+                            changed |= ui.add(egui::DragValue::new(fixed).range(0..=127)).changed();
+                            ui.label(egui::RichText::new(note_name(*fixed)).weak());
+                        } else {
+                            ui.label("transpose");
+                            changed |= ui
+                                .add(egui::DragValue::new(&mut z.transpose).range(-48..=48).suffix(" st"))
+                                .changed();
+                        }
+                    });
+                });
+            }
+        });
+
+        if let Some(r) = remove {
+            if r < self.kit_zones.len() {
+                self.kit_zones.remove(r);
+                changed = true;
+            }
+        }
+
+        ui.add_space(8.0);
+        if ui.button("All notes off").clicked() {
+            let _ = self.tx.send(Command::AllNotesOff);
+        }
+
+        if changed {
+            self.send_live_kit();
+        }
+    }
+
+    /// Show a kit track's zones (read-only for now — kit-track editing lands in a
+    /// later step; you can still re-record the track from a live kit).
+    fn show_kit_track(&self, ui: &mut egui::Ui, zones: &[ZoneData]) {
+        ui.label(egui::RichText::new("Kit track").strong());
+        ui.label(
+            egui::RichText::new("Editing kit tracks in place isn't wired up yet — tweak the live kit and re-record.")
+                .weak()
+                .small(),
+        );
+        ui.separator();
+        for z in zones {
+            let sound = match z.fixed_note {
+                Some(n) => format!("pad → {}", note_name(n)),
+                None if z.transpose != 0 => format!("{:+} st", z.transpose),
+                None => "chromatic".to_string(),
+            };
+            ui.label(format!(
+                "{}  ·  {}–{}  ·  {}  ·  {}",
+                z.name,
+                note_name(z.lo),
+                note_name(z.hi),
+                z.model_id,
+                sound
+            ));
+        }
+    }
+
     /// Edit a loop track's instrument live; edits are pushed to the audio thread.
     fn edit_track(&mut self, ui: &mut egui::Ui, i: usize) {
+        // A kit track: show its zones read-only instead of the single editor.
+        let tracks = self.view.as_ref().map(|v| v.tracks()).unwrap_or_default();
+        if let Some(tv) = tracks.get(i) {
+            if tv.model_id == "kit" {
+                self.show_kit_track(ui, &tv.zones);
+                return;
+            }
+        }
+
         // Take the working copy out to sidestep borrow conflicts with self.tx.
         let Some(mut te) = self.track_edit.take() else {
             return;
@@ -1356,6 +1549,13 @@ impl App {
 /// using the common one-octave tracker layout.
 /// Shared engine-parameter sliders (gain, envelope, retrigger). Returns true if
 /// anything changed. Used by both the live and per-track editors.
+/// MIDI note number → name like `C4` (C4 = 60).
+fn note_name(n: u8) -> String {
+    const NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    let oct = (n / 12) as i32 - 1;
+    format!("{}{}", NAMES[(n % 12) as usize], oct)
+}
+
 fn engine_sliders(ui: &mut egui::Ui, e: &mut EngineParams) -> bool {
     let unbounded = egui::SliderClamping::Never;
     let mut c = false;

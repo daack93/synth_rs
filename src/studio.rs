@@ -22,8 +22,9 @@ use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::instrument::{make_sine_table, EngineParams, Instrument};
+use crate::kit::{Kit, Playable};
 use crate::models::{default_model, model_from_id, FtmModel};
-use crate::project::{LoopData, LoopEvent, LoopTrack, TempoGrid};
+use crate::project::{LoopData, LoopEvent, LoopTrack, TempoGrid, ZoneData};
 
 const TWO_PI_F64: f64 = std::f64::consts::TAU;
 
@@ -77,6 +78,9 @@ pub enum Command {
     NoteOff { note: u8 },
     SetModel(Box<dyn FtmModel>),
     SetEngine(EngineParams),
+    /// Replace the whole live slot — used to enter/exit kit mode or rebuild a
+    /// kit's zones. `SetModel`/`SetEngine` still handle single-instrument edits.
+    SetLive(LiveConfig),
     AllNotesOff,
     SetLooperMode(LooperMode),
     /// Primary transport tap (spacebar).
@@ -103,6 +107,12 @@ pub enum Command {
     SetTempo(TempoGrid),
 }
 
+/// How the live slot should be configured: a single instrument or a kit.
+pub enum LiveConfig {
+    Single { model_id: String, params: serde_json::Value, engine: EngineParams },
+    Kit { zones: Vec<ZoneData> },
+}
+
 /// A resolved song section: a loop and how many times to play it. The UI builds
 /// these from `project::Section` + the project's loops.
 pub struct SongSection {
@@ -123,7 +133,7 @@ struct Event {
 }
 
 struct Track {
-    inst: Instrument,
+    inst: Playable,
     events: Vec<Event>,
     cursor: usize,
     muted: bool,
@@ -148,10 +158,12 @@ pub struct TrackView {
     pub muted: bool,
     pub notes: Vec<NoteSpan>,
     /// The track instrument's plugin id + serialized params + engine, so the UI
-    /// can open it in the editor.
+    /// can open it in the editor. For a kit `model_id` is `"kit"` and `zones`
+    /// holds its mapping; otherwise `zones` is empty.
     pub model_id: String,
     pub params: serde_json::Value,
     pub engine: EngineParams,
+    pub zones: Vec<ZoneData>,
 }
 
 /// Lock-free scalars + an occasionally-rebuilt track list for the UI.
@@ -218,7 +230,7 @@ impl SharedView {
 pub struct Studio {
     sr: f32,
     sine: std::sync::Arc<[f32]>,
-    live: Instrument,
+    live: Playable,
     tracks: Vec<Track>,
     mode: LooperMode,
 
@@ -271,7 +283,7 @@ impl Studio {
         Studio {
             sr: sample_rate,
             sine: sine.clone(),
-            live: Instrument::new(sample_rate, sine),
+            live: Playable::Single(Instrument::new(sample_rate, sine)),
             tracks: Vec::new(),
             mode: LooperMode::Pedal,
             playing: false,
@@ -319,6 +331,10 @@ impl Studio {
             }
             Command::SetModel(m) => self.live.set_model(m),
             Command::SetEngine(e) => self.live.set_engine(e),
+            Command::SetLive(cfg) => {
+                self.live.all_notes_off();
+                self.live = self.build_live(cfg);
+            }
             Command::AllNotesOff => {
                 self.live.all_notes_off();
                 for t in &mut self.tracks {
@@ -613,6 +629,35 @@ impl Studio {
         self.mark_structure_dirty();
     }
 
+    /// Build the live [`Playable`] from a UI config (single instrument or kit).
+    fn build_live(&self, cfg: LiveConfig) -> Playable {
+        match cfg {
+            LiveConfig::Single { model_id, params, engine } => {
+                let model = model_from_id(&model_id, &params).unwrap_or_else(default_model);
+                Playable::Single(Instrument::with_config(self.sr, self.sine.clone(), model, engine))
+            }
+            LiveConfig::Kit { zones } => {
+                Playable::Kit(Kit::from_data(self.sr, self.sine.clone(), &zones))
+            }
+        }
+    }
+
+    /// Build a track's [`Playable`] from its serialized form: a kit if it has
+    /// zones, otherwise a single instrument.
+    fn track_playable(&self, lt: &LoopTrack) -> Playable {
+        if lt.zones.is_empty() {
+            let model = model_from_id(&lt.model_id, &lt.params).unwrap_or_else(default_model);
+            Playable::Single(Instrument::with_config(
+                self.sr,
+                self.sine.clone(),
+                model,
+                lt.engine.clone(),
+            ))
+        } else {
+            Playable::Kit(Kit::from_data(self.sr, self.sine.clone(), &lt.zones))
+        }
+    }
+
     /// Rebuild the tracks/instruments from a saved loop and start it playing.
     /// Positions in `data` are in seconds; converted to samples at this rate.
     /// Does not touch song-transport state (used by both single-loop load and
@@ -634,9 +679,8 @@ impl Studio {
         let len = ((data.length * self.sr).round() as u64).max(1);
         self.loop_len = Some(len);
         for lt in data.tracks {
-            let model = model_from_id(&lt.model_id, &lt.params).unwrap_or_else(default_model);
-            let inst = Instrument::with_config(self.sr, self.sine.clone(), model, lt.engine);
-            let label = inst.model_name().to_string();
+            let inst = self.track_playable(&lt);
+            let label = inst.label();
             let mut events: Vec<Event> = lt
                 .events
                 .iter()
@@ -673,12 +717,15 @@ impl Studio {
         let tracks = self
             .tracks
             .iter()
-            .map(|t| LoopTrack {
+            .map(|t| {
+                let (model_id, params, engine, zones) = t.inst.parts();
+                LoopTrack {
                 name: t.name.clone(),
-                model_id: t.inst.model_id().to_string(),
-                params: t.inst.model_json(),
-                engine: t.inst.engine_params(),
+                model_id,
+                params,
+                engine,
                 muted: t.muted,
+                zones,
                 events: t
                     .events
                     .iter()
@@ -690,6 +737,7 @@ impl Studio {
                         LoopEvent { t: e.pos as f32 / sr, on, note, vel }
                     })
                     .collect(),
+                }
             })
             .collect();
         LoopData { length, tracks }
@@ -720,7 +768,7 @@ impl Studio {
     fn create_track(&mut self) {
         let idx = self.tracks.len();
         let inst = self.live.snapshot();
-        let label = inst.model_name().to_string();
+        let label = inst.label();
         self.tracks.push(Track {
             inst,
             events: Vec::new(),
@@ -910,14 +958,18 @@ impl Studio {
         let views = self
             .tracks
             .iter()
-            .map(|t| TrackView {
-                name: t.name.clone(),
-                instrument: t.label.clone(),
-                muted: t.muted,
-                notes: note_spans(&t.events, len),
-                model_id: t.inst.model_id().to_string(),
-                params: t.inst.model_json(),
-                engine: t.inst.engine_params(),
+            .map(|t| {
+                let (model_id, params, engine, zones) = t.inst.parts();
+                TrackView {
+                    name: t.name.clone(),
+                    instrument: t.label.clone(),
+                    muted: t.muted,
+                    notes: note_spans(&t.events, len),
+                    model_id,
+                    params,
+                    engine,
+                    zones,
+                }
             })
             .collect();
         let snap = self.snapshot_loop();
@@ -1081,6 +1133,41 @@ mod tests {
     }
 
     #[test]
+    fn kit_records_and_roundtrips() {
+        use crate::project::ZoneData;
+        let zone = |name: &str, lo, hi, id: &str| ZoneData {
+            name: name.into(),
+            lo,
+            hi,
+            fixed_note: None,
+            transpose: 0,
+            model_id: id.into(),
+            params: serde_json::json!({}),
+            engine: EngineParams::default(),
+        };
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::SetLive(LiveConfig::Kit {
+            zones: vec![zone("lo", 0, 59, "drum_membrane"), zone("hi", 60, 127, "pure_string")],
+        }));
+        s.handle(Command::Tap); // begin first take
+        s.handle(Command::NoteOn { note: 40, vel: 1.0 }); // low half → drum zone
+        drain(&mut s, 2400);
+        s.handle(Command::NoteOff { note: 40 });
+        s.handle(Command::Tap); // close loop
+        assert_eq!(s.tracks.len(), 1);
+
+        let snap = s.snapshot_loop();
+        assert_eq!(snap.tracks[0].model_id, "kit", "kit track serializes as a kit");
+        assert_eq!(snap.tracks[0].zones.len(), 2, "both zones kept");
+
+        // Reload at a different rate and confirm it plays back through the kit.
+        let mut s2 = Studio::new(44_100.0);
+        s2.handle(Command::LoadLoop(snap));
+        drain(&mut s2, 200);
+        assert!(s2.tracks[0].inst.active_voices() > 0, "reloaded kit plays");
+    }
+
+    #[test]
     fn loop_snapshot_and_load_roundtrip() {
         let mut s = Studio::new(48_000.0);
         s.handle(Command::Tap);
@@ -1119,6 +1206,7 @@ mod tests {
                 params: serde_json::json!({}),
                 engine: EngineParams::default(),
                 muted: false,
+                zones: Vec::new(),
                 events: vec![
                     LoopEvent { t: 0.0, on: true, note, vel: 1.0 },
                     LoopEvent { t: 0.02, on: false, note, vel: 0.0 },

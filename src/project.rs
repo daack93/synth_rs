@@ -23,7 +23,32 @@ pub struct LoopEvent {
     pub vel: f32,
 }
 
+/// One zone of a kit: an instrument (model + params + engine) mapped to a key
+/// range, optionally forced to a fixed pitch (a drum pad). Used by kit tracks.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ZoneData {
+    pub name: String,
+    /// Inclusive MIDI key range this zone responds to.
+    pub lo: u8,
+    pub hi: u8,
+    /// If set, any key in range plays this fixed note (a percussion pad).
+    #[serde(default)]
+    pub fixed_note: Option<u8>,
+    /// Semitone shift applied to chromatic (non-fixed) zones.
+    #[serde(default)]
+    pub transpose: i8,
+    pub model_id: String,
+    pub params: serde_json::Value,
+    #[serde(default)]
+    pub engine: EngineParams,
+}
+
 /// One track of a loop: its instrument plus the notes it plays.
+///
+/// A track is either a **single instrument** (`zones` empty — the top-level
+/// `model_id`/`params`/`engine` describe it) or a **kit** (`zones` non-empty —
+/// each zone routes a key range to its own instrument). Old projects predate
+/// `zones` and load as single instruments.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct LoopTrack {
     pub name: String,
@@ -33,6 +58,8 @@ pub struct LoopTrack {
     pub engine: EngineParams,
     #[serde(default)]
     pub muted: bool,
+    #[serde(default)]
+    pub zones: Vec<ZoneData>,
     pub events: Vec<LoopEvent>,
 }
 
@@ -193,6 +220,7 @@ mod tests {
                 params: serde_json::json!({}),
                 engine: EngineParams::default(),
                 muted: false,
+                zones: Vec::new(),
                 events: vec![
                     LoopEvent { t: 0.0, on: true, note: 60, vel: 0.9 },
                     LoopEvent { t: 0.5, on: false, note: 60, vel: 0.0 },
