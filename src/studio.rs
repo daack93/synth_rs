@@ -23,7 +23,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::instrument::{make_sine_table, EngineParams, Instrument};
 use crate::models::{default_model, model_from_id, FtmModel};
-use crate::project::{LoopData, LoopEvent, LoopTrack};
+use crate::project::{LoopData, LoopEvent, LoopTrack, TempoGrid};
+
+const TWO_PI_F64: f64 = std::f64::consts::TAU;
 
 /// Which spacebar-tap behavior is active.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -97,6 +99,8 @@ pub enum Command {
     SetSong(Vec<SongSection>),
     /// Start playing the installed song from the top.
     PlaySong,
+    /// Update tempo / grid / metronome settings.
+    SetTempo(TempoGrid),
 }
 
 /// A resolved song section: a loop and how many times to play it. The UI builds
@@ -239,6 +243,21 @@ pub struct Studio {
     song_pos: usize,
     song_rep: u32,
 
+    // Tempo / grid / metronome
+    tempo: TempoGrid,
+    /// Count-in samples remaining before a pending recording starts.
+    pre_roll: u64,
+    /// True while `pre_roll` is counting toward a first (fixed-bars) recording.
+    pending_record: bool,
+    /// Metronome beat clock: samples into the current beat, and beat index.
+    metro_phase: u64,
+    beat_index: u32,
+    // Metronome click voice.
+    click_env: f32,
+    click_phase: f32,
+    click_freq: f32,
+    click_decay: f32,
+
     view: Arc<SharedView>,
     /// Structure snapshot waiting to be published to the UI (flushed each render).
     pending_structure: Option<Vec<TrackView>>,
@@ -267,6 +286,15 @@ impl Studio {
             song_active: false,
             song_pos: 0,
             song_rep: 0,
+            tempo: TempoGrid::default(),
+            pre_roll: 0,
+            pending_record: false,
+            metro_phase: 0,
+            beat_index: 0,
+            click_env: 0.0,
+            click_phase: 0.0,
+            click_freq: 1000.0,
+            click_decay: (-1.0 / (0.03 * sample_rate)).exp(),
             view: Arc::new(SharedView::new()),
             pending_structure: None,
             pending_snapshot: None,
@@ -335,6 +363,7 @@ impl Studio {
             Command::LoadLoop(data) => self.load_loop(data),
             Command::SetSong(sections) => self.song = sections,
             Command::PlaySong => self.play_song(),
+            Command::SetTempo(t) => self.tempo = t,
             Command::DeleteTrack(i) => {
                 if i < self.tracks.len() {
                     self.tracks.remove(i);
@@ -364,19 +393,133 @@ impl Studio {
             self.create_track();
         }
         if let Some(r) = self.recording {
-            let pos = self.pos;
+            // Quantize note-ons to the grid; leave note-offs at their real time.
+            let pos = match msg {
+                EvMsg::On { .. } => self.quantize_pos(self.pos),
+                EvMsg::Off { .. } => self.pos,
+            };
             self.tracks[r].events.push(Event { pos, msg });
         }
     }
 
+    // ---- tempo / grid helpers ----
+
+    /// Samples per beat at the current tempo.
+    fn spb(&self) -> f64 {
+        self.sr as f64 * 60.0 / self.tempo.bpm.max(1.0) as f64
+    }
+    /// Samples in one bar.
+    fn bar_samples(&self) -> u64 {
+        (self.spb() * self.tempo.beats_per_bar.max(1) as f64).round() as u64
+    }
+    /// Samples in the fixed loop length (bars × bar), or 0 if free.
+    fn fixed_loop_samples(&self) -> u64 {
+        (self.bar_samples() * self.tempo.bars as u64).max(if self.tempo.bars > 0 { 1 } else { 0 })
+    }
+
+    /// Snap a sample position to the quantize grid (nearest step), wrapping at
+    /// the loop length. Returns `pos` unchanged when quantize is off.
+    fn quantize_pos(&self, pos: u64) -> u64 {
+        let steps = self.tempo.quantize;
+        if steps == 0 {
+            return pos;
+        }
+        let grid = self.spb() / steps as f64;
+        if grid < 1.0 {
+            return pos;
+        }
+        let q = ((pos as f64 / grid).round() * grid).round() as u64;
+        match self.loop_len {
+            Some(len) if q >= len => 0,
+            _ => q,
+        }
+    }
+
+    /// Begin the first take from idle (free, or fixed-length if bars is set).
+    fn begin_first_take(&mut self) {
+        self.arm(true);
+        self.playing = true;
+        self.pos = 0;
+        self.metro_phase = 0;
+        self.beat_index = 0;
+        if self.tempo.bars > 0 {
+            self.loop_len = Some(self.fixed_loop_samples());
+        }
+    }
+
+    /// Close a fixed-length first take at the bar boundary (called from the
+    /// loop-wrap handler when `defining` with a known length).
+    fn close_defining(&mut self) {
+        self.disarm_and_finalize();
+        self.defining = false;
+        if self.tracks.is_empty() {
+            // Nothing recorded — cancel the loop.
+            self.loop_len = None;
+            self.playing = false;
+        } else if self.mode == LooperMode::Overdub {
+            self.arm(false);
+        }
+        self.mark_structure_dirty();
+    }
+
+    // ---- metronome ----
+
+    fn trigger_click(&mut self, accent: bool) {
+        self.click_env = 1.0;
+        self.click_phase = 0.0;
+        self.click_freq = if accent { 1568.0 } else { 1047.0 };
+    }
+
+    /// Advance the beat clock one sample and fire a click at each beat.
+    fn metro_tick(&mut self) {
+        if !self.tempo.metronome {
+            return;
+        }
+        if self.metro_phase == 0 {
+            let accent = self.beat_index % self.tempo.beats_per_bar.max(1) == 0;
+            self.trigger_click(accent);
+        }
+        self.metro_phase += 1;
+        if self.metro_phase >= self.bar_samples() / self.tempo.beats_per_bar.max(1) as u64 {
+            self.metro_phase = 0;
+            self.beat_index += 1;
+        }
+    }
+
+    /// One sample of the metronome click (decaying sine), 0 when silent.
+    fn click_sample(&mut self) -> f32 {
+        if self.click_env < 1e-4 {
+            return 0.0;
+        }
+        let s = (self.click_phase as f64 * TWO_PI_F64).sin() as f32 * self.click_env * 0.25;
+        self.click_phase += self.click_freq / self.sr;
+        if self.click_phase >= 1.0 {
+            self.click_phase -= 1.0;
+        }
+        self.click_env *= self.click_decay;
+        s
+    }
+
     fn tap(&mut self) {
+        // Ignore taps during a count-in or a fixed-length first take (it
+        // auto-closes at the bar boundary).
+        if self.pre_roll > 0 || (self.defining && self.loop_len.is_some()) {
+            return;
+        }
         let recording = self.recording.is_some();
         match (self.loop_len, self.defining) {
             // Idle: arm the first (loop-defining) take.
             (None, false) if !self.armed && !recording => {
-                self.arm(true);
-                self.playing = true;
-                self.pos = 0;
+                if self.tempo.bars > 0 && self.tempo.count_in {
+                    // Count in one bar of clicks, then begin recording.
+                    self.pre_roll = self.bar_samples();
+                    self.pending_record = true;
+                    self.playing = false;
+                    self.metro_phase = 0;
+                    self.beat_index = 0;
+                } else {
+                    self.begin_first_take();
+                }
             }
             // Closing the first pass: fix loop length, start looping.
             (None, true) => {
@@ -425,6 +568,8 @@ impl Studio {
         self.playing = false;
         self.defining = false;
         self.song_active = false;
+        self.pre_roll = 0;
+        self.pending_record = false;
         self.live.all_notes_off();
         for t in &mut self.tracks {
             t.inst.all_notes_off();
@@ -442,6 +587,8 @@ impl Studio {
         self.pos = 0;
         self.playing = false;
         self.song_active = false;
+        self.pre_roll = 0;
+        self.pending_record = false;
         self.live.all_notes_off();
         self.mark_structure_dirty();
     }
@@ -621,9 +768,18 @@ impl Studio {
     pub fn render(&mut self, out: &mut [f32], channels: usize) {
         self.flush_structure();
         for frame in out.chunks_mut(channels) {
-            if self.playing {
+            if self.pre_roll > 0 {
+                // Count-in: clicks only, no playback/recording.
+                self.metro_tick();
+                self.pre_roll -= 1;
+                if self.pre_roll == 0 && self.pending_record {
+                    self.pending_record = false;
+                    self.begin_first_take();
+                }
+            } else if self.playing {
                 self.fire_events();
                 self.advance_clock();
+                self.metro_tick();
             }
 
             let mut s = self.live.render_frame();
@@ -633,6 +789,7 @@ impl Studio {
                     s += f;
                 }
             }
+            s += self.click_sample();
             let sample = s.clamp(-1.0, 1.0);
             for ch in frame.iter_mut() {
                 *ch = sample;
@@ -677,7 +834,10 @@ impl Studio {
             if self.pos >= len {
                 self.pos = 0;
                 self.reset_cursors();
-                if self.song_active {
+                if self.defining {
+                    // A fixed-length first take just completed one bar-count pass.
+                    self.close_defining();
+                } else if self.song_active {
                     self.advance_song();
                 }
             }
@@ -716,7 +876,7 @@ impl Studio {
     // ---- publishing to the UI ----
 
     fn current_state(&self) -> TransportState {
-        if self.recording.is_some() || self.armed {
+        if self.recording.is_some() || self.armed || self.pre_roll > 0 {
             TransportState::Recording
         } else if self.playing {
             TransportState::Playing
@@ -983,6 +1143,41 @@ mod tests {
         drain(&mut s, 2400 + 50);
         assert!(!s.song_active, "song ends after the last section");
         assert!(!s.playing);
+    }
+
+    #[test]
+    fn fixed_bars_recording_auto_closes() {
+        use crate::project::TempoGrid;
+        let mut s = Studio::new(48_000.0);
+        // 120 BPM, 4/4 => beat 24000, bar 96000 samples. One-bar loop.
+        s.handle(Command::SetTempo(TempoGrid {
+            bars: 1,
+            ..TempoGrid::default()
+        }));
+        s.handle(Command::Tap);
+        assert!(s.defining);
+        assert_eq!(s.loop_len, Some(96_000), "loop length fixed to one bar");
+        s.handle(Command::NoteOn { note: 60, vel: 1.0 });
+        drain(&mut s, 96_000 + 20); // play through the bar → auto-close
+        assert!(!s.defining, "fixed take auto-closes at the bar boundary");
+        assert_eq!(s.loop_len, Some(96_000));
+        assert_eq!(s.tracks.len(), 1);
+    }
+
+    #[test]
+    fn quantize_snaps_note_ons() {
+        use crate::project::TempoGrid;
+        let mut s = Studio::new(48_000.0);
+        // 120 BPM, 1/16 grid => 6000 samples per step.
+        s.handle(Command::SetTempo(TempoGrid {
+            quantize: 4,
+            ..TempoGrid::default()
+        }));
+        s.handle(Command::Tap); // free defining
+        drain(&mut s, 6100); // just past a grid line
+        s.handle(Command::NoteOn { note: 60, vel: 1.0 });
+        let r = s.recording.expect("recording");
+        assert_eq!(s.tracks[r].events[0].pos, 6000, "note-on snapped to the 1/16 grid");
     }
 
     #[test]

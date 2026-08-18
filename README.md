@@ -35,6 +35,14 @@ cargo run --release
 - **Mouse:** click the on-screen piano (vertical position sets velocity).
 - **MIDI:** pick your device from the dropdown (Rescan if you plug in later).
 
+## Tempo & grid
+
+The transport has a **Tempo** row: BPM, beats-per-bar, a **Loop** length in bars
+(or *Free*), a **Quantize** grid (Off / ¼ / ⅛ / ⅛T / 1⁄16), a metronome **🔔 Click**,
+and **Count-in**. With a fixed bar length, recording auto-closes exactly on the
+bar; quantize snaps recorded notes to the grid so takes lock together. Tempo
+settings save with the project.
+
 ## Looper
 
 Build up a jam from layered loops, shown as tracks below the keyboard. The

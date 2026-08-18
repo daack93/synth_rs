@@ -22,7 +22,7 @@ use instrument::EngineParams;
 use midi::MidiInputHandle;
 use models::FtmModel;
 use presets::Preset;
-use project::{NamedLoop, Project, Section};
+use project::{NamedLoop, Project, Section, TempoGrid};
 use studio::{Command, LooperMode, NoteSpan, SharedView, SongSection, TrackView, TransportState};
 
 /// Spacebar hold thresholds: a quick press taps, a medium hold stops, a long
@@ -136,9 +136,10 @@ impl App {
         let models = models::registry();
         let selected = 0;
         let engine = EngineParams::default();
-        // Prime the audio thread with the initial model + engine params.
+        // Prime the audio thread with the initial model + engine + tempo.
         let _ = tx.send(Command::SetModel(models[selected].box_clone()));
         let _ = tx.send(Command::SetEngine(engine.clone()));
+        let _ = tx.send(Command::SetTempo(TempoGrid::default()));
 
         let midi_ports = midi::list_ports();
         // First run seeds the folder with the factory instrument kit.
@@ -164,6 +165,7 @@ impl App {
                 name: "Untitled".to_string(),
                 loops: Vec::new(),
                 arrangement: Vec::new(),
+                tempo: TempoGrid::default(),
             },
             project_name: "Untitled".to_string(),
             loop_name: String::new(),
@@ -297,6 +299,7 @@ impl App {
                 self.project_name = p.name.clone();
                 self.project_status =
                     format!("Loaded “{}” ({} loops).", p.name, p.loops.len());
+                let _ = self.tx.send(Command::SetTempo(p.tempo));
                 self.project = p;
             }
             Err(e) => self.project_status = format!("Load failed: {e}"),
@@ -544,6 +547,7 @@ impl App {
                     name: "Untitled".into(),
                     loops: Vec::new(),
                     arrangement: Vec::new(),
+                    tempo: self.project.tempo,
                 };
                 self.project_name = "Untitled".into();
                 self.project_status = "New project.".into();
@@ -1097,6 +1101,73 @@ impl App {
             LooperMode::Overdub => "Space: tap = record base, then each tap layers a new track. Hold = Stop · hold longer = Reset.",
         };
         ui.label(egui::RichText::new(tap_hint).weak().small());
+
+        self.tempo_bar(ui);
+    }
+
+    /// Tempo, bars grid, quantize, and metronome controls.
+    fn tempo_bar(&mut self, ui: &mut egui::Ui) {
+        let t = &mut self.project.tempo;
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.label("Tempo");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut t.bpm)
+                        .range(20.0..=300.0)
+                        .speed(0.5)
+                        .suffix(" BPM"),
+                )
+                .changed();
+            changed |= ui
+                .add(egui::DragValue::new(&mut t.beats_per_bar).range(1..=16).suffix("/bar"))
+                .changed();
+            ui.separator();
+
+            ui.label("Loop");
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut t.bars)
+                        .range(0..=64)
+                        .custom_formatter(|n, _| {
+                            if n < 0.5 {
+                                "Free".to_string()
+                            } else {
+                                format!("{} bar", n as u32)
+                            }
+                        }),
+                )
+                .on_hover_text("Fixed loop length in bars (Free = the take sets the length).")
+                .changed();
+            ui.separator();
+
+            ui.label("Quantize");
+            let qname = |q: u32| match q {
+                0 => "Off",
+                1 => "1/4",
+                2 => "1/8",
+                3 => "1/8T",
+                4 => "1/16",
+                _ => "?",
+            };
+            egui::ComboBox::from_id_salt("quantize")
+                .selected_text(qname(t.quantize))
+                .show_ui(ui, |ui| {
+                    for q in [0u32, 1, 2, 3, 4] {
+                        changed |= ui.selectable_value(&mut t.quantize, q, qname(q)).changed();
+                    }
+                });
+            ui.separator();
+
+            changed |= ui.checkbox(&mut t.metronome, "🔔 Click").changed();
+            changed |= ui
+                .checkbox(&mut t.count_in, "Count-in")
+                .on_hover_text("Play one bar of clicks before a fixed-bars recording.")
+                .changed();
+        });
+        if changed {
+            let _ = self.tx.send(Command::SetTempo(self.project.tempo));
+        }
     }
 
     /// The recorded loop tracks, shown below the keyboard.

@@ -69,6 +69,34 @@ pub struct Section {
     pub repeats: u32,
 }
 
+/// Tempo + grid settings for recording in time.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TempoGrid {
+    pub bpm: f32,
+    pub beats_per_bar: u32,
+    /// Fixed loop length in bars (0 = free-length; the take sets the length).
+    pub bars: u32,
+    /// Quantize grid steps per beat (0 = off; 1 = 1/4, 2 = 1/8, 3 = 1/8T, 4 = 1/16).
+    pub quantize: u32,
+    pub metronome: bool,
+    /// Play one bar of clicks before a fixed-bars recording starts.
+    pub count_in: bool,
+}
+
+impl Default for TempoGrid {
+    fn default() -> Self {
+        Self {
+            bpm: 120.0,
+            beats_per_bar: 4,
+            bars: 0,
+            quantize: 0,
+            metronome: false,
+            count_in: false,
+        }
+    }
+}
+
 /// A project: a named collection of loops plus a song arrangement over them.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Project {
@@ -78,6 +106,9 @@ pub struct Project {
     /// The song: an ordered list of sections played straight through.
     #[serde(default)]
     pub arrangement: Vec<Section>,
+    /// Tempo + grid settings (saved with the project).
+    #[serde(default)]
+    pub tempo: TempoGrid,
 }
 
 /// Directory projects are stored in: `$FTM_SYNTH_PROJECTS`, else `projects/`.
@@ -179,6 +210,7 @@ mod tests {
             name: "My Song".into(),
             loops: Vec::new(),
             arrangement: Vec::new(),
+            tempo: TempoGrid::default(),
         };
         project.loops.push(NamedLoop { name: "Groove A".into(), data: sample_loop() });
         let path = save_in(&dir, &project).unwrap();
