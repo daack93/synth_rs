@@ -1819,9 +1819,11 @@ impl App {
         }
     }
 
-    /// The arrangement editor: one lane per track on a shared time axis; clips
-    /// can be dragged to move, edge-dragged to resize, duplicated, and deleted.
-    /// Clicking empty timeline seeks; clicking a clip selects its track.
+    /// The arrangement editor: a wrapping multi-lane timeline. Time flows left to
+    /// right and wraps to stacked blocks (like a score wrapping systems); each
+    /// block shows every track's lane for that time window. Clips can be dragged
+    /// to move, edge-dragged to resize, duplicated and deleted; click empty to
+    /// seek, double-click an empty lane to place a clip.
     fn arrangement_editor(
         &mut self,
         ui: &mut egui::Ui,
@@ -1835,71 +1837,118 @@ impl App {
             return;
         }
         self.sel_clips.retain(|&i| i < clips.len());
+        let n = tracks.len();
         let song = song_secs.max(0.001);
         ui.horizontal(|ui| {
             ui.strong("Arrangement");
             let hint = if arrange_mode {
-                "drag to move · right edge to resize · click a clip to select · click empty to seek"
+                "drag to move · right edge to resize · click empty to seek · dbl-click empty lane to place"
             } else {
                 "(Loop mode active — playback ignores placement; switch to 🎬 Arrange to hear it)"
             };
             ui.label(egui::RichText::new(hint).weak().small());
         });
 
-        let lane_h = 28.0;
-        let label_w = 110.0;
-        let width = ui.available_width().max(320.0);
-        let (rect, resp) = ui.allocate_exact_size(
-            egui::vec2(width, tracks.len() as f32 * lane_h + 2.0),
-            egui::Sense::click_and_drag(),
-        );
+        let lane_h = 22.0;
+        let row_gap = 12.0;
+        let label_w = 66.0;
+        let px_per_bar = 84.0;
+        let bar_secs =
+            60.0 / self.project.tempo.bpm.max(1.0) * self.project.tempo.beats_per_bar.max(1) as f32;
+        let avail = ui.available_width().max(360.0);
+        let tl_w = (avail - label_w - 8.0).max(60.0);
+        let bars_per_row = ((tl_w / px_per_bar).floor() as usize).max(1);
+        let row_secs = (bars_per_row as f32 * bar_secs).max(0.001);
+        let n_rows = ((song / row_secs).ceil() as usize).clamp(1, 200);
+        let row_h = n as f32 * lane_h + row_gap;
+        let (rect, resp) =
+            ui.allocate_exact_size(egui::vec2(avail, n_rows as f32 * row_h), egui::Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 3.0, egui::Color32::from_gray(22));
         let tl_x = rect.left() + label_w;
-        let tl_w = (rect.right() - tl_x - 6.0).max(20.0);
-        let x_of = |s: f32| tl_x + (s / song).clamp(0.0, 1.0) * tl_w;
-        let secs_of = |x: f32| ((x - tl_x) / tl_w).clamp(0.0, 1.0) * song;
-        let bar_secs =
-            60.0 / self.project.tempo.bpm.max(1.0) * self.project.tempo.beats_per_bar.max(1) as f32;
-        let snap = |s: f32| if bar_secs > 0.0 { (s / bar_secs).round() * bar_secs } else { s };
+        let font = egui::FontId::proportional(10.0);
 
-        // Lane backgrounds + labels.
-        let font = egui::FontId::proportional(11.0);
-        for (i, t) in tracks.iter().enumerate() {
-            let y0 = rect.top() + i as f32 * lane_h;
-            if i % 2 == 1 {
-                painter.rect_filled(
-                    egui::Rect::from_min_size(egui::pos2(tl_x, y0), egui::vec2(tl_w, lane_h)),
-                    0.0,
-                    egui::Color32::from_gray(30),
+        let row_top = |r: usize| rect.top() + r as f32 * row_h;
+        let x_in_row = |secs: f32, r: usize| {
+            tl_x + ((secs - r as f32 * row_secs) / row_secs).clamp(0.0, 1.0) * tl_w
+        };
+        // Pointer → absolute time (any row); and → (lane, time) when over a lane.
+        let time_at = |p: egui::Pos2| -> f32 {
+            let rel = (p.y - rect.top()).max(0.0);
+            let r = ((rel / row_h) as usize).min(n_rows - 1);
+            (r as f32 * row_secs + ((p.x - tl_x) / tl_w).clamp(0.0, 1.0) * row_secs).clamp(0.0, song)
+        };
+        let lane_at = |p: egui::Pos2| -> Option<usize> {
+            if p.x < tl_x {
+                return None;
+            }
+            let rel = p.y - rect.top();
+            if rel < 0.0 {
+                return None;
+            }
+            let r = (rel / row_h) as usize;
+            if r >= n_rows {
+                return None;
+            }
+            let lane = ((rel - r as f32 * row_h) / lane_h) as usize;
+            (lane < n).then_some(lane)
+        };
+        let hit_clip = |p: egui::Pos2| -> Option<(usize, bool)> {
+            let lane = lane_at(p)?;
+            let t = time_at(p);
+            let resize_secs = (6.0 / tl_w) * row_secs;
+            for (ci, c) in clips.iter().enumerate().rev() {
+                if c.track != lane {
+                    continue;
+                }
+                let len = if c.length > 0.0 { c.length } else { (song - c.start).max(0.0) };
+                if t >= c.start && t <= c.start + len {
+                    return Some((ci, t >= c.start + len - resize_secs));
+                }
+            }
+            None
+        };
+
+        // Row backgrounds: alternate-lane shading + a separator above each row.
+        for r in 0..n_rows {
+            for li in 0..n {
+                if li % 2 == 1 {
+                    let y0 = row_top(r) + li as f32 * lane_h;
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(egui::pos2(tl_x, y0), egui::vec2(tl_w, lane_h)),
+                        0.0,
+                        egui::Color32::from_gray(30),
+                    );
+                }
+            }
+            // Bar gridlines within the row.
+            let yr = egui::Rangef::new(row_top(r), row_top(r) + n as f32 * lane_h);
+            for b in 0..=bars_per_row {
+                let secs = r as f32 * row_secs + b as f32 * bar_secs;
+                if secs > song + 1e-3 {
+                    break;
+                }
+                painter.vline(x_in_row(secs, r), yr, egui::Stroke::new(1.0_f32, egui::Color32::from_gray(40)));
+            }
+            // Lane labels (repeated per row) + row/time marker.
+            for (li, t) in tracks.iter().enumerate() {
+                painter.text(
+                    egui::pos2(rect.left() + 3.0, row_top(r) + li as f32 * lane_h + lane_h * 0.5),
+                    egui::Align2::LEFT_CENTER,
+                    &t.name,
+                    font.clone(),
+                    egui::Color32::from_gray(150),
                 );
             }
-            painter.text(
-                egui::pos2(rect.left() + 3.0, y0 + lane_h * 0.5),
-                egui::Align2::LEFT_CENTER,
-                &t.name,
-                font.clone(),
-                egui::Color32::from_gray(180),
-            );
-        }
-        // Bar gridlines.
-        if bar_secs > 0.0 {
-            let mut b = 0.0;
-            while b <= song && (b / bar_secs) < 512.0 {
-                painter.vline(x_of(b), rect.y_range(), egui::Stroke::new(1.0_f32, egui::Color32::from_gray(40)));
-                b += bar_secs;
-            }
         }
 
-        // Clips.
+        // Clips (drawn as one segment per row they span), with their notes.
         for (ci, c) in clips.iter().enumerate() {
-            if c.track >= tracks.len() {
+            if c.track >= n {
                 continue;
             }
             let t = &tracks[c.track];
-            let y0 = rect.top() + c.track as f32 * lane_h;
             let default_len = if c.length > 0.0 { c.length } else { (song - c.start).max(0.0) };
-            // Live preview while dragging (this clip, or others in a multi-move).
             let (start, len) = match self.arr_drag {
                 Some((di, resize, ps, pl)) if di == ci => (ps, if resize { pl } else { default_len }),
                 Some((di, false, ps, _)) if self.sel_clips.contains(&ci) && self.sel_clips.contains(&di) => {
@@ -1908,12 +1957,7 @@ impl App {
                 }
                 _ => (c.start, default_len),
             };
-            let cx0 = x_of(start);
-            let cx1 = x_of(start + len);
-            let clip_rect = egui::Rect::from_min_max(
-                egui::pos2(cx0, y0 + 2.0),
-                egui::pos2(cx1.max(cx0 + 4.0), y0 + lane_h - 2.0),
-            );
+            let end = start + len;
             let selected = self.sel_clips.contains(&ci);
             let fill = if t.muted {
                 egui::Color32::from_gray(70)
@@ -1922,51 +1966,54 @@ impl App {
             } else {
                 egui::Color32::from_rgb(60, 90, 130)
             };
-            painter.rect_filled(clip_rect, 3.0, fill);
-            if selected {
-                painter.rect_stroke(clip_rect, 3.0, egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(210, 235, 210)));
+            let r0 = (start / row_secs) as usize;
+            let r1 = (((end - 1e-4).max(start)) / row_secs) as usize;
+            for r in r0..=r1.min(n_rows - 1) {
+                let seg_s = start.max(r as f32 * row_secs);
+                let seg_e = end.min((r as f32 + 1.0) * row_secs);
+                if seg_e <= seg_s {
+                    continue;
+                }
+                let y0 = row_top(r) + c.track as f32 * lane_h;
+                let x0 = x_in_row(seg_s, r);
+                let x1 = x_in_row(seg_e, r).max(x0 + 3.0);
+                let rrect = egui::Rect::from_min_max(egui::pos2(x0, y0 + 2.0), egui::pos2(x1, y0 + lane_h - 1.0));
+                painter.rect_filled(rrect, 2.0, fill);
+                if selected {
+                    painter.rect_stroke(rrect, 2.0, egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(210, 235, 210)));
+                }
             }
+            // Notes, repeated across the clip's length.
             let period = t.period.max(1e-6);
-            let reps = ((len / period).ceil() as i32).clamp(1, 256);
-            for r in 0..reps {
-                let base = start + r as f32 * period;
-                for n in &t.notes {
-                    let ns = base + n.start * period;
-                    if ns >= start + len {
+            let reps = ((len / period).ceil() as i32).clamp(1, 512);
+            for rep in 0..reps {
+                let base = start + rep as f32 * period;
+                for nsp in &t.notes {
+                    let ns = base + nsp.start * period;
+                    if ns >= end {
                         continue;
                     }
-                    let ne = (base + n.end * period).min(start + len);
-                    let y = y0 + lane_h * 0.5;
+                    let r = ((ns / row_secs) as usize).min(n_rows - 1);
+                    let ne = (base + nsp.end * period).min(end).min((r as f32 + 1.0) * row_secs);
+                    let y = row_top(r) + c.track as f32 * lane_h + lane_h * 0.5;
                     painter.line_segment(
-                        [egui::pos2(x_of(ns), y), egui::pos2(x_of(ne).max(x_of(ns) + 1.0), y)],
+                        [egui::pos2(x_in_row(ns, r), y), egui::pos2(x_in_row(ne, r).max(x_in_row(ns, r) + 1.0), y)],
                         egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(190, 215, 255)),
                     );
                 }
             }
         }
-        // Playhead.
-        painter.vline(x_of(play * song), rect.y_range(), egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(240, 240, 120)));
 
-        // Topmost clip under a point (and whether over its right-edge resize zone).
-        let hit_clip = |p: egui::Pos2| -> Option<(usize, bool)> {
-            for (ci, c) in clips.iter().enumerate().rev() {
-                if c.track >= tracks.len() {
-                    continue;
-                }
-                let y0 = rect.top() + c.track as f32 * lane_h;
-                if p.y < y0 + 2.0 || p.y > y0 + lane_h - 2.0 {
-                    continue;
-                }
-                let len = if c.length > 0.0 { c.length } else { (song - c.start).max(0.0) };
-                let cx0 = x_of(c.start);
-                let cx1 = x_of(c.start + len).max(cx0 + 4.0);
-                if p.x >= cx0 && p.x <= cx1 {
-                    return Some((ci, p.x >= cx1 - 6.0));
-                }
-            }
-            None
-        };
+        // Playhead (in its row).
+        {
+            let pl = play * song;
+            let r = ((pl / row_secs) as usize).min(n_rows - 1);
+            let yr = egui::Rangef::new(row_top(r), row_top(r) + n as f32 * lane_h);
+            painter.vline(x_in_row(pl, r), yr, egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(240, 240, 120)));
+        }
 
+        // ---- interaction ----
+        let snap = |s: f32| if bar_secs > 0.0 { (s / bar_secs).round() * bar_secs } else { s };
         let shift = ui.input(|i| i.modifiers.shift);
         if resp.drag_started() {
             if let Some(p) = resp.interact_pointer_pos() {
@@ -1992,11 +2039,11 @@ impl App {
         if resp.dragged() {
             if let (Some((ci, resize, _, _)), Some(p)) = (self.arr_drag, resp.interact_pointer_pos()) {
                 if resize {
-                    let len = snap((secs_of(p.x) - clips[ci].start).max(bar_secs.max(0.05)));
+                    let len = snap((time_at(p) - clips[ci].start).max(bar_secs.max(0.05)));
                     self.arr_drag = Some((ci, true, clips[ci].start, len));
                 } else {
                     let len = self.arr_drag.map(|d| d.3).unwrap_or(0.0);
-                    self.arr_drag = Some((ci, false, snap(secs_of(p.x)).max(0.0), len));
+                    self.arr_drag = Some((ci, false, snap(time_at(p)).max(0.0), len));
                 }
             }
         }
@@ -2019,14 +2066,12 @@ impl App {
                 }
             }
         } else if resp.double_clicked() {
-            // Double-click an empty spot on a lane → place that track there.
             if let Some(p) = resp.interact_pointer_pos() {
-                if hit_clip(p).is_none() && p.x >= tl_x {
-                    let lane = ((p.y - rect.top()) / lane_h) as usize;
-                    if lane < tracks.len() {
+                if hit_clip(p).is_none() {
+                    if let Some(lane) = lane_at(p) {
                         let _ = self.tx.send(Command::AddClip {
                             track: lane,
-                            start: snap(secs_of(p.x)).max(0.0),
+                            start: snap(time_at(p)).max(0.0),
                             length: 0.0,
                         });
                     }
@@ -2045,8 +2090,8 @@ impl App {
                         self.sel_clips = vec![ci];
                     }
                     self.set_target(Target::Track(clips[ci].track), tracks);
-                } else if p.x >= tl_x {
-                    let _ = self.tx.send(Command::Seek(secs_of(p.x)));
+                } else if lane_at(p).is_some() {
+                    let _ = self.tx.send(Command::Seek(time_at(p)));
                     self.sel_clips.clear();
                 }
             }
