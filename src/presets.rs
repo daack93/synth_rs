@@ -95,13 +95,15 @@ pub fn factory() -> Vec<Preset> {
 
     vec![
         // ---- Pure String (feedback: pluck toward saw, stronger HF damping) ----
-        make("Acoustic Bass", string(1.5, 5.0, -4.0, 6.0, 24, 0.15), eng(0.75, 4.0, 120.0)),
+        make("Acoustic Bass", string(1.5, 5.0, -5.0, 6.0, 24, 0.15), eng(0.75, 4.0, 120.0)),
         make("Electric Bass", string(2.0, 4.0, -3.0, 8.0, 22, 0.12), eng(0.75, 4.0, 140.0)),
-        make("Acoustic Guitar", string(1.0, 7.0, -3.5, 12.0, 28, 0.10), eng(0.6, 3.0, 120.0)),
+        make("Acoustic Guitar", string(1.0, 7.0, -4.5, 12.0, 28, 0.10), eng(0.6, 3.0, 120.0)),
         make("Electric Guitar", string(1.2, 2.5, -2.5, 16.0, 32, 0.10), eng(0.6, 3.0, 200.0)),
-        make("Piano", string(6.0, 3.0, -2.5, 12.0, 28, 0.12), eng(0.6, 2.0, 150.0)),
+        // Less bass-heavy: brighter (more modes) with the highs allowed to sustain.
+        make("Piano", string(6.0, 3.0, -1.8, 12.0, 36, 0.12), eng(0.6, 2.0, 150.0)),
         make("Banjo", string(3.0, 13.0, -6.0, 20.0, 36, 0.08), eng(0.6, 2.0, 80.0)),
-        make("Harp", string(0.8, 3.5, -3.0, 14.0, 32, 0.12), eng(0.6, 3.0, 180.0)),
+        // Rounder pluck + more HF damping to tame the "electric" low end.
+        make("Harp", string(0.8, 3.5, -4.0, 14.0, 28, 0.18), eng(0.6, 3.0, 180.0)),
         // ---- Musical String (music-friendly controls) ----
         make(
             "Soft Nylon",
@@ -116,34 +118,63 @@ pub fn factory() -> Vec<Preset> {
         // ---- Drum (2D membrane) ----
         make(
             "Tom",
-            DrumMembrane { strike_pos: 0.5, damping: 6.0, freq_dep_damping: -2.5, radius: 10.0, depth: 40, stiffness: 0.5, ..DrumMembrane::default() },
+            DrumMembrane { strike_pos: 0.5, damping: 9.0, freq_dep_damping: -3.5, radius: 10.0, depth: 40, stiffness: 0.5, ..DrumMembrane::default() },
             eng(0.7, 1.0, 90.0),
         ),
         make(
             "Kick",
-            DrumMembrane { strike_pos: 0.35, damping: 14.0, freq_dep_damping: -4.0, radius: 14.0, depth: 28, stiffness: 0.2, ..DrumMembrane::default() },
+            DrumMembrane { strike_pos: 0.35, damping: 28.0, freq_dep_damping: -4.0, radius: 14.0, depth: 28, stiffness: 0.2, ..DrumMembrane::default() },
             eng(0.85, 1.0, 60.0),
         ),
         make(
             "Timpani",
-            DrumMembrane { strike_pos: 0.65, damping: 3.0, freq_dep_damping: -1.5, radius: 9.0, depth: 48, stiffness: 1.0, ..DrumMembrane::default() },
+            DrumMembrane { strike_pos: 0.7, damping: 2.5, freq_dep_damping: -1.5, radius: 9.0, depth: 48, stiffness: 1.0, ..DrumMembrane::default() },
             eng(0.6, 2.0, 200.0),
         ),
         // ---- Webster Horn ----
+        // Trumpet: physical bore (contracting throat + flare) from Dave's config.
+        // Their freq_dependent_damping = +0.08 maps to our −0.08 sign convention.
         make(
             "Trumpet",
-            WebsterHorn { boundary: Boundary::Brass, blow_pos: 0.0, r3: 4.0, length: 1.0, damping: 3.0, freq_dep_damping: -0.10, depth: 22, ..WebsterHorn::default() },
-            eng(0.6, 12.0, 120.0),
+            WebsterHorn {
+                boundary: Boundary::Brass,
+                r1: 0.0045,
+                r2: -0.0030,
+                r3: 0.0320,
+                length: 1.4,
+                wave_speed: 343.0,
+                blow_pos: 0.0,
+                depth: 32,
+                resolution: 512,
+                damping: 10.0,
+                freq_dep_damping: -0.08,
+                ..WebsterHorn::default()
+            },
+            eng(0.6, 30.0, 45.0),
         ),
+        // French Horn: same bore idea, longer + darker (more HF damping).
         make(
             "French Horn",
-            WebsterHorn { boundary: Boundary::Brass, blow_pos: 0.05, r3: 6.0, length: 1.5, damping: 2.2, freq_dep_damping: -0.12, depth: 24, ..WebsterHorn::default() },
-            eng(0.55, 25.0, 180.0),
+            WebsterHorn {
+                boundary: Boundary::Brass,
+                r1: 0.0045,
+                r2: -0.0020,
+                r3: 0.0250,
+                length: 2.4,
+                blow_pos: 0.0,
+                depth: 30,
+                resolution: 400,
+                damping: 8.0,
+                freq_dep_damping: -0.10,
+                ..WebsterHorn::default()
+            },
+            eng(0.55, 30.0, 150.0),
         ),
+        // Didgeridoo: near-lossless drone — barely damps, rings on and on.
         make(
             "Didgeridoo",
-            WebsterHorn { boundary: Boundary::Open, blow_pos: 0.10, r2: 0.5, r3: 0.5, length: 3.0, damping: 1.5, freq_dep_damping: -0.08, depth: 20, ..WebsterHorn::default() },
-            eng(0.6, 20.0, 200.0),
+            WebsterHorn { boundary: Boundary::Open, blow_pos: 0.10, r2: 0.5, r3: 0.5, length: 3.0, damping: 0.25, freq_dep_damping: -0.03, depth: 20, ..WebsterHorn::default() },
+            eng(0.6, 20.0, 400.0),
         ),
         // ---- Basic Wave (reference oscillators) ----
         make("Triangle Lead", BasicWave { waveform: Waveform::Triangle, harmonics: 16, decay_time: 1.5 }, eng(0.5, 3.0, 120.0)),
