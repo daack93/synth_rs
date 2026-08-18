@@ -11,7 +11,11 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::models::basic_wave::{BasicWave, Waveform};
+use crate::models::drum_membrane::DrumMembrane;
+use crate::models::musical_string::MusicalString;
 use crate::models::pure_string::PureString;
+use crate::models::webster_horn::{Boundary, WebsterHorn};
 use crate::models::{model_from_id, FtmModel};
 use crate::instrument::EngineParams;
 
@@ -85,47 +89,65 @@ pub fn factory() -> Vec<Preset> {
             retrigger_ms: 0.0,
         }
     }
-    fn make(name: &str, ps: PureString, engine: EngineParams) -> Preset {
-        Preset::capture(name, &ps, &engine)
+    fn make<M: FtmModel>(name: &str, model: M, engine: EngineParams) -> Preset {
+        Preset::capture(name, &model, &engine)
     }
 
     vec![
-        // Round upright pizz: near-center pluck (hollow), dark, medium sustain.
+        // ---- Pure String (feedback: pluck toward saw, stronger HF damping) ----
+        make("Acoustic Bass", string(1.5, 5.0, -4.0, 6.0, 24, 0.15), eng(0.75, 4.0, 120.0)),
+        make("Electric Bass", string(2.0, 4.0, -3.0, 8.0, 22, 0.12), eng(0.75, 4.0, 140.0)),
+        make("Acoustic Guitar", string(1.0, 7.0, -3.5, 12.0, 28, 0.10), eng(0.6, 3.0, 120.0)),
+        make("Electric Guitar", string(1.2, 2.5, -2.5, 16.0, 32, 0.10), eng(0.6, 3.0, 200.0)),
+        make("Piano", string(6.0, 3.0, -2.5, 12.0, 28, 0.12), eng(0.6, 2.0, 150.0)),
+        make("Banjo", string(3.0, 13.0, -6.0, 20.0, 36, 0.08), eng(0.6, 2.0, 80.0)),
+        make("Harp", string(0.8, 3.5, -3.0, 14.0, 32, 0.12), eng(0.6, 3.0, 180.0)),
+        // ---- Musical String (music-friendly controls) ----
         make(
-            "Acoustic Bass",
-            string(1.5, 5.0, -3.0, 6.0, 24, 0.5),
-            eng(0.75, 4.0, 120.0),
+            "Soft Nylon",
+            MusicalString { pluck_pos: 0.14, inharmonicity: 0.0004, decay_time: 1.6, hf_damping: 1.4, num_modes: 32 },
+            eng(0.6, 3.0, 130.0),
         ),
-        // Growly finger bass: fuller off-center pluck, a touch brighter, longer.
         make(
-            "Electric Bass",
-            string(2.0, 4.0, -2.0, 8.0, 20, 0.15),
-            eng(0.75, 4.0, 140.0),
+            "Glass Pluck",
+            MusicalString { pluck_pos: 0.10, inharmonicity: 0.0018, decay_time: 2.4, hf_damping: 0.7, num_modes: 44 },
+            eng(0.6, 3.0, 160.0),
         ),
-        // Steel-string body: moderate brightness and sustain.
+        // ---- Drum (2D membrane) ----
         make(
-            "Acoustic Guitar",
-            string(1.0, 7.0, -1.8, 12.0, 24, 0.13),
-            eng(0.6, 3.0, 120.0),
+            "Tom",
+            DrumMembrane { strike_pos: 0.5, damping: 6.0, freq_dep_damping: -2.5, radius: 10.0, depth: 40, stiffness: 0.5, ..DrumMembrane::default() },
+            eng(0.7, 1.0, 90.0),
         ),
-        // Clean electric: bright, long sustain, slow tone decay.
         make(
-            "Electric Guitar",
-            string(1.2, 2.0, -0.6, 16.0, 28, 0.12),
-            eng(0.6, 3.0, 200.0),
+            "Kick",
+            DrumMembrane { strike_pos: 0.35, damping: 14.0, freq_dep_damping: -4.0, radius: 14.0, depth: 28, stiffness: 0.2, ..DrumMembrane::default() },
+            eng(0.85, 1.0, 60.0),
         ),
-        // Hammered piano: strong inharmonicity (high stiffness), long ring.
         make(
-            "Piano",
-            string(6.0, 3.0, -1.2, 12.0, 24, 0.13),
-            eng(0.6, 2.0, 150.0),
+            "Timpani",
+            DrumMembrane { strike_pos: 0.65, damping: 3.0, freq_dep_damping: -1.5, radius: 9.0, depth: 48, stiffness: 1.0, ..DrumMembrane::default() },
+            eng(0.6, 2.0, 200.0),
         ),
-        // Banjo: very bright, quick "plink" (fast HF + short sustain).
+        // ---- Webster Horn ----
         make(
-            "Banjo",
-            string(3.0, 13.0, -4.0, 20.0, 32, 0.1),
-            eng(0.6, 2.0, 80.0),
+            "Trumpet",
+            WebsterHorn { boundary: Boundary::Brass, blow_pos: 0.0, r3: 4.0, length: 1.0, damping: 3.0, freq_dep_damping: -0.10, depth: 22, ..WebsterHorn::default() },
+            eng(0.6, 12.0, 120.0),
         ),
+        make(
+            "French Horn",
+            WebsterHorn { boundary: Boundary::Brass, blow_pos: 0.05, r3: 6.0, length: 1.5, damping: 2.2, freq_dep_damping: -0.12, depth: 24, ..WebsterHorn::default() },
+            eng(0.55, 25.0, 180.0),
+        ),
+        make(
+            "Didgeridoo",
+            WebsterHorn { boundary: Boundary::Open, blow_pos: 0.10, r2: 0.5, r3: 0.5, length: 3.0, damping: 1.5, freq_dep_damping: -0.08, depth: 20, ..WebsterHorn::default() },
+            eng(0.6, 20.0, 200.0),
+        ),
+        // ---- Basic Wave (reference oscillators) ----
+        make("Triangle Lead", BasicWave { waveform: Waveform::Triangle, harmonics: 16, decay_time: 1.5 }, eng(0.5, 3.0, 120.0)),
+        make("Saw Lead", BasicWave { waveform: Waveform::Saw, harmonics: 40, decay_time: 1.2 }, eng(0.45, 3.0, 120.0)),
     ]
 }
 
@@ -292,21 +314,25 @@ mod tests {
     #[test]
     fn factory_kit_is_valid() {
         let kit = factory();
-        assert_eq!(kit.len(), 6);
+        assert!(kit.len() >= 12, "a decent kit across models");
         let mut names: Vec<_> = kit.iter().map(|p| p.name.clone()).collect();
         let before = names.len();
         names.sort();
         names.dedup();
         assert_eq!(names.len(), before, "factory preset names must be unique");
+        // Covers every registered model.
+        let ids: std::collections::HashSet<_> = kit.iter().map(|p| p.model_id.clone()).collect();
+        for id in ["pure_string", "musical_string", "drum_membrane", "webster_horn", "basic_wave"] {
+            assert!(ids.contains(id), "kit should include a {id} preset");
+        }
         // Every factory preset must rebuild into a working model that produces sound.
         for p in &kit {
-            assert_eq!(p.model_id, "pure_string");
-            let model = p.build_model().expect("factory preset rebuilds");
+            let model = p.build_model().unwrap_or_else(|| panic!("{} rebuilds", p.name));
             let mut buf = crate::models::ModeBuffer::default();
-            model.excite(110.0, 1.0, 48_000.0, &mut buf);
+            model.excite(220.0, 1.0, 48_000.0, &mut buf);
             assert!(buf.n > 0, "{} should produce modes", p.name);
-            assert!(buf.freq[..buf.n].iter().all(|f| f.is_finite() && *f > 0.0));
-            assert!(buf.decay[..buf.n].iter().all(|d| d.is_finite() && *d >= 0.0));
+            assert!(buf.freq[..buf.n].iter().all(|f| f.is_finite() && *f > 0.0), "{}", p.name);
+            assert!(buf.decay[..buf.n].iter().all(|d| d.is_finite() && *d >= 0.0), "{}", p.name);
         }
     }
 

@@ -92,9 +92,10 @@ name and **Save**; pick from the dropdown to **Load**; **Delete** removes the
 saved file. Presets live in `presets/` under the working directory, or wherever
 `$FTM_SYNTH_PRESETS` points.
 
-On first run the folder is seeded with a **factory kit** of Pure String
-instruments — Acoustic/Electric Bass, Acoustic/Electric Guitar, Piano, Banjo —
-as starting points to tune by ear. **★ Factory** restores them.
+On first run the folder is seeded with a **factory kit** spanning every model —
+strings (basses, guitars, piano, banjo, harp), a couple of musical-string plucks,
+drums (tom, kick, timpani), horns (trumpet, French horn, didgeridoo), and simple
+leads — as starting points to tune by ear. **★ Factory** restores/refreshes them.
 
 ## Models
 
