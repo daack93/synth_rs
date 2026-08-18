@@ -579,7 +579,7 @@ impl App {
         });
 
         let tap_hint = match self.looper_mode {
-            LooperMode::Pedal => "Space: tap = record → play → stop. Hold = Stop · hold longer = Reset.",
+            LooperMode::Pedal => "Space: tap = record → play → record over (new take), tap again to finish. Hold = Stop · hold longer = Reset.",
             LooperMode::Overdub => "Space: tap = record base, then each tap layers a new track. Hold = Stop · hold longer = Reset.",
         };
         ui.label(egui::RichText::new(tap_hint).weak().small());

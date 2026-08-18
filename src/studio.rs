@@ -320,9 +320,11 @@ impl Studio {
             (Some(_), _) => match self.mode {
                 LooperMode::Pedal => {
                     if recording || self.armed {
-                        self.disarm_and_finalize(); // stop the in-progress overdub
+                        self.disarm_and_finalize(); // finish this overdub, keep playing
+                    } else if self.playing {
+                        self.arm(false); // record over into a new track
                     } else {
-                        self.playing = !self.playing; // toggle stop / play
+                        self.playing = true; // resume from a stop
                     }
                 }
                 LooperMode::Overdub => {
@@ -608,6 +610,32 @@ mod tests {
             s.tracks[0].inst.active_voices() > 0,
             "recorded note should play back"
         );
+    }
+
+    #[test]
+    fn pedal_tap_records_over_while_playing() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::SetLooperMode(LooperMode::Pedal));
+        s.handle(Command::Tap); // record base
+        s.handle(Command::NoteOn { note: 48, vel: 1.0 });
+        drain(&mut s, 4800);
+        s.handle(Command::NoteOff { note: 48 });
+        s.handle(Command::Tap); // close loop -> playing (not recording)
+        assert_eq!(s.tracks.len(), 1);
+        assert!(s.playing && !s.armed && s.recording.is_none());
+
+        // Tap while playing = start recording over into a NEW track.
+        s.handle(Command::Tap);
+        assert!(s.armed || s.recording.is_some(), "tap should start recording over");
+        assert!(s.playing, "the loop keeps playing while overdubbing");
+        s.handle(Command::NoteOn { note: 55, vel: 1.0 });
+        drain(&mut s, 2400);
+        s.handle(Command::NoteOff { note: 55 });
+
+        // Tap again = finish the overdub, keep playing.
+        s.handle(Command::Tap);
+        assert_eq!(s.tracks.len(), 2, "overdub added a second track");
+        assert!(s.playing && !s.armed && s.recording.is_none());
     }
 
     #[test]
