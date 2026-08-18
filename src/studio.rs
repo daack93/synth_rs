@@ -95,6 +95,8 @@ pub enum Command {
     DeleteTrack(usize),
     /// Erase a track's recorded parameter automation.
     ClearTrackAutomation(usize),
+    /// Chop / crop / rearrange a track's timeline.
+    RegionEdit { track: usize, op: RegionOp },
     /// Swap a track's instrument model live (rebuilds its sounding voices).
     SetTrackModel(usize, Box<dyn FtmModel>),
     /// Update a track's engine params live.
@@ -107,6 +109,22 @@ pub enum Command {
     PlaySong,
     /// Update tempo / grid / metronome settings.
     SetTempo(TempoGrid),
+}
+
+/// A non-destructive edit to a track's timeline, over a time range in seconds.
+/// Positions and the loop length are preserved; only the selected notes /
+/// automation move. `dest` is the target start time for copies/moves.
+pub enum RegionOp {
+    /// Delete notes starting in `[a, b)` (and automation in range).
+    Delete { a: f32, b: f32 },
+    /// Keep only what starts in `[a, b)`; delete the rest (crop).
+    Keep { a: f32, b: f32 },
+    /// Copy the `[a, b)` content to start at `dest`.
+    Duplicate { a: f32, b: f32, dest: f32 },
+    /// Copy `[a, b)` to `dest`, then delete the original range.
+    Move { a: f32, b: f32, dest: f32 },
+    /// Slide the whole track by `delta` seconds (wraps within the loop).
+    Shift { delta: f32 },
 }
 
 /// How the live slot should be configured: a single instrument or a kit.
@@ -419,6 +437,7 @@ impl Studio {
             Command::SetSong(sections) => self.song = sections,
             Command::PlaySong => self.play_song(),
             Command::SetTempo(t) => self.tempo = t,
+            Command::RegionEdit { track, op } => self.region_edit(track, op),
             Command::ClearTrackAutomation(i) => {
                 if let Some(t) = self.tracks.get_mut(i) {
                     t.auto.clear();
@@ -939,6 +958,74 @@ impl Studio {
         }
     }
 
+    /// Chop / crop / rearrange a track's timeline. Positions and loop length are
+    /// preserved; only the selected notes + automation move.
+    fn region_edit(&mut self, i: usize, op: RegionOp) {
+        let sr = self.sr;
+        let Some(len) = self.loop_len else { return };
+        let pos = self.pos;
+        let p = |secs: f32| ((secs * sr).round().max(0.0) as u64).min(len);
+        {
+            let Some(t) = self.tracks.get_mut(i) else { return };
+            match op {
+                RegionOp::Delete { a, b } => {
+                    let (a, b) = (p(a), p(b));
+                    let spans = events_to_spans(&t.events, len);
+                    let kept: Vec<Span> =
+                        spans.into_iter().filter(|s| !(s.start >= a && s.start < b)).collect();
+                    t.events = spans_to_events(&kept);
+                    t.auto.retain(|x| !(x.pos >= a && x.pos < b));
+                }
+                RegionOp::Keep { a, b } => {
+                    let (a, b) = (p(a), p(b));
+                    let spans = events_to_spans(&t.events, len);
+                    let kept: Vec<Span> =
+                        spans.into_iter().filter(|s| s.start >= a && s.start < b).collect();
+                    t.events = spans_to_events(&kept);
+                    t.auto.retain(|x| x.pos >= a && x.pos < b);
+                }
+                RegionOp::Duplicate { a, b, dest } => {
+                    let (a, b, dest) = (p(a), p(b), p(dest));
+                    let spans = events_to_spans(&t.events, len);
+                    t.events = spans_to_events(&dup_spans(&spans, a, b, dest, len));
+                    t.auto = dup_auto(&t.auto, a, b, dest, len);
+                }
+                RegionOp::Move { a, b, dest } => {
+                    let (a, b, dest) = (p(a), p(b), p(dest));
+                    let spans = events_to_spans(&t.events, len);
+                    let dup = dup_spans(&spans, a, b, dest, len);
+                    let kept: Vec<Span> =
+                        dup.into_iter().filter(|s| !(s.start >= a && s.start < b)).collect();
+                    t.events = spans_to_events(&kept);
+                    let mut au = dup_auto(&t.auto, a, b, dest, len);
+                    au.retain(|x| !(x.pos >= a && x.pos < b));
+                    t.auto = au;
+                }
+                RegionOp::Shift { delta } => {
+                    let d = (delta * sr).round() as i64;
+                    let spans = events_to_spans(&t.events, len);
+                    let shifted: Vec<Span> = spans
+                        .iter()
+                        .map(|s| {
+                            let dur = s.end.saturating_sub(s.start);
+                            let ns = wrap_pos(s.start as i64 + d, len);
+                            Span { start: ns, end: (ns + dur).min(len), note: s.note, vel: s.vel }
+                        })
+                        .collect();
+                    t.events = spans_to_events(&shifted);
+                    for x in &mut t.auto {
+                        x.pos = wrap_pos(x.pos as i64 + d, len);
+                    }
+                }
+            }
+            t.events.sort_by_key(|e| e.pos);
+            t.auto.sort_by_key(|a| a.pos);
+            t.cursor = t.events.partition_point(|e| e.pos < pos);
+            t.auto_cursor = t.auto.partition_point(|a| a.pos < pos);
+        }
+        self.mark_structure_dirty();
+    }
+
     // ---- offline export ----
 
     /// Render the currently-installed loop/song for `frames` samples (transport
@@ -1175,6 +1262,93 @@ impl Studio {
 }
 
 /// Pair note-on/off events into normalized spans for drawing.
+/// A paired note: on at `start`, off at `end`.
+#[derive(Clone)]
+struct Span {
+    start: u64,
+    end: u64,
+    note: u8,
+    vel: f32,
+}
+
+/// Pair note-on/off events into spans. A note still held at the loop end is
+/// closed at `loop_len`.
+fn events_to_spans(events: &[Event], loop_len: u64) -> Vec<Span> {
+    let mut sorted: Vec<&Event> = events.iter().collect();
+    sorted.sort_by_key(|e| e.pos);
+    let mut open: Vec<(u8, u64, f32)> = Vec::new();
+    let mut spans = Vec::new();
+    for e in sorted {
+        match e.msg {
+            EvMsg::On { note, vel } => open.push((note, e.pos, vel)),
+            EvMsg::Off { note } => {
+                if let Some(idx) = open.iter().rposition(|(n, _, _)| *n == note) {
+                    let (n, start, vel) = open.remove(idx);
+                    spans.push(Span { start, end: e.pos.max(start), note: n, vel });
+                }
+            }
+        }
+    }
+    for (note, start, vel) in open {
+        spans.push(Span { start, end: loop_len, note, vel });
+    }
+    spans
+}
+
+/// Rebuild sorted on/off events from spans.
+fn spans_to_events(spans: &[Span]) -> Vec<Event> {
+    let mut ev = Vec::with_capacity(spans.len() * 2);
+    for s in spans {
+        ev.push(Event { pos: s.start, msg: EvMsg::On { note: s.note, vel: s.vel } });
+        ev.push(Event { pos: s.end, msg: EvMsg::Off { note: s.note } });
+    }
+    ev.sort_by_key(|e| e.pos);
+    ev
+}
+
+/// Copy the spans starting in `[a, b)` to begin at `dest`, appended to the set.
+/// Copies whose start would land outside the loop are dropped.
+fn dup_spans(spans: &[Span], a: u64, b: u64, dest: u64, loop_len: u64) -> Vec<Span> {
+    let shift = dest as i64 - a as i64;
+    let mut out = spans.to_vec();
+    for s in spans {
+        if s.start >= a && s.start < b {
+            let ns = s.start as i64 + shift;
+            let ne = s.end as i64 + shift;
+            if ns >= 0 && (ns as u64) < loop_len {
+                out.push(Span {
+                    start: ns as u64,
+                    end: (ne.max(ns + 1) as u64).min(loop_len),
+                    note: s.note,
+                    vel: s.vel,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Copy automation points in `[a, b)` to start at `dest`, appended to the set.
+fn dup_auto(auto: &[AutoEv], a: u64, b: u64, dest: u64, loop_len: u64) -> Vec<AutoEv> {
+    let shift = dest as i64 - a as i64;
+    let mut out = auto.to_vec();
+    for x in auto {
+        if x.pos >= a && x.pos < b {
+            let np = x.pos as i64 + shift;
+            if np >= 0 && (np as u64) < loop_len {
+                out.push(AutoEv { pos: np as u64, target: x.target.clone(), value: x.value });
+            }
+        }
+    }
+    out
+}
+
+/// Wrap a (possibly negative) sample position into `[0, len)`.
+fn wrap_pos(p: i64, len: u64) -> u64 {
+    let l = len as i64;
+    (((p % l) + l) % l) as u64
+}
+
 /// The numeric (`f64`-valued) top-level fields of a params object — the
 /// automatable parameters. Non-numbers (enums, bools) are skipped.
 fn numeric_fields(v: &serde_json::Value) -> Vec<(String, f64)> {
@@ -1504,6 +1678,89 @@ mod tests {
         drain(&mut s, 400);
         let after = s.tracks[0].inst.parts().1.get("damping").and_then(|v| v.as_f64());
         assert_eq!(after, Some(120.0), "the recorded delta rides on the edited base");
+    }
+
+    fn two_note_loop() -> crate::project::LoopData {
+        use crate::project::{LoopData, LoopEvent, LoopTrack};
+        LoopData {
+            length: 1.0,
+            tracks: vec![LoopTrack {
+                name: "T".into(),
+                model_id: "musical_string".into(),
+                params: serde_json::json!({}),
+                engine: EngineParams::default(),
+                muted: false,
+                zones: Vec::new(),
+                automation: Vec::new(),
+                events: vec![
+                    LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 },
+                    LoopEvent { t: 0.1, on: false, note: 60, vel: 0.0 },
+                    LoopEvent { t: 0.5, on: true, note: 62, vel: 1.0 },
+                    LoopEvent { t: 0.6, on: false, note: 62, vel: 0.0 },
+                ],
+            }],
+        }
+    }
+
+    fn ons_of(s: &Studio) -> Vec<u8> {
+        s.snapshot_loop().tracks[0].events.iter().filter(|e| e.on).map(|e| e.note).collect()
+    }
+
+    #[test]
+    fn region_delete_removes_notes_in_range() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(two_note_loop()));
+        s.handle(Command::RegionEdit { track: 0, op: RegionOp::Delete { a: 0.4, b: 0.7 } });
+        assert_eq!(ons_of(&s), vec![60], "note 62 (starts at 0.5) deleted");
+    }
+
+    #[test]
+    fn region_keep_crops_to_range() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(two_note_loop()));
+        s.handle(Command::RegionEdit { track: 0, op: RegionOp::Keep { a: 0.4, b: 0.7 } });
+        assert_eq!(ons_of(&s), vec![62], "cropped to the [0.4,0.7) window");
+    }
+
+    #[test]
+    fn region_duplicate_copies_range() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(two_note_loop()));
+        s.handle(Command::RegionEdit { track: 0, op: RegionOp::Duplicate { a: 0.0, b: 0.2, dest: 0.5 } });
+        let n60 = s.snapshot_loop().tracks[0].events.iter().filter(|e| e.on && e.note == 60).count();
+        assert_eq!(n60, 2, "note 60 now appears twice");
+    }
+
+    #[test]
+    fn region_move_relocates_range() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(two_note_loop()));
+        s.handle(Command::RegionEdit { track: 0, op: RegionOp::Move { a: 0.0, b: 0.2, dest: 0.5 } });
+        let snap = s.snapshot_loop();
+        let n60: Vec<i32> = snap.tracks[0]
+            .events
+            .iter()
+            .filter(|e| e.on && e.note == 60)
+            .map(|e| (e.t * 10.0).round() as i32)
+            .collect();
+        assert_eq!(n60, vec![5], "note 60 moved from 0.0 to 0.5, not duplicated");
+    }
+
+    #[test]
+    fn region_shift_wraps_within_loop() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(two_note_loop()));
+        s.handle(Command::RegionEdit { track: 0, op: RegionOp::Shift { delta: 0.5 } });
+        let snap = s.snapshot_loop();
+        let mut got: Vec<(u8, i32)> = snap.tracks[0]
+            .events
+            .iter()
+            .filter(|e| e.on)
+            .map(|e| (e.note, (e.t * 10.0).round() as i32))
+            .collect();
+        got.sort();
+        assert!(got.contains(&(60, 5)), "note 60 → 0.5s: {got:?}");
+        assert!(got.contains(&(62, 0)), "note 62 → wrapped to 0.0s: {got:?}");
     }
 
     #[test]

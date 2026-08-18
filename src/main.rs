@@ -27,7 +27,8 @@ use models::FtmModel;
 use presets::Preset;
 use project::{NamedLoop, Project, Section, TempoGrid, ZoneData};
 use studio::{
-    Command, LiveConfig, LooperMode, NoteSpan, SharedView, SongSection, TrackView, TransportState,
+    Command, LiveConfig, LooperMode, NoteSpan, RegionOp, SharedView, SongSection, TrackView,
+    TransportState,
 };
 
 /// Spacebar hold thresholds: a quick press taps, a medium hold stops, a long
@@ -118,6 +119,14 @@ struct App {
     /// Arranger: repeat count for the next section.
     arrange_repeats: u32,
 
+    // Region editing (chop / crop / rearrange)
+    /// Current timeline selection: (track index, start secs, end secs).
+    sel: Option<(usize, f32, f32)>,
+    /// Drag anchor (loop fraction) while dragging out a selection.
+    drag_start: Option<f32>,
+    /// Destination time (secs) for duplicate / move.
+    region_dest: f32,
+
     // Export
     export_name: String,
     export_sr: u32,
@@ -192,6 +201,9 @@ impl App {
             project_status: String::new(),
             arrange_loop_sel: 0,
             arrange_repeats: 4,
+            sel: None,
+            drag_start: None,
+            region_dest: 0.0,
             export_name: "take".to_string(),
             export_sr: 48_000,
             export_repeats: 2,
@@ -1537,8 +1549,8 @@ impl App {
 
     /// The recorded loop tracks, shown below the keyboard.
     fn tracks_panel(&mut self, ui: &mut egui::Ui) {
-        let (tracks, play) = match &self.view {
-            Some(v) => (v.tracks(), v.play_fraction()),
+        let (tracks, play, loop_secs) = match &self.view {
+            Some(v) => (v.tracks(), v.play_fraction(), v.loop_seconds(self.sample_rate)),
             None => return,
         };
 
@@ -1556,7 +1568,7 @@ impl App {
         }
 
         ui.label(
-            egui::RichText::new("Tip: move sliders while recording — the moves are captured as automation and replay with the loop.")
+            egui::RichText::new("Drag across a track's timeline to select a span, then chop/crop/duplicate/move it below. Move sliders while recording to automate.")
                 .weak()
                 .small(),
         );
@@ -1565,8 +1577,15 @@ impl App {
         let mut delete = None;
         let mut edit = None;
         let mut clear_auto = None;
+        let mut drag_start = self.drag_start;
+        let mut new_sel: Option<Option<(usize, f32, f32)>> = None;
         for (i, t) in tracks.iter().enumerate() {
             let editing = self.edit_target == Target::Track(i);
+            let sel_frac = if loop_secs > 0.0 {
+                self.sel.filter(|s| s.0 == i).map(|(_, a, b)| (a / loop_secs, b / loop_secs))
+            } else {
+                None
+            };
             ui.horizontal(|ui| {
                 let mute = if t.muted { "🔇" } else { "🔊" };
                 if ui.button(mute).on_hover_text("Mute / unmute").clicked() {
@@ -1589,7 +1608,26 @@ impl App {
                         ui.label(egui::RichText::new(&t.instrument).weak().small());
                     },
                 );
-                draw_track_timeline(ui, &t.notes, play, t.muted);
+                let resp = draw_track_timeline(ui, &t.notes, play, t.muted, sel_frac);
+                if loop_secs > 0.0 {
+                    let w = resp.rect.width().max(1.0);
+                    let frac_at = |x: f32| ((x - resp.rect.left()) / w).clamp(0.0, 1.0);
+                    if resp.drag_started() {
+                        if let Some(p) = resp.interact_pointer_pos() {
+                            drag_start = Some(frac_at(p.x));
+                        }
+                    }
+                    if resp.dragged() {
+                        if let (Some(st), Some(p)) = (drag_start, resp.interact_pointer_pos()) {
+                            let cur = frac_at(p.x);
+                            let (a, b) = (st.min(cur), st.max(cur));
+                            new_sel = Some(Some((i, a * loop_secs, b * loop_secs)));
+                        }
+                    }
+                    if resp.drag_stopped() {
+                        drag_start = None;
+                    }
+                }
                 if t.automation > 0
                     && ui
                         .button(format!("🎚 {}", t.automation))
@@ -1602,6 +1640,14 @@ impl App {
                     delete = Some(i);
                 }
             });
+            // Region-edit toolbar for the selected track.
+            if self.sel.map(|s| s.0) == Some(i) && loop_secs > 0.0 {
+                self.region_ops_row(ui, i, loop_secs);
+            }
+        }
+        self.drag_start = drag_start;
+        if let Some(sel) = new_sel {
+            self.sel = sel;
         }
         if let Some(i) = toggle_mute {
             let _ = self.tx.send(Command::ToggleMute(i));
@@ -1617,7 +1663,64 @@ impl App {
             if self.edit_target == Target::Track(i) {
                 self.edit_target = Target::Live;
             }
+            if self.sel.map(|s| s.0) == Some(i) {
+                self.sel = None;
+            }
         }
+    }
+
+    /// The chop/crop/rearrange toolbar shown under the selected track.
+    fn region_ops_row(&mut self, ui: &mut egui::Ui, i: usize, loop_secs: f32) {
+        let Some((_, a, b)) = self.sel else { return };
+        let beat = 60.0 / self.project.tempo.bpm.max(1.0);
+        ui.horizontal(|ui| {
+            ui.add_space(28.0);
+            ui.label(egui::RichText::new(format!("⟦{a:.2}–{b:.2}s⟧")).small());
+            if ui.button("Crop").on_hover_text("Keep only the selection").clicked() {
+                let _ = self.tx.send(Command::RegionEdit { track: i, op: RegionOp::Keep { a, b } });
+            }
+            if ui.button("Delete").on_hover_text("Delete the selection").clicked() {
+                let _ = self.tx.send(Command::RegionEdit { track: i, op: RegionOp::Delete { a, b } });
+            }
+            if ui.button("Dup→").on_hover_text("Duplicate right after the selection").clicked() {
+                let _ = self
+                    .tx
+                    .send(Command::RegionEdit { track: i, op: RegionOp::Duplicate { a, b, dest: b } });
+            }
+            ui.separator();
+            ui.label("dest");
+            ui.add(
+                egui::DragValue::new(&mut self.region_dest)
+                    .range(0.0..=loop_secs)
+                    .speed(0.01)
+                    .suffix(" s"),
+            );
+            let dest = self.region_dest;
+            if ui.button("Dup→dest").clicked() {
+                let _ = self
+                    .tx
+                    .send(Command::RegionEdit { track: i, op: RegionOp::Duplicate { a, b, dest } });
+            }
+            if ui.button("Move→dest").clicked() {
+                let _ = self
+                    .tx
+                    .send(Command::RegionEdit { track: i, op: RegionOp::Move { a, b, dest } });
+            }
+            ui.separator();
+            if ui.button("◀").on_hover_text("Nudge whole track left one beat").clicked() {
+                let _ = self
+                    .tx
+                    .send(Command::RegionEdit { track: i, op: RegionOp::Shift { delta: -beat } });
+            }
+            if ui.button("▶").on_hover_text("Nudge whole track right one beat").clicked() {
+                let _ = self
+                    .tx
+                    .send(Command::RegionEdit { track: i, op: RegionOp::Shift { delta: beat } });
+            }
+            if ui.button("✕ sel").clicked() {
+                self.sel = None;
+            }
+        });
     }
 
     /// Draw a clickable two-octave piano and handle mouse input.
@@ -1765,13 +1868,33 @@ fn engine_sliders(ui: &mut egui::Ui, e: &mut EngineParams) -> bool {
     c
 }
 
-/// Draw a track's recorded notes as bars on a timeline, with a moving playhead.
-fn draw_track_timeline(ui: &mut egui::Ui, notes: &[NoteSpan], play: f32, muted: bool) {
+/// Draw a track's recorded notes as bars on a timeline, with a moving playhead
+/// and (optionally) a shaded selection band. Senses click-and-drag so the caller
+/// can drag out a selection; returns the response.
+fn draw_track_timeline(
+    ui: &mut egui::Ui,
+    notes: &[NoteSpan],
+    play: f32,
+    muted: bool,
+    sel: Option<(f32, f32)>,
+) -> egui::Response {
     let width = (ui.available_width() - 40.0).max(120.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 26.0), egui::Sense::hover());
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, 26.0), egui::Sense::click_and_drag());
     let painter = ui.painter_at(rect);
 
     painter.rect_filled(rect, 3.0, egui::Color32::from_gray(30));
+
+    // Selection band.
+    if let Some((a, b)) = sel {
+        let x0 = rect.left() + a.clamp(0.0, 1.0) * rect.width();
+        let x1 = rect.left() + b.clamp(0.0, 1.0) * rect.width();
+        let band = egui::Rect::from_min_max(
+            egui::pos2(x0.min(x1), rect.top()),
+            egui::pos2(x0.max(x1), rect.bottom()),
+        );
+        painter.rect_filled(band, 0.0, egui::Color32::from_rgba_unmultiplied(120, 200, 120, 60));
+    }
 
     // Vertical extent maps MIDI notes 36..=84 (C2..C6) onto the row height.
     let (lo, hi) = (36.0f32, 84.0f32);
@@ -1798,6 +1921,7 @@ fn draw_track_timeline(ui: &mut egui::Ui, notes: &[NoteSpan], play: f32, muted: 
         [egui::pos2(px, rect.top()), egui::pos2(px, rect.bottom())],
         egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(240, 240, 120)),
     );
+    response
 }
 
 fn key_to_semitone(key: egui::Key) -> Option<i32> {
