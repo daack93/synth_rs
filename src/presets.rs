@@ -16,7 +16,7 @@ use crate::models::drum_membrane::DrumMembrane;
 use crate::models::musical_string::MusicalString;
 use crate::models::pure_string::PureString;
 use crate::models::webster_horn::{Boundary, Wavefront, WebsterHorn};
-use crate::models::{model_from_id, FtmModel};
+use crate::models::{model_from_id, Excitation, FtmModel};
 use crate::instrument::EngineParams;
 
 /// A saved instrument: everything needed to reconstruct a playable sound.
@@ -82,6 +82,20 @@ pub fn factory() -> Vec<Preset> {
             ..PureString::default()
         }
     }
+    // Same bore as `string`, but bowed (driven → sustains while played).
+    fn bowed(
+        stiffness: f32,
+        damping: f32,
+        freq_dep_damping: f32,
+        string_length: f32,
+        depth: usize,
+        pluck_pos: f32,
+    ) -> PureString {
+        PureString {
+            excitation: Excitation::Bowed,
+            ..string(stiffness, damping, freq_dep_damping, string_length, depth, pluck_pos)
+        }
+    }
     fn eng(gain: f32, attack_ms: f32, release_ms: f32) -> EngineParams {
         EngineParams {
             gain,
@@ -105,6 +119,11 @@ pub fn factory() -> Vec<Preset> {
         make("Banjo", string(3.0, 13.0, -6.0, 20.0, 36, 0.08), eng(0.6, 2.0, 80.0)),
         // Rounder pluck + more HF damping to tame the "electric" low end.
         make("Harp", string(0.8, 3.5, -4.0, 14.0, 28, 0.18), eng(0.6, 3.0, 180.0)),
+        // ---- Bowed strings (driven → sustain; bow near the bridge = bright/saw) ----
+        make("Violin", bowed(0.5, 2.5, -1.2, 4.0, 44, 0.12), eng(0.55, 60.0, 150.0)),
+        make("Viola", bowed(0.6, 2.5, -1.5, 5.0, 40, 0.14), eng(0.55, 65.0, 160.0)),
+        make("Cello", bowed(0.8, 2.2, -1.3, 7.0, 44, 0.13), eng(0.6, 70.0, 180.0)),
+        make("Bowed Bass", bowed(1.0, 2.0, -1.6, 10.0, 36, 0.12), eng(0.65, 80.0, 200.0)),
         // ---- Musical String (music-friendly controls) ----
         make(
             "Soft Nylon",

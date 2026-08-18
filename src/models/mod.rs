@@ -48,6 +48,22 @@ impl Default for PitchMode {
     }
 }
 
+/// How a resonator is excited.
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Excitation {
+    /// A one-shot pluck/strike: the modes ring and decay.
+    Struck,
+    /// Continuously driven (bowed): the modes are sustained while the note is
+    /// played and only fade on release, and loss shapes the steady-state tone.
+    Bowed,
+}
+
+impl Default for Excitation {
+    fn default() -> Self {
+        Excitation::Struck
+    }
+}
+
 /// A bank of modes: parallel arrays of frequency (Hz), linear amplitude, and
 /// per-second decay rate. `env(t) = amp * exp(-decay * t)`; a negative `decay`
 /// is a swell (the engine bounds it so it can't run away).

@@ -17,7 +17,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{strike_amplitude, unbounded_slider, FtmModel, ModeBuffer, PitchMode, TICK_RATE};
+use super::{strike_amplitude, unbounded_slider, Excitation, FtmModel, ModeBuffer, PitchMode, TICK_RATE};
 
 const PI: f64 = std::f64::consts::PI;
 const TWO_PI: f32 = std::f32::consts::TAU;
@@ -49,6 +49,10 @@ pub struct DrumMembrane {
     /// notes become more inharmonic and decay faster.
     #[serde(default)]
     pub pitch_mode: PitchMode,
+    /// Struck (a hit that rings and decays) or bowed (driven — sustains, e.g. a
+    /// bowed cymbal / singing bowl).
+    #[serde(default)]
+    pub excitation: Excitation,
 }
 
 impl Default for DrumMembrane {
@@ -67,6 +71,7 @@ impl Default for DrumMembrane {
             max_magnitude: 2500.0,
             key_tracks_pitch: true,
             pitch_mode: PitchMode::Physical,
+            excitation: Excitation::Struck,
         }
     }
 }
@@ -86,6 +91,7 @@ impl FtmModel for DrumMembrane {
 
     fn excite(&self, freq_hz: f32, vel: f32, sr: f32, out: &mut ModeBuffer) {
         out.clear();
+        out.sustain = self.excitation == Excitation::Bowed;
         let amp_strike = strike_amplitude(vel, self.play_magnitude, self.max_magnitude);
         if amp_strike <= 0.0 {
             return;
@@ -261,6 +267,20 @@ impl FtmModel for DrumMembrane {
                         .changed();
                 });
         });
+        egui::ComboBox::from_label("Excitation")
+            .selected_text(match self.excitation {
+                Excitation::Struck => "Struck",
+                Excitation::Bowed => "Bowed (sustained)",
+            })
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(&mut self.excitation, Excitation::Struck, "Struck")
+                    .changed();
+                changed |= ui
+                    .selectable_value(&mut self.excitation, Excitation::Bowed, "Bowed (sustained)")
+                    .on_hover_text("Driven — sustains while played (bowed cymbal / singing bowl).")
+                    .changed();
+            });
         changed
     }
 

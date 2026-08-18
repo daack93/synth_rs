@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{strike_amplitude, unbounded_slider, FtmModel, ModeBuffer, PitchMode, TICK_RATE};
+use super::{strike_amplitude, unbounded_slider, Excitation, FtmModel, ModeBuffer, PitchMode, TICK_RATE};
 
 const PI: f32 = std::f32::consts::PI;
 const TWO_PI: f32 = std::f32::consts::TAU;
@@ -32,6 +32,9 @@ pub struct PureString {
     /// for higher notes (note-dependent inharmonicity + decay).
     #[serde(default)]
     pub pitch_mode: PitchMode,
+    /// Plucked/struck (rings and decays) or bowed (driven — sustains while played).
+    #[serde(default)]
+    pub excitation: Excitation,
 }
 
 impl Default for PureString {
@@ -51,6 +54,7 @@ impl Default for PureString {
             max_magnitude: 2500.0,
             key_tracks_pitch: true,
             pitch_mode: PitchMode::Physical,
+            excitation: Excitation::Struck,
         }
     }
 }
@@ -70,6 +74,7 @@ impl FtmModel for PureString {
 
     fn excite(&self, freq_hz: f32, vel: f32, sr: f32, out: &mut ModeBuffer) {
         out.clear();
+        out.sustain = self.excitation == Excitation::Bowed; // bowed = driven/sustained
         let amp_strike = strike_amplitude(vel, self.play_magnitude, self.max_magnitude);
         if amp_strike <= 0.0 {
             return; // below play threshold — silent, like a gentle shake
@@ -249,6 +254,21 @@ impl FtmModel for PureString {
                         .changed();
                 });
         });
+        egui::ComboBox::from_label("Excitation")
+            .selected_text(match self.excitation {
+                Excitation::Struck => "Plucked / struck",
+                Excitation::Bowed => "Bowed (sustained)",
+            })
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(&mut self.excitation, Excitation::Struck, "Plucked / struck")
+                    .on_hover_text("A one-shot pluck — rings and decays.")
+                    .changed();
+                changed |= ui
+                    .selectable_value(&mut self.excitation, Excitation::Bowed, "Bowed (sustained)")
+                    .on_hover_text("Continuously driven — holds while played, fades on release.")
+                    .changed();
+            });
         changed
     }
 
@@ -300,6 +320,19 @@ mod tests {
         assert!((t_low - t_high).abs() < 1e-4, "transpose: ratio is note-independent");
         // Physical matches Transpose at the C4 reference.
         assert!((r_low - t_low).abs() < 1e-3, "physical == transpose at C4 ({r_low} vs {t_low})");
+    }
+
+    #[test]
+    fn bowed_string_is_sustained() {
+        let mut buf = ModeBuffer::default();
+        let mut s = PureString::default();
+        s.excitation = Excitation::Struck;
+        s.excite(220.0, 1.0, 48_000.0, &mut buf);
+        assert!(!buf.sustain, "plucked string is not sustained");
+        s.excitation = Excitation::Bowed;
+        s.excite(220.0, 1.0, 48_000.0, &mut buf);
+        assert!(buf.sustain, "bowed string is driven/sustained");
+        assert!(buf.n > 1);
     }
 
     #[test]
