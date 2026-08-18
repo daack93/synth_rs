@@ -157,14 +157,6 @@ pub struct NamedLoop {
     pub data: LoopData,
 }
 
-/// One section of a song arrangement: a loop (by index into `Project.loops`)
-/// played a number of times.
-#[derive(Clone, Copy, Serialize, Deserialize)]
-pub struct Section {
-    pub loop_index: usize,
-    pub repeats: u32,
-}
-
 /// Tempo + grid settings for recording in time.
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
@@ -193,15 +185,13 @@ impl Default for TempoGrid {
     }
 }
 
-/// A project: a named collection of loops plus a song arrangement over them.
+/// A project: a named collection of loops (each loop carries its own clip
+/// arrangement of tracks).
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
     #[serde(default)]
     pub loops: Vec<NamedLoop>,
-    /// The song: an ordered list of sections played straight through.
-    #[serde(default)]
-    pub arrangement: Vec<Section>,
     /// Tempo + grid settings (saved with the project).
     #[serde(default)]
     pub tempo: TempoGrid,
@@ -318,7 +308,6 @@ mod tests {
         let mut project = Project {
             name: "My Song".into(),
             loops: Vec::new(),
-            arrangement: Vec::new(),
             tempo: TempoGrid::default(),
         };
         project.loops.push(NamedLoop { name: "Groove A".into(), data: sample_loop() });

@@ -16,7 +16,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::project::LoopData;
-use crate::studio::{Command, SongSection, Studio};
+use crate::studio::{Command, Studio};
 use crate::wav;
 
 /// Directory exports are written to: `$FTM_SYNTH_EXPORTS`, else `exports/`.
@@ -81,42 +81,6 @@ pub fn render_loop_to_wav(
     }
     let mut studio = Studio::new(sr);
     studio.handle(Command::LoadLoop(data));
-    let buf = studio.render_offline(total, tail);
-    wav::write_pcm16_mono(path, sr as u32, &buf)
-}
-
-/// Render a full song arrangement to a WAV.
-pub fn render_song_to_wav(
-    sections: Vec<SongSection>,
-    sr: f32,
-    tail_secs: f32,
-    hi_res: bool,
-    path: &Path,
-) -> io::Result<()> {
-    if sections.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty arrangement"));
-    }
-    let mut total = 0usize;
-    let sections: Vec<SongSection> = sections
-        .into_iter()
-        .map(|mut sec| {
-            if hi_res {
-                apply_hi_res(&mut sec.loop_data);
-            }
-            let frames = (sec.loop_data.length * sr).round() as usize
-                * sec.repeats.max(1) as usize;
-            total = total.saturating_add(frames);
-            sec
-        })
-        .collect();
-    let tail = (tail_secs.max(0.0) * sr) as usize;
-
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let mut studio = Studio::new(sr);
-    studio.handle(Command::SetSong(sections));
-    studio.handle(Command::PlaySong);
     let buf = studio.render_offline(total, tail);
     wav::write_pcm16_mono(path, sr as u32, &buf)
 }

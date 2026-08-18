@@ -25,10 +25,10 @@ use instrument::EngineParams;
 use midi::MidiInputHandle;
 use models::FtmModel;
 use presets::Preset;
-use project::{NamedLoop, Project, Section, TempoGrid, ZoneData};
+use project::{NamedLoop, Project, TempoGrid, ZoneData};
 use studio::{
-    ClipView, Command, LiveConfig, LooperMode, NoteSpan, PlayMode, RegionOp, SharedView,
-    SongSection, TrackView, TransportState,
+    ClipView, Command, LiveConfig, LooperMode, NoteSpan, PlayMode, RegionOp, SharedView, TrackView,
+    TransportState,
 };
 
 /// Spacebar hold thresholds: a quick press taps, a medium hold stops, a long
@@ -114,10 +114,6 @@ struct App {
     project_list: Vec<String>,
     /// Last project action result.
     project_status: String,
-    /// Arranger: which loop to add as the next section.
-    arrange_loop_sel: usize,
-    /// Arranger: repeat count for the next section.
-    arrange_repeats: u32,
 
     /// Master output level (linear).
     master_volume: f32,
@@ -209,15 +205,12 @@ impl App {
             project: Project {
                 name: "Untitled".to_string(),
                 loops: Vec::new(),
-                arrangement: Vec::new(),
                 tempo: TempoGrid::default(),
             },
             project_name: "Untitled".to_string(),
             loop_name: String::new(),
             project_list: project::list(),
             project_status: String::new(),
-            arrange_loop_sel: 0,
-            arrange_repeats: 4,
             master_volume: 1.0,
             arrange_mode: true,
             whammy: 0.0,
@@ -384,37 +377,6 @@ impl App {
             return;
         }
         self.project.loops.remove(i);
-        self.project.arrangement.retain(|s| s.loop_index != i);
-        for s in &mut self.project.arrangement {
-            if s.loop_index > i {
-                s.loop_index -= 1;
-            }
-        }
-        if self.arrange_loop_sel >= self.project.loops.len() {
-            self.arrange_loop_sel = self.project.loops.len().saturating_sub(1);
-        }
-    }
-
-    /// Resolve the arrangement into runtime sections and play the song.
-    fn play_song(&mut self) {
-        let sections: Vec<SongSection> = self
-            .project
-            .arrangement
-            .iter()
-            .filter_map(|s| {
-                self.project.loops.get(s.loop_index).map(|nl| SongSection {
-                    loop_data: nl.data.clone(),
-                    repeats: s.repeats.max(1),
-                })
-            })
-            .collect();
-        if sections.is_empty() {
-            self.project_status = "Add sections to the song first.".into();
-            return;
-        }
-        let _ = self.tx.send(Command::SetSong(sections));
-        let _ = self.tx.send(Command::PlaySong);
-        self.project_status = "Playing song…".into();
     }
 
     fn connect_midi(&mut self, index: usize) {
@@ -621,7 +583,6 @@ impl App {
                 self.project = Project {
                     name: "Untitled".into(),
                     loops: Vec::new(),
-                    arrangement: Vec::new(),
                     tempo: self.project.tempo,
                 };
                 self.project_name = "Untitled".into();
@@ -691,7 +652,6 @@ impl App {
             }
         }
 
-        self.arrangement_ui(ui);
         self.export_ui(ui);
 
         if !self.project_status.is_empty() {
@@ -700,7 +660,7 @@ impl App {
         ui.add_space(2.0);
     }
 
-    /// Offline WAV export of the current loop or the whole song.
+    /// Offline WAV export of the current song (the loop + its clip arrangement).
     fn export_ui(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         ui.horizontal(|ui| {
@@ -723,15 +683,12 @@ impl App {
             ui.add(egui::DragValue::new(&mut self.export_repeats).range(1..=256));
             ui.label("Tail");
             ui.add(egui::DragValue::new(&mut self.export_tail).range(0.0..=10.0).speed(0.1).suffix(" s"));
-            if ui.button("⬇ Export loop").clicked() {
-                self.export_loop();
-            }
-            let has_song = !self.project.arrangement.is_empty();
             if ui
-                .add_enabled(has_song, egui::Button::new("⬇ Export song"))
+                .button("⬇ Export song")
+                .on_hover_text("Render the whole arrangement to a WAV")
                 .clicked()
             {
-                self.export_song();
+                self.export_loop();
             }
         });
         if !self.export_status.is_empty() {
@@ -764,133 +721,6 @@ impl App {
         }
     }
 
-    fn export_song(&mut self) {
-        let sections: Vec<SongSection> = self
-            .project
-            .arrangement
-            .iter()
-            .filter_map(|s| {
-                self.project.loops.get(s.loop_index).map(|nl| SongSection {
-                    loop_data: nl.data.clone(),
-                    repeats: s.repeats,
-                })
-            })
-            .collect();
-        if sections.is_empty() {
-            self.export_status = "Add sections to the song first.".into();
-            return;
-        }
-        let path = export::export_path(&format!("{}_song", self.export_name));
-        let sr = self.export_sr as f32;
-        match export::render_song_to_wav(sections, sr, self.export_tail, self.export_hi_res, &path) {
-            Ok(()) => self.export_status = format!("Wrote {}", path.display()),
-            Err(e) => self.export_status = format!("Export failed: {e}"),
-        }
-    }
-
-    /// The song arranger: a linear timeline of (loop × repeats) sections.
-    fn arrangement_ui(&mut self, ui: &mut egui::Ui) {
-        ui.separator();
-        let playing_section = self.view.as_ref().and_then(|v| v.song_section());
-
-        ui.horizontal(|ui| {
-            ui.strong("Song");
-            if ui.button("▶ Play song").clicked() {
-                self.play_song();
-            }
-            if ui.button("■ Stop").clicked() {
-                let _ = self.tx.send(Command::Stop);
-            }
-            ui.separator();
-
-            if self.project.loops.is_empty() {
-                ui.label(egui::RichText::new("add a loop first").weak().small());
-            } else {
-                ui.label("Add:");
-                if self.arrange_loop_sel >= self.project.loops.len() {
-                    self.arrange_loop_sel = 0;
-                }
-                let sel = self.project.loops[self.arrange_loop_sel].name.clone();
-                egui::ComboBox::from_id_salt("arrange_loop")
-                    .selected_text(sel)
-                    .show_ui(ui, |ui| {
-                        for (i, nl) in self.project.loops.iter().enumerate() {
-                            ui.selectable_value(&mut self.arrange_loop_sel, i, &nl.name);
-                        }
-                    });
-                ui.label("×");
-                ui.add(egui::DragValue::new(&mut self.arrange_repeats).range(1..=64));
-                if ui.button("＋ Section").clicked() {
-                    self.project.arrangement.push(Section {
-                        loop_index: self.arrange_loop_sel,
-                        repeats: self.arrange_repeats.max(1),
-                    });
-                }
-            }
-        });
-
-        if self.project.arrangement.is_empty() {
-            ui.label(
-                egui::RichText::new("Song is empty — add sections (loop × repeats) to arrange one.")
-                    .weak()
-                    .small(),
-            );
-            return;
-        }
-
-        let mut remove = None;
-        let mut move_left = None;
-        let mut move_right = None;
-        egui::ScrollArea::horizontal()
-            .id_salt("arrangement_scroll")
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for (i, sec) in self.project.arrangement.iter().enumerate() {
-                        let name = self
-                            .project
-                            .loops
-                            .get(sec.loop_index)
-                            .map(|nl| nl.name.as_str())
-                            .unwrap_or("?");
-                        let active = playing_section == Some(i);
-                        let mut frame = egui::Frame::group(ui.style());
-                        if active {
-                            frame = frame.fill(egui::Color32::from_rgb(60, 90, 60));
-                        }
-                        frame.show(ui, |ui| {
-                            let text = format!("{}. {} ×{}", i + 1, name, sec.repeats);
-                            if active {
-                                ui.colored_label(egui::Color32::from_rgb(140, 230, 140), text);
-                            } else {
-                                ui.label(text);
-                            }
-                            if ui.small_button("←").on_hover_text("Move left").clicked() {
-                                move_left = Some(i);
-                            }
-                            if ui.small_button("✕").on_hover_text("Remove section").clicked() {
-                                remove = Some(i);
-                            }
-                            if ui.small_button("→").on_hover_text("Move right").clicked() {
-                                move_right = Some(i);
-                            }
-                        });
-                    }
-                });
-            });
-        if let Some(i) = remove {
-            self.project.arrangement.remove(i);
-        }
-        if let Some(i) = move_left {
-            if i > 0 {
-                self.project.arrangement.swap(i, i - 1);
-            }
-        }
-        if let Some(i) = move_right {
-            if i + 1 < self.project.arrangement.len() {
-                self.project.arrangement.swap(i, i + 1);
-            }
-        }
-    }
 
     /// The instrument-library bar: name + save, and load/delete of saved presets.
     fn presets_bar(&mut self, ui: &mut egui::Ui) {
