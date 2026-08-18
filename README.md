@@ -58,6 +58,16 @@ Each track row has mute, a note timeline with a moving playhead, delete, and an
 instrument (model, parameters, engine, or load a preset onto it) live while the
 loop keeps playing.
 
+## Projects
+
+The **Project** bar along the bottom saves your work. Record a loop, give it a
+name, and **＋ Add loop** captures it (all tracks — their note events *and*
+instruments) into the project. Build up several loops, then **💾 Save** the
+project to a JSON file (in `projects/`, or `$FTM_SYNTH_PROJECTS`). **Open…**
+reloads a project; **▶** loads a saved loop back into the tracks to keep playing
+or editing. Loop timings are stored in seconds, so projects are portable across
+sample rates. (Arranging loops into a full song timeline is the next step.)
+
 ## Presets
 
 Build a library of instruments in the top bar. A **preset** is a model + its

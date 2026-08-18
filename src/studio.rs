@@ -22,7 +22,8 @@ use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::instrument::{make_sine_table, EngineParams, Instrument};
-use crate::models::FtmModel;
+use crate::models::{default_model, model_from_id, FtmModel};
+use crate::project::{LoopData, LoopEvent, LoopTrack};
 
 /// Which spacebar-tap behavior is active.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -90,6 +91,8 @@ pub enum Command {
     SetTrackModel(usize, Box<dyn FtmModel>),
     /// Update a track's engine params live.
     SetTrackEngine(usize, EngineParams),
+    /// Replace the current loop + tracks with a saved loop, and play it.
+    LoadLoop(LoopData),
 }
 
 #[derive(Clone, Copy)]
@@ -143,6 +146,8 @@ pub struct SharedView {
     pos: AtomicU64,
     loop_len: AtomicU64,
     tracks: Mutex<Vec<TrackView>>,
+    /// A full serializable snapshot of the current loop (for saving to a project).
+    snapshot: Mutex<LoopData>,
 }
 
 impl SharedView {
@@ -153,7 +158,13 @@ impl SharedView {
             pos: AtomicU64::new(0),
             loop_len: AtomicU64::new(0),
             tracks: Mutex::new(Vec::new()),
+            snapshot: Mutex::new(LoopData::default()),
         }
+    }
+
+    /// The current loop as serializable data (for "add to project").
+    pub fn snapshot(&self) -> LoopData {
+        self.snapshot.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
     pub fn state(&self) -> TransportState {
@@ -177,6 +188,8 @@ impl SharedView {
 }
 
 pub struct Studio {
+    sr: f32,
+    sine: std::sync::Arc<[f32]>,
     live: Instrument,
     tracks: Vec<Track>,
     mode: LooperMode,
@@ -199,12 +212,16 @@ pub struct Studio {
     view: Arc<SharedView>,
     /// Structure snapshot waiting to be published to the UI (flushed each render).
     pending_structure: Option<Vec<TrackView>>,
+    /// Serializable loop snapshot waiting to be published (for saving).
+    pending_snapshot: Option<LoopData>,
 }
 
 impl Studio {
     pub fn new(sample_rate: f32) -> Self {
         let sine = make_sine_table();
         Studio {
+            sr: sample_rate,
+            sine: sine.clone(),
             live: Instrument::new(sample_rate, sine),
             tracks: Vec::new(),
             mode: LooperMode::Pedal,
@@ -218,6 +235,7 @@ impl Studio {
             rec_frames: 0,
             view: Arc::new(SharedView::new()),
             pending_structure: None,
+            pending_snapshot: None,
         }
     }
 
@@ -280,6 +298,7 @@ impl Studio {
                     t.inst.set_engine(e);
                 }
             }
+            Command::LoadLoop(data) => self.load_loop(data),
             Command::DeleteTrack(i) => {
                 if i < self.tracks.len() {
                     self.tracks.remove(i);
@@ -387,6 +406,88 @@ impl Studio {
         self.playing = false;
         self.live.all_notes_off();
         self.mark_structure_dirty();
+    }
+
+    /// Replace the current loop + tracks with a saved loop, and start playing it.
+    /// Positions in `data` are in seconds; converted to samples at this rate.
+    fn load_loop(&mut self, data: LoopData) {
+        self.live.all_notes_off();
+        self.tracks.clear();
+        self.recording = None;
+        self.armed = false;
+        self.defining = false;
+        self.auto_finalize_at = None;
+
+        if data.is_empty() {
+            self.loop_len = None;
+            self.pos = 0;
+            self.playing = false;
+            self.mark_structure_dirty();
+            return;
+        }
+
+        let len = ((data.length * self.sr).round() as u64).max(1);
+        self.loop_len = Some(len);
+        for lt in data.tracks {
+            let model = model_from_id(&lt.model_id, &lt.params).unwrap_or_else(default_model);
+            let inst = Instrument::with_config(self.sr, self.sine.clone(), model, lt.engine);
+            let label = inst.model_name().to_string();
+            let mut events: Vec<Event> = lt
+                .events
+                .iter()
+                .map(|e| {
+                    let pos = ((e.t * self.sr).round() as u64).min(len - 1);
+                    let msg = if e.on {
+                        EvMsg::On { note: e.note, vel: e.vel }
+                    } else {
+                        EvMsg::Off { note: e.note }
+                    };
+                    Event { pos, msg }
+                })
+                .collect();
+            events.sort_by_key(|e| e.pos);
+            self.tracks.push(Track {
+                inst,
+                events,
+                cursor: 0,
+                muted: lt.muted,
+                name: lt.name,
+                label,
+            });
+        }
+        self.pos = 0;
+        self.reset_cursors();
+        self.playing = true;
+        self.mark_structure_dirty();
+    }
+
+    /// Build a serializable snapshot of the current loop (positions in seconds).
+    fn snapshot_loop(&self) -> LoopData {
+        let sr = self.sr;
+        let length = self.loop_len.unwrap_or(0) as f32 / sr;
+        let tracks = self
+            .tracks
+            .iter()
+            .map(|t| LoopTrack {
+                name: t.name.clone(),
+                model_id: t.inst.model_id().to_string(),
+                params: t.inst.model_json(),
+                engine: t.inst.engine_params(),
+                muted: t.muted,
+                events: t
+                    .events
+                    .iter()
+                    .map(|e| {
+                        let (on, note, vel) = match e.msg {
+                            EvMsg::On { note, vel } => (true, note, vel),
+                            EvMsg::Off { note } => (false, note, 0.0),
+                        };
+                        LoopEvent { t: e.pos as f32 / sr, on, note, vel }
+                    })
+                    .collect(),
+            })
+            .collect();
+        LoopData { length, tracks }
     }
 
     /// Pedal-mode "+ Rec track": record exactly one loop pass into a new track.
@@ -561,16 +662,22 @@ impl Studio {
                 engine: t.inst.engine_params(),
             })
             .collect();
+        let snap = self.snapshot_loop();
         self.pending_structure = Some(views);
+        self.pending_snapshot = Some(snap);
         self.publish_scalars();
     }
 
     fn flush_structure(&mut self) {
-        if self.pending_structure.is_none() {
-            return;
+        if self.pending_structure.is_some() {
+            if let Ok(mut guard) = self.view.tracks.try_lock() {
+                *guard = self.pending_structure.take().unwrap();
+            }
         }
-        if let Ok(mut guard) = self.view.tracks.try_lock() {
-            *guard = self.pending_structure.take().unwrap();
+        if self.pending_snapshot.is_some() {
+            if let Ok(mut guard) = self.view.snapshot.try_lock() {
+                *guard = self.pending_snapshot.take().unwrap();
+            }
         }
     }
 }
@@ -713,6 +820,34 @@ mod tests {
         assert_eq!(s.tracks[0].inst.model_id(), "drum_membrane");
         assert_eq!(s.tracks[0].label, "Drum (2D membrane)");
         drain(&mut s, 4800); // must keep rendering finite / in range
+    }
+
+    #[test]
+    fn loop_snapshot_and_load_roundtrip() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::Tap);
+        s.handle(Command::NoteOn { note: 60, vel: 0.9 });
+        drain(&mut s, 2400);
+        s.handle(Command::NoteOff { note: 60 });
+        s.handle(Command::Tap); // close loop
+        assert_eq!(s.tracks.len(), 1);
+
+        let snap = s.snapshot_loop();
+        assert!(snap.length > 0.0);
+        assert_eq!(snap.tracks.len(), 1);
+        assert_eq!(snap.tracks[0].events.len(), 2, "note-on + note-off saved");
+
+        // Load into a fresh studio at a *different* sample rate (seconds-based).
+        let mut s2 = Studio::new(44_100.0);
+        s2.handle(Command::LoadLoop(snap.clone()));
+        assert_eq!(s2.tracks.len(), 1);
+        assert!(s2.playing);
+        let expected_len = (snap.length * 44_100.0).round() as u64;
+        assert_eq!(s2.loop_len, Some(expected_len));
+
+        // Playing from the top fires the recorded note.
+        drain(&mut s2, 200);
+        assert!(s2.tracks[0].inst.active_voices() > 0, "loaded loop should play");
     }
 
     #[test]

@@ -5,3 +5,5 @@
 
 # Runtime preset library (local instrument saves)
 /presets
+# Runtime project / loop saves
+/projects

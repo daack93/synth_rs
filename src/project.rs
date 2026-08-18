@@ -1,0 +1,189 @@
+//! Projects: save a loop (its tracks — note events + instruments) to disk, and
+//! collect several named loops into a project. A project is one JSON file per
+//! project in a folder (like presets).
+//!
+//! Positions and lengths are stored in **seconds**, not samples, so a project is
+//! portable across sample rates. The `Project` type has room to grow a song
+//! arrangement (a timeline of these loops) in a later step.
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::instrument::EngineParams;
+
+/// One recorded note event, timed from the loop start (seconds).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct LoopEvent {
+    pub t: f32,
+    pub on: bool,
+    pub note: u8,
+    pub vel: f32,
+}
+
+/// One track of a loop: its instrument plus the notes it plays.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct LoopTrack {
+    pub name: String,
+    pub model_id: String,
+    pub params: serde_json::Value,
+    #[serde(default)]
+    pub engine: EngineParams,
+    #[serde(default)]
+    pub muted: bool,
+    pub events: Vec<LoopEvent>,
+}
+
+/// A complete loop: its length and all its tracks.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct LoopData {
+    /// Loop length in seconds (0 = no loop).
+    pub length: f32,
+    pub tracks: Vec<LoopTrack>,
+}
+
+impl LoopData {
+    pub fn is_empty(&self) -> bool {
+        self.length <= 0.0 || self.tracks.is_empty()
+    }
+    pub fn note_count(&self) -> usize {
+        self.tracks.iter().map(|t| t.events.iter().filter(|e| e.on).count()).sum()
+    }
+}
+
+/// A named loop within a project.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct NamedLoop {
+    pub name: String,
+    #[serde(rename = "loop")]
+    pub data: LoopData,
+}
+
+/// A project: a named collection of loops. (A song arrangement over these loops
+/// is a future addition — `#[serde(default)]` keeps old files loadable.)
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct Project {
+    pub name: String,
+    #[serde(default)]
+    pub loops: Vec<NamedLoop>,
+}
+
+/// Directory projects are stored in: `$FTM_SYNTH_PROJECTS`, else `projects/`.
+pub fn projects_dir() -> PathBuf {
+    std::env::var_os("FTM_SYNTH_PROJECTS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("projects"))
+}
+
+fn file_stem(name: &str) -> String {
+    let mut s: String = name
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ' ' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    s = s.trim().replace(' ', "_");
+    if s.is_empty() {
+        s.push_str("project");
+    }
+    s
+}
+
+pub fn save(project: &Project) -> io::Result<PathBuf> {
+    save_in(&projects_dir(), project)
+}
+
+pub fn list() -> Vec<String> {
+    list_in(&projects_dir())
+}
+
+pub fn load_named(name: &str) -> io::Result<Project> {
+    load(&projects_dir().join(format!("{}.json", file_stem(name))))
+}
+
+pub fn load(path: &Path) -> io::Result<Project> {
+    let text = fs::read_to_string(path)?;
+    serde_json::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+fn save_in(dir: &Path, project: &Project) -> io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
+    let path = dir.join(format!("{}.json", file_stem(&project.name)));
+    let json = serde_json::to_string_pretty(project)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    fs::write(&path, json)?;
+    Ok(path)
+}
+
+/// List project names (file stems) in a folder, sorted.
+fn list_in(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                if let Ok(p) = load(&path) {
+                    out.push(p.name);
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_loop() -> LoopData {
+        LoopData {
+            length: 2.0,
+            tracks: vec![LoopTrack {
+                name: "Track 1".into(),
+                model_id: "musical_string".into(),
+                params: serde_json::json!({}),
+                engine: EngineParams::default(),
+                muted: false,
+                events: vec![
+                    LoopEvent { t: 0.0, on: true, note: 60, vel: 0.9 },
+                    LoopEvent { t: 0.5, on: false, note: 60, vel: 0.0 },
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn project_roundtrip_on_disk() {
+        let dir = std::env::temp_dir().join(format!("ftm_projects_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut project = Project {
+            name: "My Song".into(),
+            loops: Vec::new(),
+        };
+        project.loops.push(NamedLoop { name: "Groove A".into(), data: sample_loop() });
+        let path = save_in(&dir, &project).unwrap();
+        assert!(path.exists());
+
+        let names = list_in(&dir);
+        assert_eq!(names, vec!["My Song".to_string()]);
+
+        let back = load(&path).unwrap();
+        assert_eq!(back.name, "My Song");
+        assert_eq!(back.loops.len(), 1);
+        assert_eq!(back.loops[0].name, "Groove A");
+        assert_eq!(back.loops[0].data.tracks.len(), 1);
+        assert_eq!(back.loops[0].data.note_count(), 1);
+        assert!((back.loops[0].data.length - 2.0).abs() < 1e-6);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

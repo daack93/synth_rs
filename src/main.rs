@@ -7,6 +7,7 @@ mod instrument;
 mod midi;
 mod models;
 mod presets;
+mod project;
 mod studio;
 
 use std::collections::HashMap;
@@ -21,6 +22,7 @@ use instrument::EngineParams;
 use midi::MidiInputHandle;
 use models::FtmModel;
 use presets::Preset;
+use project::{NamedLoop, Project};
 use studio::{Command, LooperMode, NoteSpan, SharedView, TrackView, TransportState};
 
 /// Spacebar hold thresholds: a quick press taps, a medium hold stops, a long
@@ -91,6 +93,18 @@ struct App {
     /// Last preset action result, shown in the UI.
     preset_status: String,
 
+    // Project (loop library)
+    /// The in-memory project (its loops).
+    project: Project,
+    /// Project name input.
+    project_name: String,
+    /// Name input for the loop being added.
+    loop_name: String,
+    /// Saved project names on disk.
+    project_list: Vec<String>,
+    /// Last project action result.
+    project_status: String,
+
     // Keyboard state
     base_midi: i32,
     /// On-screen (mouse) currently-held note.
@@ -142,6 +156,14 @@ impl App {
             preset_list,
             preset_name: String::new(),
             preset_status: String::new(),
+            project: Project {
+                name: "Untitled".to_string(),
+                loops: Vec::new(),
+            },
+            project_name: "Untitled".to_string(),
+            loop_name: String::new(),
+            project_list: project::list(),
+            project_status: String::new(),
             base_midi: 60, // C4
             mouse_note: None,
             held_keys: HashMap::new(),
@@ -226,6 +248,61 @@ impl App {
             Err(e) => self.preset_status = format!("Delete failed: {e}"),
         }
         self.preset_list = presets::list();
+    }
+
+    /// Capture the studio's current loop into the project as a named loop.
+    fn add_current_loop(&mut self) {
+        let data = match &self.view {
+            Some(v) => v.snapshot(),
+            None => return,
+        };
+        if data.is_empty() {
+            self.project_status = "No loop to add — record one first.".into();
+            return;
+        }
+        let name = if self.loop_name.trim().is_empty() {
+            format!("Loop {}", self.project.loops.len() + 1)
+        } else {
+            self.loop_name.trim().to_string()
+        };
+        let tracks = data.tracks.len();
+        self.project.loops.push(NamedLoop { name, data });
+        self.loop_name.clear();
+        self.project_status = format!("Added loop ({tracks} tracks).");
+    }
+
+    fn save_project(&mut self) {
+        let name = self.project_name.trim();
+        self.project.name = if name.is_empty() { "Untitled".into() } else { name.to_string() };
+        self.project_name = self.project.name.clone();
+        match project::save(&self.project) {
+            Ok(path) => {
+                self.project_status = format!("Saved project → {}", path.display());
+                self.project_list = project::list();
+            }
+            Err(e) => self.project_status = format!("Save failed: {e}"),
+        }
+    }
+
+    fn load_project(&mut self, name: &str) {
+        match project::load_named(name) {
+            Ok(p) => {
+                self.project_name = p.name.clone();
+                self.project_status =
+                    format!("Loaded “{}” ({} loops).", p.name, p.loops.len());
+                self.project = p;
+            }
+            Err(e) => self.project_status = format!("Load failed: {e}"),
+        }
+    }
+
+    fn load_loop_into_studio(&mut self, i: usize) {
+        if let Some(nl) = self.project.loops.get(i) {
+            let _ = self.tx.send(Command::LoadLoop(nl.data.clone()));
+            self.edit_target = Target::Live;
+            self.track_edit = None;
+            self.project_status = format!("Loaded loop “{}”.", nl.name);
+        }
     }
 
     fn connect_midi(&mut self, index: usize) {
@@ -333,6 +410,10 @@ impl eframe::App for App {
             self.presets_bar(ui);
         });
 
+        egui::TopBottomPanel::bottom("project").show(ctx, |ui| {
+            self.project_panel(ui);
+        });
+
         egui::SidePanel::right("params")
             .resizable(false)
             .min_width(300.0)
@@ -385,6 +466,111 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// The project bar: save/load a project, add the current loop, and the loop
+    /// list (load a saved loop back into the studio).
+    fn project_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.strong("Project");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.project_name)
+                    .hint_text("project name")
+                    .desired_width(150.0),
+            );
+            if ui.button("💾 Save").clicked() {
+                self.save_project();
+            }
+            let mut load: Option<String> = None;
+            egui::ComboBox::from_id_salt("project_load")
+                .selected_text("Open…")
+                .show_ui(ui, |ui| {
+                    for name in &self.project_list {
+                        if ui.selectable_label(false, name).clicked() {
+                            load = Some(name.clone());
+                        }
+                    }
+                });
+            if let Some(name) = load {
+                self.load_project(&name);
+            }
+            if ui.button("New").clicked() {
+                self.project = Project {
+                    name: "Untitled".into(),
+                    loops: Vec::new(),
+                };
+                self.project_name = "Untitled".into();
+                self.project_status = "New project.".into();
+            }
+            if ui.button("⟳").on_hover_text("Rescan project folder").clicked() {
+                self.project_list = project::list();
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Add current loop:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.loop_name)
+                    .hint_text("loop name")
+                    .desired_width(150.0),
+            );
+            if ui
+                .button("＋ Add loop")
+                .on_hover_text("Capture the loop currently in the tracks below into this project")
+                .clicked()
+            {
+                self.add_current_loop();
+            }
+        });
+
+        ui.separator();
+        if self.project.loops.is_empty() {
+            ui.label(
+                egui::RichText::new("No loops yet — record a loop, then “Add loop”.")
+                    .weak()
+                    .small(),
+            );
+        } else {
+            let mut load = None;
+            let mut remove = None;
+            egui::ScrollArea::vertical()
+                .max_height(110.0)
+                .show(ui, |ui| {
+                    for (i, nl) in self.project.loops.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui.button("▶").on_hover_text("Load this loop").clicked() {
+                                load = Some(i);
+                            }
+                            ui.label(format!("{}. {}", i + 1, nl.name));
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} tracks · {} notes · {:.1}s",
+                                    nl.data.tracks.len(),
+                                    nl.data.note_count(),
+                                    nl.data.length
+                                ))
+                                .weak()
+                                .small(),
+                            );
+                            if ui.button("🗑").on_hover_text("Remove from project").clicked() {
+                                remove = Some(i);
+                            }
+                        });
+                    }
+                });
+            if let Some(i) = load {
+                self.load_loop_into_studio(i);
+            }
+            if let Some(i) = remove {
+                self.project.loops.remove(i);
+            }
+        }
+
+        if !self.project_status.is_empty() {
+            ui.label(egui::RichText::new(&self.project_status).weak().small());
+        }
+        ui.add_space(2.0);
+    }
+
     /// The instrument-library bar: name + save, and load/delete of saved presets.
     fn presets_bar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
