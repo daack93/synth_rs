@@ -929,6 +929,25 @@ impl Studio {
         }
     }
 
+    // ---- offline export ----
+
+    /// Render the currently-installed loop/song for `frames` samples (transport
+    /// running), then let voices ring for `tail` more with the transport halted
+    /// (no new events, no hard cutoff), into one mono buffer. For WAV export.
+    pub fn render_offline(&mut self, frames: usize, tail: usize) -> Vec<f32> {
+        let mut buf = vec![0.0f32; frames];
+        self.render(&mut buf, 1);
+        // Halt the transport but keep sounding voices so they decay naturally.
+        self.playing = false;
+        self.song_active = false;
+        if tail > 0 {
+            let mut ring = vec![0.0f32; tail];
+            self.render(&mut ring, 1);
+            buf.extend_from_slice(&ring);
+        }
+        buf
+    }
+
     // ---- audio rendering ----
 
     /// Render `out` (interleaved by `channels`).

@@ -3,6 +3,7 @@
 //! the computer keyboard, and a MIDI controller all play it.
 
 mod audio;
+mod export;
 mod instrument;
 mod kit;
 mod midi;
@@ -10,6 +11,7 @@ mod models;
 mod presets;
 mod project;
 mod studio;
+mod wav;
 
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
@@ -116,6 +118,14 @@ struct App {
     /// Arranger: repeat count for the next section.
     arrange_repeats: u32,
 
+    // Export
+    export_name: String,
+    export_sr: u32,
+    export_repeats: u32,
+    export_tail: f32,
+    export_hi_res: bool,
+    export_status: String,
+
     // Keyboard state
     base_midi: i32,
     /// On-screen (mouse) currently-held note.
@@ -182,6 +192,12 @@ impl App {
             project_status: String::new(),
             arrange_loop_sel: 0,
             arrange_repeats: 4,
+            export_name: "take".to_string(),
+            export_sr: 48_000,
+            export_repeats: 2,
+            export_tail: 1.0,
+            export_hi_res: false,
+            export_status: String::new(),
             base_midi: 60, // C4
             mouse_note: None,
             held_keys: HashMap::new(),
@@ -626,11 +642,100 @@ impl App {
         }
 
         self.arrangement_ui(ui);
+        self.export_ui(ui);
 
         if !self.project_status.is_empty() {
             ui.label(egui::RichText::new(&self.project_status).weak().small());
         }
         ui.add_space(2.0);
+    }
+
+    /// Offline WAV export of the current loop or the whole song.
+    fn export_ui(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.strong("Export WAV");
+            ui.label("Name");
+            ui.add(egui::TextEdit::singleline(&mut self.export_name).desired_width(120.0));
+            ui.label("Rate");
+            egui::ComboBox::from_id_salt("export_sr")
+                .selected_text(format!("{} Hz", self.export_sr))
+                .show_ui(ui, |ui| {
+                    for sr in [44_100u32, 48_000, 96_000, 192_000] {
+                        ui.selectable_value(&mut self.export_sr, sr, format!("{sr} Hz"));
+                    }
+                });
+            ui.checkbox(&mut self.export_hi_res, "Hi-res")
+                .on_hover_text("Max out the horn eigensolve resolution for the render (higher rate already admits more modes).");
+        });
+        ui.horizontal(|ui| {
+            ui.label("Loop ×");
+            ui.add(egui::DragValue::new(&mut self.export_repeats).range(1..=256));
+            ui.label("Tail");
+            ui.add(egui::DragValue::new(&mut self.export_tail).range(0.0..=10.0).speed(0.1).suffix(" s"));
+            if ui.button("⬇ Export loop").clicked() {
+                self.export_loop();
+            }
+            let has_song = !self.project.arrangement.is_empty();
+            if ui
+                .add_enabled(has_song, egui::Button::new("⬇ Export song"))
+                .clicked()
+            {
+                self.export_song();
+            }
+        });
+        if !self.export_status.is_empty() {
+            ui.label(egui::RichText::new(&self.export_status).weak().small());
+        }
+    }
+
+    fn export_loop(&mut self) {
+        let view = match &self.view {
+            Some(v) => v.clone(),
+            None => return,
+        };
+        let data = view.snapshot();
+        if data.is_empty() {
+            self.export_status = "Nothing to export — record a loop first.".into();
+            return;
+        }
+        let path = export::export_path(&self.export_name);
+        let sr = self.export_sr as f32;
+        match export::render_loop_to_wav(
+            data,
+            sr,
+            self.export_repeats,
+            self.export_tail,
+            self.export_hi_res,
+            &path,
+        ) {
+            Ok(()) => self.export_status = format!("Wrote {}", path.display()),
+            Err(e) => self.export_status = format!("Export failed: {e}"),
+        }
+    }
+
+    fn export_song(&mut self) {
+        let sections: Vec<SongSection> = self
+            .project
+            .arrangement
+            .iter()
+            .filter_map(|s| {
+                self.project.loops.get(s.loop_index).map(|nl| SongSection {
+                    loop_data: nl.data.clone(),
+                    repeats: s.repeats,
+                })
+            })
+            .collect();
+        if sections.is_empty() {
+            self.export_status = "Add sections to the song first.".into();
+            return;
+        }
+        let path = export::export_path(&format!("{}_song", self.export_name));
+        let sr = self.export_sr as f32;
+        match export::render_song_to_wav(sections, sr, self.export_tail, self.export_hi_res, &path) {
+            Ok(()) => self.export_status = format!("Wrote {}", path.display()),
+            Err(e) => self.export_status = format!("Export failed: {e}"),
+        }
     }
 
     /// The song arranger: a linear timeline of (loop × repeats) sections.
