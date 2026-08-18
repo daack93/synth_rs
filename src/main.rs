@@ -134,6 +134,9 @@ struct App {
     drag_start: Option<f32>,
     /// Destination time (secs) for duplicate / move.
     region_dest: f32,
+    /// Note-edit params for the selection: transpose semitones, velocity factor.
+    region_transpose: i32,
+    region_vel: f32,
 
     // Export
     export_name: String,
@@ -216,6 +219,8 @@ impl App {
             sel: None,
             drag_start: None,
             region_dest: 0.0,
+            region_transpose: 0,
+            region_vel: 1.0,
             export_name: "take".to_string(),
             export_sr: 48_000,
             export_repeats: 2,
@@ -1798,6 +1803,41 @@ impl App {
             }
             if ui.button("✕ sel").clicked() {
                 self.sel = None;
+            }
+        });
+        // Second row: note edits on the selection.
+        ui.horizontal(|ui| {
+            ui.add_space(28.0);
+            ui.label(egui::RichText::new("notes:").small());
+            ui.add(egui::DragValue::new(&mut self.region_transpose).range(-24..=24).suffix(" st"));
+            if ui.button("Transpose").clicked() {
+                let semitones = self.region_transpose;
+                let _ = self.tx.send(Command::RegionEdit {
+                    track: i,
+                    op: RegionOp::Transpose { a, b, semitones },
+                });
+            }
+            ui.separator();
+            ui.add(egui::DragValue::new(&mut self.region_vel).range(0.0..=2.0).speed(0.02));
+            if ui.button("×Vel").on_hover_text("Scale velocity of the selection").clicked() {
+                let factor = self.region_vel;
+                let _ = self.tx.send(Command::RegionEdit {
+                    track: i,
+                    op: RegionOp::VelScale { a, b, factor },
+                });
+            }
+            if ui.button("Crescendo").on_hover_text("Ramp velocity 0.3 → 1.0 across the selection").clicked() {
+                let _ = self.tx.send(Command::RegionEdit {
+                    track: i,
+                    op: RegionOp::VelRamp { a, b, from: 0.3, to: 1.0 },
+                });
+            }
+            ui.separator();
+            if ui.button("Quantize").clicked() {
+                let _ = self.tx.send(Command::RegionEdit { track: i, op: RegionOp::Quantize { a, b } });
+            }
+            if ui.button("Reverse").clicked() {
+                let _ = self.tx.send(Command::RegionEdit { track: i, op: RegionOp::Reverse { a, b } });
             }
         });
     }

@@ -146,6 +146,16 @@ pub enum RegionOp {
     Move { a: f32, b: f32, dest: f32 },
     /// Slide the whole track by `delta` seconds (wraps within the loop).
     Shift { delta: f32 },
+    /// Transpose notes starting in `[a, b)` by `semitones`.
+    Transpose { a: f32, b: f32, semitones: i32 },
+    /// Scale the velocity of notes starting in `[a, b)` by `factor`.
+    VelScale { a: f32, b: f32, factor: f32 },
+    /// Ramp velocities of notes in `[a, b)` linearly from `from` to `to`.
+    VelRamp { a: f32, b: f32, from: f32, to: f32 },
+    /// Snap notes starting in `[a, b)` to the tempo grid.
+    Quantize { a: f32, b: f32 },
+    /// Reverse the notes in `[a, b)` in time (mirror within the window).
+    Reverse { a: f32, b: f32 },
 }
 
 /// How the live slot should be configured: a single instrument or a kit.
@@ -1097,6 +1107,9 @@ impl Studio {
         let Some(len) = self.loop_len else { return };
         let pos = self.pos;
         let p = |secs: f32| ((secs * sr).round().max(0.0) as u64).min(len);
+        // Grid spacing (samples) for Quantize — the current grid, or 1/16 if off.
+        let steps = if self.tempo.quantize > 0 { self.tempo.quantize } else { 4 };
+        let grid = (self.spb() / steps as f64).max(1.0);
         {
             let Some(t) = self.tracks.get_mut(i) else { return };
             match op {
@@ -1148,6 +1161,64 @@ impl Studio {
                     for x in &mut t.auto {
                         x.pos = wrap_pos(x.pos as i64 + d, len);
                     }
+                }
+                RegionOp::Transpose { a, b, semitones } => {
+                    let (a, b) = (p(a), p(b));
+                    let mut spans = events_to_spans(&t.events, len);
+                    for s in &mut spans {
+                        if s.start >= a && s.start < b {
+                            s.note = (s.note as i32 + semitones).clamp(0, 127) as u8;
+                        }
+                    }
+                    t.events = spans_to_events(&spans);
+                }
+                RegionOp::VelScale { a, b, factor } => {
+                    let (a, b) = (p(a), p(b));
+                    let mut spans = events_to_spans(&t.events, len);
+                    for s in &mut spans {
+                        if s.start >= a && s.start < b {
+                            s.vel = (s.vel * factor).clamp(0.0, 1.0);
+                        }
+                    }
+                    t.events = spans_to_events(&spans);
+                }
+                RegionOp::VelRamp { a, b, from, to } => {
+                    let (a, b) = (p(a), p(b));
+                    let span_len = (b.saturating_sub(a)).max(1) as f32;
+                    let mut spans = events_to_spans(&t.events, len);
+                    for s in &mut spans {
+                        if s.start >= a && s.start < b {
+                            let frac = (s.start - a) as f32 / span_len;
+                            s.vel = (from + (to - from) * frac).clamp(0.0, 1.0);
+                        }
+                    }
+                    t.events = spans_to_events(&spans);
+                }
+                RegionOp::Quantize { a, b } => {
+                    let (a, b) = (p(a), p(b));
+                    let mut spans = events_to_spans(&t.events, len);
+                    for s in &mut spans {
+                        if s.start >= a && s.start < b {
+                            let dur = s.end.saturating_sub(s.start);
+                            let q = ((s.start as f64 / grid).round() * grid).round() as u64;
+                            s.start = q.min(len.saturating_sub(1));
+                            s.end = (s.start + dur).min(len);
+                        }
+                    }
+                    t.events = spans_to_events(&spans);
+                }
+                RegionOp::Reverse { a, b } => {
+                    let (a, b) = (p(a), p(b));
+                    let mut spans = events_to_spans(&t.events, len);
+                    for s in &mut spans {
+                        if s.start >= a && s.start < b {
+                            // Mirror the span within [a, b), preserving duration.
+                            let (ns, ne) = (a + b.saturating_sub(s.end), a + b.saturating_sub(s.start));
+                            s.start = ns.min(len);
+                            s.end = ne.min(len);
+                        }
+                    }
+                    t.events = spans_to_events(&spans);
                 }
             }
             t.events.sort_by_key(|e| e.pos);
@@ -1927,6 +1998,31 @@ mod tests {
             .map(|e| (e.t * 10.0).round() as i32)
             .collect();
         assert_eq!(n60, vec![5], "note 60 moved from 0.0 to 0.5, not duplicated");
+    }
+
+    #[test]
+    fn region_transpose_shifts_selected_notes() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(two_note_loop()));
+        s.handle(Command::RegionEdit { track: 0, op: RegionOp::Transpose { a: 0.0, b: 1.0, semitones: 5 } });
+        assert_eq!(ons_of(&s), vec![65, 67], "both notes up a fourth");
+    }
+
+    #[test]
+    fn region_reverse_mirrors_in_time() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(two_note_loop()));
+        s.handle(Command::RegionEdit { track: 0, op: RegionOp::Reverse { a: 0.0, b: 1.0 } });
+        let snap = s.snapshot_loop();
+        let mut ons: Vec<(u8, i32)> = snap.tracks[0]
+            .events
+            .iter()
+            .filter(|e| e.on)
+            .map(|e| (e.note, (e.t * 10.0).round() as i32))
+            .collect();
+        ons.sort_by_key(|x| x.1);
+        // 62 (0.5→0.4) comes before 60 (0.0→0.9) after reversing.
+        assert_eq!(ons, vec![(62, 4), (60, 9)]);
     }
 
     #[test]
