@@ -76,9 +76,13 @@ as starting points to tune by ear. **★ Factory** restores them.
   length, `DEPTH`, `DAMP_PERIOD`, `TIME_SCALE`) plus a continuous pluck position
   (the firmware's triangle and saw are its center and near-end extremes) and the
   accelerometer velocity mapping.
+- **Drum (2D membrane)** — a circular drumhead: the same FTM equations with the
+  Laplacian ∇², so the modes are the inharmonic Bessel-zero series (1 : 1.59 :
+  2.14 : 2.30 …). Controls for wave speed, stiffness, damping, radius, and
+  strike position (centre → rim).
 - **Basic Wave** — band-limited triangle / sawtooth; the framework's reference
   oscillator.
 
 ## Roadmap
 
-- 2-D membrane (drum) and 3-D solid FTM models.
+- 3-D solid FTM models.
