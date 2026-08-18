@@ -66,7 +66,7 @@ impl Default for DrumMembrane {
             play_magnitude: 0.0,
             max_magnitude: 2500.0,
             key_tracks_pitch: true,
-            pitch_mode: PitchMode::Transpose,
+            pitch_mode: PitchMode::Physical,
         }
     }
 }

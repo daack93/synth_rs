@@ -43,7 +43,8 @@ pub enum PitchMode {
 
 impl Default for PitchMode {
     fn default() -> Self {
-        PitchMode::Transpose
+        // Physical (size tracks pitch) is the standard for the geometric models.
+        PitchMode::Physical
     }
 }
 
