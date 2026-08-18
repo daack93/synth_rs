@@ -213,6 +213,12 @@ struct Track {
     inst: Playable,
     events: Vec<Event>,
     cursor: usize,
+    /// This track's own loop length in samples — it repeats every `period`,
+    /// independent of the other tracks. Events are stored relative to it
+    /// (`[0, period)`). The global song length is the longest track's period.
+    period: u64,
+    /// The track's local time (`pos % period`) last frame — for wrap detection.
+    prev_local: u64,
     muted: bool,
     /// Mixer level (linear) and stereo pan (-1..=1), plus solo.
     volume: f32,
@@ -270,6 +276,8 @@ pub struct TrackView {
     pub solo: bool,
     pub fade_in: f32,
     pub fade_out: f32,
+    /// This track's own loop length in seconds.
+    pub period: f32,
 }
 
 /// Lock-free scalars + an occasionally-rebuilt track list for the UI.
@@ -364,6 +372,9 @@ pub struct Studio {
     defining: bool,
     /// For a pedal-mode one-pass overdub: finalize after this many recorded frames.
     auto_finalize_at: Option<u64>,
+    /// The period (loop length) for the take currently being armed/recorded, if
+    /// known ahead of time. `None` for a free first take (derived on close).
+    arm_period: Option<u64>,
     /// Frames elapsed since arming (measures the one-pass window).
     rec_frames: u64,
 
@@ -418,6 +429,7 @@ impl Studio {
             armed: false,
             defining: false,
             auto_finalize_at: None,
+            arm_period: None,
             rec_frames: 0,
             song: Vec::new(),
             song_active: false,
@@ -685,7 +697,11 @@ impl Studio {
         self.metro_phase = 0;
         self.beat_index = 0;
         if self.tempo.bars > 0 {
-            self.loop_len = Some(self.fixed_loop_samples());
+            let fixed = self.fixed_loop_samples();
+            self.loop_len = Some(fixed);
+            self.arm_period = Some(fixed);
+        } else {
+            self.arm_period = None; // free take — period set on close
         }
     }
 
@@ -766,14 +782,19 @@ impl Studio {
             // Closing the first pass: fix loop length, start looping.
             (None, true) => {
                 if recording {
-                    // A take was actually recorded — close the loop around it.
-                    self.loop_len = Some(self.pos.max(1));
+                    // A take was actually recorded — its length becomes its period.
+                    let len = self.pos.max(1);
+                    if let Some(r) = self.recording {
+                        self.tracks[r].period = len;
+                    }
                     self.disarm_and_finalize();
+                    self.recompute_song_len();
                     self.defining = false;
                     self.pos = 0;
                     self.reset_cursors();
                     self.playing = true;
                     if self.mode == LooperMode::Overdub {
+                        self.arm_period = Some(self.take_period());
                         self.arm(false); // arm the next take from the top
                     }
                 } else {
@@ -789,14 +810,14 @@ impl Studio {
                     if recording || self.armed {
                         self.disarm_and_finalize(); // finish this overdub, keep playing
                     } else if self.playing {
-                        self.arm(false); // record over into a new track
+                        self.arm_overdub(); // record over into a new track
                     } else {
                         self.playing = true; // resume from a stop
                     }
                 }
                 LooperMode::Overdub => {
                     self.disarm_and_finalize(); // close current take (if any)
-                    self.arm(false); // arm the next
+                    self.arm_overdub(); // arm the next
                     self.playing = true;
                 }
             },
@@ -857,21 +878,24 @@ impl Studio {
         if !(factor > 0.0) || (factor - 1.0).abs() < 1e-4 {
             return;
         }
+        let _ = len;
         self.push_undo();
         let f = factor as f64;
-        let new_len = ((len as f64 * f).round() as u64).max(1);
-        let scale = |pos: u64| ((pos as f64 * f).round() as u64).min(new_len - 1);
+        // Scale every track's period and its (period-relative) events/automation.
         for t in &mut self.tracks {
+            let new_period = ((t.period as f64 * f).round() as u64).max(1);
+            let scale = |pos: u64| ((pos as f64 * f).round() as u64).min(new_period - 1);
             for e in &mut t.events {
                 e.pos = scale(e.pos);
             }
             for a in &mut t.auto {
                 a.pos = scale(a.pos);
             }
+            t.period = new_period;
             t.events.sort_by_key(|e| e.pos);
             t.auto.sort_by_key(|a| a.pos);
         }
-        self.loop_len = Some(new_len);
+        self.recompute_song_len();
         self.pos = 0;
         self.reset_cursors();
         self.mark_structure_dirty();
@@ -938,16 +962,23 @@ impl Studio {
             return;
         }
 
-        let len = ((data.length * self.sr).round() as u64).max(1);
-        self.loop_len = Some(len);
+        let song = ((data.length * self.sr).round() as u64).max(1);
+        self.loop_len = Some(song);
         for lt in data.tracks {
             let inst = self.track_playable(&lt);
             let label = inst.label();
+            // Each track has its own period (defaults to the whole loop for
+            // projects saved before per-track lengths existed).
+            let period = lt
+                .period
+                .map(|s| (s * self.sr).round() as u64)
+                .unwrap_or(song)
+                .max(1);
             let mut events: Vec<Event> = lt
                 .events
                 .iter()
                 .map(|e| {
-                    let pos = ((e.t * self.sr).round() as u64).min(len - 1);
+                    let pos = ((e.t * self.sr).round() as u64).min(period - 1);
                     let msg = if e.on {
                         EvMsg::On { note: e.note, vel: e.vel }
                     } else {
@@ -961,7 +992,7 @@ impl Studio {
                 .automation
                 .iter()
                 .map(|a| AutoEv {
-                    pos: ((a.t * self.sr).round() as u64).min(len - 1),
+                    pos: ((a.t * self.sr).round() as u64).min(period - 1),
                     target: a.target.clone(),
                     value: a.value,
                 })
@@ -971,6 +1002,8 @@ impl Studio {
                 inst,
                 events,
                 cursor: 0,
+                period,
+                prev_local: 0,
                 muted: lt.muted,
                 volume: lt.volume,
                 pan: lt.pan,
@@ -988,6 +1021,7 @@ impl Studio {
                 cur_engine: lt.engine,
             });
         }
+        self.recompute_song_len();
         self.pos = 0;
         self.reset_cursors();
         self.playing = true;
@@ -1013,6 +1047,7 @@ impl Studio {
                 pan: t.pan,
                 fade_in: t.fade_in,
                 fade_out: t.fade_out,
+                period: Some(t.period as f32 / sr),
                 zones,
                 automation: t
                     .auto
@@ -1041,13 +1076,23 @@ impl Studio {
     }
 
     /// Pedal-mode "+ Rec track": record exactly one loop pass into a new track.
+    /// Arm an overdub take: choose its period (fixed bars or match the song),
+    /// extend the transport so a longer take fits, and arm.
+    fn arm_overdub(&mut self) {
+        let period = self.take_period().max(1);
+        self.arm_period = Some(period);
+        let cur = self.loop_len.unwrap_or(0);
+        self.loop_len = Some(cur.max(period));
+        self.arm(false);
+    }
+
     fn arm_overdub_one_pass(&mut self) {
-        let Some(len) = self.loop_len else { return };
-        if self.recording.is_some() || self.armed {
+        if self.loop_len.is_none() || self.recording.is_some() || self.armed {
             return;
         }
-        self.arm(false);
-        self.auto_finalize_at = Some(len);
+        self.arm_overdub();
+        // Auto-close after exactly one period of the take.
+        self.auto_finalize_at = self.arm_period;
         self.playing = true;
         self.mark_structure_dirty();
     }
@@ -1071,6 +1116,8 @@ impl Studio {
             inst,
             events: Vec::new(),
             cursor: 0,
+            period: self.arm_period.unwrap_or(0), // 0 = free take, set on close
+            prev_local: self.pos,
             muted: false,
             volume: 1.0,
             pan: 0.0,
@@ -1095,35 +1142,54 @@ impl Studio {
     fn disarm_and_finalize(&mut self) {
         self.armed = false;
         self.auto_finalize_at = None;
+        self.arm_period = None;
+        let pos = self.pos;
         if let Some(idx) = self.recording.take() {
             if let Some(t) = self.tracks.get_mut(idx) {
                 t.events.sort_by_key(|e| e.pos);
                 t.auto.sort_by_key(|a| a.pos);
-                let pos = self.pos;
-                t.cursor = t.events.partition_point(|e| e.pos < pos);
-                t.auto_cursor = t.auto.partition_point(|a| a.pos < pos);
+                if t.period == 0 {
+                    t.period = pos.max(1); // free take with no set period
+                }
+                let local = pos % t.period.max(1);
+                t.cursor = t.events.partition_point(|e| e.pos < local);
+                t.auto_cursor = t.auto.partition_point(|a| a.pos < local);
+                t.prev_local = local;
                 if t.events.is_empty() {
                     self.tracks.remove(idx);
                     self.renumber_tracks();
                 }
             }
         }
+        // A finished/removed take can change the song length (shrink an
+        // extension, or add a longer period).
+        self.recompute_song_len();
     }
 
     fn reset_cursors(&mut self) {
         for t in &mut self.tracks {
-            t.cursor = 0;
-            // Rewind automation to the track's base state so the loop repeats.
-            if !t.auto.is_empty() {
-                t.auto_cursor = 0;
-                t.cur_json = t.base_json.clone();
-                t.cur_engine = t.base_engine.clone();
-                if let Some(model) = model_from_id(&t.model_id, &t.base_json) {
-                    t.inst.set_model(model);
-                }
-                t.inst.set_engine(t.base_engine.clone());
-                t.inst.set_bend(1.0); // bend resets each loop; @bend events re-apply
-            }
+            reset_track(t);
+        }
+    }
+
+    /// The global song length: the longest track's period (0 if no tracks).
+    fn song_len(&self) -> u64 {
+        self.tracks.iter().map(|t| t.period.max(1)).max().unwrap_or(0)
+    }
+
+    /// Set the transport wrap length to the current song length.
+    fn recompute_song_len(&mut self) {
+        let len = self.song_len();
+        self.loop_len = if len > 0 { Some(len) } else { None };
+    }
+
+    /// The period (samples) a newly-armed take should use: a fixed bar-count if
+    /// the grid is set, otherwise the current song length (match the longest).
+    fn take_period(&self) -> u64 {
+        if self.tempo.bars > 0 {
+            self.fixed_loop_samples()
+        } else {
+            self.song_len()
         }
     }
 
@@ -1168,14 +1234,15 @@ impl Studio {
     fn region_edit(&mut self, i: usize, op: RegionOp) {
         self.push_undo();
         let sr = self.sr;
-        let Some(len) = self.loop_len else { return };
         let pos = self.pos;
-        let p = |secs: f32| ((secs * sr).round().max(0.0) as u64).min(len);
         // Grid spacing (samples) for Quantize — the current grid, or 1/16 if off.
         let steps = if self.tempo.quantize > 0 { self.tempo.quantize } else { 4 };
         let grid = (self.spb() / steps as f64).max(1.0);
         {
             let Some(t) = self.tracks.get_mut(i) else { return };
+            // Region edits are relative to this track's own period, not the song.
+            let len = t.period.max(1);
+            let p = |secs: f32| ((secs * sr).round().max(0.0) as u64).min(len);
             match op {
                 RegionOp::Delete { a, b } => {
                     let (a, b) = (p(a), p(b));
@@ -1287,8 +1354,9 @@ impl Studio {
             }
             t.events.sort_by_key(|e| e.pos);
             t.auto.sort_by_key(|a| a.pos);
-            t.cursor = t.events.partition_point(|e| e.pos < pos);
-            t.auto_cursor = t.auto.partition_point(|a| a.pos < pos);
+            let local = pos % len;
+            t.cursor = t.events.partition_point(|e| e.pos < local);
+            t.auto_cursor = t.auto.partition_point(|a| a.pos < local);
         }
         self.mark_structure_dirty();
     }
@@ -1371,14 +1439,22 @@ impl Studio {
         let pos = self.pos;
         let recording = self.recording;
         for (i, t) in self.tracks.iter_mut().enumerate() {
+            let period = t.period.max(1);
+            let local = pos % period;
             if Some(i) == recording {
-                continue; // don't play the take we're currently recording
+                // Don't play the take being recorded, but keep its clock in sync.
+                t.prev_local = local;
+                continue;
+            }
+            // A period wrap (or the global wrap) rewinds this track to its top.
+            if local < t.prev_local {
+                reset_track(t);
             }
             // Skip anything already behind us, then fire everything on this frame.
-            while t.cursor < t.events.len() && t.events[t.cursor].pos < pos {
+            while t.cursor < t.events.len() && t.events[t.cursor].pos < local {
                 t.cursor += 1;
             }
-            while t.cursor < t.events.len() && t.events[t.cursor].pos == pos {
+            while t.cursor < t.events.len() && t.events[t.cursor].pos == local {
                 match t.events[t.cursor].msg {
                     EvMsg::On { note, vel } => t.inst.note_on(note, vel),
                     EvMsg::Off { note } => t.inst.note_off(note),
@@ -1388,11 +1464,11 @@ impl Studio {
 
             // Fire any parameter automation landing on this frame.
             if !t.auto.is_empty() {
-                while t.auto_cursor < t.auto.len() && t.auto[t.auto_cursor].pos < pos {
+                while t.auto_cursor < t.auto.len() && t.auto[t.auto_cursor].pos < local {
                     t.auto_cursor += 1;
                 }
                 let (mut model_dirty, mut engine_dirty) = (false, false);
-                while t.auto_cursor < t.auto.len() && t.auto[t.auto_cursor].pos == pos {
+                while t.auto_cursor < t.auto.len() && t.auto[t.auto_cursor].pos == local {
                     let (target, value) = {
                         let ev = &t.auto[t.auto_cursor];
                         (ev.target.clone(), ev.value)
@@ -1422,6 +1498,7 @@ impl Studio {
                     t.inst.set_engine(t.cur_engine.clone());
                 }
             }
+            t.prev_local = local;
         }
     }
 
@@ -1515,17 +1592,18 @@ impl Studio {
     }
 
     fn mark_structure_dirty(&mut self) {
-        let len = self.loop_len.unwrap_or(0).max(1) as f32;
+        let sr = self.sr;
         let views = self
             .tracks
             .iter()
             .map(|t| {
                 let (model_id, params, engine, zones) = t.inst.parts();
+                let period = t.period.max(1) as f32;
                 TrackView {
                     name: t.name.clone(),
                     instrument: t.label.clone(),
                     muted: t.muted,
-                    notes: note_spans(&t.events, len),
+                    notes: note_spans(&t.events, period),
                     model_id,
                     params,
                     engine,
@@ -1536,6 +1614,7 @@ impl Studio {
                     solo: t.solo,
                     fade_in: t.fade_in,
                     fade_out: t.fade_out,
+                    period: period / sr,
                 }
             })
             .collect();
@@ -1560,6 +1639,24 @@ impl Studio {
 }
 
 /// Pair note-on/off events into normalized spans for drawing.
+/// Hard-reset one track's playback state to the top of its loop: rewind the
+/// event/automation cursors and restore the automation base (model, engine,
+/// bend). Called at each of the track's period boundaries.
+fn reset_track(t: &mut Track) {
+    t.cursor = 0;
+    t.prev_local = 0;
+    if !t.auto.is_empty() {
+        t.auto_cursor = 0;
+        t.cur_json = t.base_json.clone();
+        t.cur_engine = t.base_engine.clone();
+        if let Some(model) = model_from_id(&t.model_id, &t.base_json) {
+            t.inst.set_model(model);
+        }
+        t.inst.set_engine(t.base_engine.clone());
+        t.inst.set_bend(1.0); // bend resets each loop; @bend events re-apply
+    }
+}
+
 /// A paired note: on at `start`, off at `end`.
 #[derive(Clone)]
 struct Span {
@@ -1933,6 +2030,7 @@ mod tests {
                 pan: 0.0,
                 fade_in: 0.0,
                 fade_out: 0.0,
+                period: None,
                 zones: Vec::new(),
                 // Delta of +100 from the base damping (default 8) → effective 108.
                 automation: vec![AutoPoint { t: 0.005, target: "damping".into(), value: 100.0 }],
@@ -1988,6 +2086,7 @@ mod tests {
                 pan: 0.0,
                 fade_in: 0.0,
                 fade_out: 0.0,
+                period: None,
                 zones: Vec::new(),
                 automation: vec![AutoPoint { t: 0.005, target: "damping".into(), value: 100.0 }],
                 events: vec![LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
@@ -2019,6 +2118,7 @@ mod tests {
                 pan: 0.0,
                 fade_in: 0.0,
                 fade_out: 0.0,
+                period: None,
                 zones: Vec::new(),
                 automation: Vec::new(),
                 events: vec![
@@ -2101,6 +2201,41 @@ mod tests {
     }
 
     #[test]
+    fn shorter_track_loops_within_a_longer_song() {
+        use crate::project::{LoopData, LoopEvent, LoopTrack};
+        let track = |note: u8, period: f32| LoopTrack {
+            name: "T".into(),
+            model_id: "musical_string".into(),
+            params: serde_json::json!({}),
+            engine: EngineParams::default(),
+            muted: false,
+            volume: 1.0,
+            pan: 0.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            period: Some(period),
+            zones: Vec::new(),
+            automation: Vec::new(),
+            events: vec![
+                LoopEvent { t: 0.0, on: true, note, vel: 1.0 },
+                LoopEvent { t: 0.02, on: false, note, vel: 0.0 },
+            ],
+        };
+        // Track A repeats every 0.1s; track B (the longest) sets the 0.4s song.
+        let data = LoopData { length: 0.4, tracks: vec![track(60, 0.1), track(67, 0.4)] };
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(data));
+        assert_eq!(s.loop_len, Some((0.4 * 48_000.0) as u64), "song = longest period");
+        assert_eq!(s.tracks[0].period, (0.1 * 48_000.0) as u64, "track A keeps its 0.1s period");
+
+        // Play to ~0.31s: past three of A's re-triggers. A struck a fresh note at
+        // 0.3s, so it's audible — under a single-play model it would have decayed
+        // to silence long ago.
+        drain(&mut s, 14_880);
+        assert!(s.tracks[0].inst.active_voices() > 0, "short track re-fired inside the song");
+    }
+
+    #[test]
     fn time_stretch_scales_positions_and_length() {
         let mut s = Studio::new(48_000.0);
         s.handle(Command::LoadLoop(two_note_loop())); // length 1.0s
@@ -2160,6 +2295,7 @@ mod tests {
                 pan,
                 fade_in: 0.0,
                 fade_out: 0.0,
+                period: None,
                 zones: Vec::new(),
                 automation: Vec::new(),
                 events: vec![LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
@@ -2243,6 +2379,7 @@ mod tests {
                 pan: 0.0,
                 fade_in: 0.0,
                 fade_out: 0.0,
+                period: None,
                 zones: Vec::new(),
                 automation: Vec::new(),
                 events: vec![

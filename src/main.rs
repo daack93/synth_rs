@@ -1506,7 +1506,7 @@ impl App {
             if self.looper_mode == LooperMode::Pedal && loop_secs > 0.0 {
                 if ui
                     .button("＋ Rec track")
-                    .on_hover_text("Record one more pass into a new track")
+                    .on_hover_text("Record a new layer. Set Loop to a bar count first to record a longer part over the beat.")
                     .clicked()
                 {
                     let _ = self.tx.send(Command::ArmOverdub);
@@ -1663,13 +1663,14 @@ impl App {
         let mut clear_auto = None;
         let mut drag_start = self.drag_start;
         let mut new_sel: Option<Option<(usize, f32, f32)>> = None;
+        let pos_secs = play * loop_secs; // global playhead in seconds
         for (i, t) in tracks.iter().enumerate() {
             let editing = self.edit_target == Target::Track(i);
-            let sel_frac = if loop_secs > 0.0 {
-                self.sel.filter(|s| s.0 == i).map(|(_, a, b)| (a / loop_secs, b / loop_secs))
-            } else {
-                None
-            };
+            // The track's timeline is scaled to its own period (it may loop
+            // several times within the song).
+            let period = t.period.max(1e-6);
+            let track_play = (pos_secs % period) / period;
+            let sel_frac = self.sel.filter(|s| s.0 == i).map(|(_, a, b)| (a / period, b / period));
             ui.horizontal(|ui| {
                 let mute = if t.muted { "🔇" } else { "🔊" };
                 if ui.button(mute).on_hover_text("Mute / unmute").clicked() {
@@ -1693,11 +1694,15 @@ impl App {
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.label(&t.name);
-                        ui.label(egui::RichText::new(&t.instrument).weak().small());
+                        ui.label(
+                            egui::RichText::new(format!("{} · {:.2}s", t.instrument, t.period))
+                                .weak()
+                                .small(),
+                        );
                     },
                 );
-                let resp = draw_track_timeline(ui, &t.notes, play, t.muted, sel_frac);
-                if loop_secs > 0.0 {
+                let resp = draw_track_timeline(ui, &t.notes, track_play, t.muted, sel_frac);
+                {
                     let w = resp.rect.width().max(1.0);
                     let frac_at = |x: f32| ((x - resp.rect.left()) / w).clamp(0.0, 1.0);
                     if resp.drag_started() {
@@ -1709,7 +1714,7 @@ impl App {
                         if let (Some(st), Some(p)) = (drag_start, resp.interact_pointer_pos()) {
                             let cur = frac_at(p.x);
                             let (a, b) = (st.min(cur), st.max(cur));
-                            new_sel = Some(Some((i, a * loop_secs, b * loop_secs)));
+                            new_sel = Some(Some((i, a * period, b * period)));
                         }
                     }
                     if resp.drag_stopped() {
@@ -1743,8 +1748,8 @@ impl App {
                 }
             });
             // Region-edit toolbar for the selected track.
-            if self.sel.map(|s| s.0) == Some(i) && loop_secs > 0.0 {
-                self.region_ops_row(ui, i, loop_secs);
+            if self.sel.map(|s| s.0) == Some(i) {
+                self.region_ops_row(ui, i, period);
             }
         }
         self.drag_start = drag_start;
@@ -1778,7 +1783,7 @@ impl App {
     }
 
     /// The chop/crop/rearrange toolbar shown under the selected track.
-    fn region_ops_row(&mut self, ui: &mut egui::Ui, i: usize, loop_secs: f32) {
+    fn region_ops_row(&mut self, ui: &mut egui::Ui, i: usize, track_secs: f32) {
         let Some((_, a, b)) = self.sel else { return };
         let beat = 60.0 / self.project.tempo.bpm.max(1.0);
         ui.horizontal(|ui| {
@@ -1799,7 +1804,7 @@ impl App {
             ui.label("dest");
             ui.add(
                 egui::DragValue::new(&mut self.region_dest)
-                    .range(0.0..=loop_secs)
+                    .range(0.0..=track_secs)
                     .speed(0.01)
                     .suffix(" s"),
             );
