@@ -252,6 +252,19 @@ impl App {
 
     /// Translate physical-key events into notes.
     fn handle_computer_keyboard(&mut self, ctx: &egui::Context) {
+        // While a text field (e.g. the preset name) has focus, keystrokes are
+        // for typing — don't play notes or drive the looper. Release anything
+        // currently held so notes don't stick when focus is taken.
+        if ctx.wants_keyboard_input() {
+            let stuck: Vec<u8> = self.held_keys.values().copied().collect();
+            self.held_keys.clear();
+            for note in stuck {
+                self.note_off(note);
+            }
+            self.space_down_at = None;
+            return;
+        }
+
         let events = ctx.input(|i| i.events.clone());
         for ev in events {
             if let egui::Event::Key {
