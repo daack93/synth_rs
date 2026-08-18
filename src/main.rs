@@ -27,8 +27,8 @@ use models::FtmModel;
 use presets::Preset;
 use project::{NamedLoop, Project, Section, TempoGrid, ZoneData};
 use studio::{
-    Command, LiveConfig, LooperMode, NoteSpan, RegionOp, SharedView, SongSection, TrackView,
-    TransportState,
+    Command, LiveConfig, LooperMode, NoteSpan, PlayMode, RegionOp, SharedView, SongSection,
+    TrackView, TransportState,
 };
 
 /// Spacebar hold thresholds: a quick press taps, a medium hold stops, a long
@@ -121,6 +121,8 @@ struct App {
 
     /// Master output level (linear).
     master_volume: f32,
+    /// Transport play mode: false = Loop (all tracks from 0), true = Arrange.
+    arrange_mode: bool,
 
     // Whammy (pitch-bend lever), semitones + configurable range.
     whammy: f32,
@@ -215,6 +217,7 @@ impl App {
             arrange_loop_sel: 0,
             arrange_repeats: 4,
             master_volume: 1.0,
+            arrange_mode: true,
             whammy: 0.0,
             whammy_down: 12.0,
             whammy_up: 2.0,
@@ -1601,6 +1604,23 @@ impl App {
         ui.horizontal(|ui| {
             ui.strong("Tracks");
             ui.label(egui::RichText::new(format!("({})", tracks.len())).weak());
+            ui.separator();
+            // Play mode: Loop (build beats, all from 0) vs Arrange (play clips).
+            let mut arrange = self.arrange_mode;
+            if ui.selectable_label(!arrange, "🔁 Loop").on_hover_text("Play all tracks looping from the start").clicked() {
+                arrange = false;
+            }
+            if ui.selectable_label(arrange, "🎬 Arrange").on_hover_text("Play the clip arrangement").clicked() {
+                arrange = true;
+            }
+            if arrange != self.arrange_mode {
+                self.arrange_mode = arrange;
+                let _ = self.tx.send(Command::SetPlayMode(if arrange {
+                    PlayMode::Arrange
+                } else {
+                    PlayMode::Loop
+                }));
+            }
             ui.separator();
             ui.label("Master");
             let mut m = self.master_volume;

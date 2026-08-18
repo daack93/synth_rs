@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use crate::instrument::{make_sine_table, EngineParams, Instrument};
 use crate::kit::{Kit, Playable};
 use crate::models::{default_model, model_from_id, FtmModel};
-use crate::project::{AutoPoint, LoopData, LoopEvent, LoopTrack, TempoGrid, ZoneData};
+use crate::project::{AutoPoint, ClipData, LoopData, LoopEvent, LoopTrack, TempoGrid, ZoneData};
 
 const TWO_PI_F64: f64 = std::f64::consts::TAU;
 const FRAC_1_SQRT_2: f32 = std::f32::consts::FRAC_1_SQRT_2;
@@ -137,6 +137,8 @@ pub enum Command {
     /// Place a track's clip on the arrangement: `start` and `span` in seconds
     /// (`span` 0 = fill/loop to the song end).
     SetTrackPlacement { track: usize, start: f32, span: f32 },
+    /// Switch the transport between Loop (all tracks from 0) and Arrange (clips).
+    SetPlayMode(PlayMode),
     /// Set a track's fade-in / fade-out length in seconds.
     SetTrackFades { track: usize, fade_in: f32, fade_out: f32 },
     /// Swap a track's instrument model live (rebuilds its sounding voices).
@@ -212,25 +214,35 @@ struct AutoEv {
     value: f32,
 }
 
+/// How the transport plays the track pool.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PlayMode {
+    /// Every track loops from 0 together — the looper/build-a-beat view.
+    Loop,
+    /// Tracks play at their clip placements — the arrangement.
+    Arrange,
+}
+
+/// One placement of a track on the arrangement timeline. Several clips may
+/// reference the same track (shared content). `was_active` is runtime only.
+#[derive(Clone)]
+struct Clip {
+    track: usize,
+    start: u64,
+    /// `0` = fill: loop from `start` to the end of the song.
+    length: u64,
+    was_active: bool,
+}
+
+/// A track is pure **content** now — its instrument, notes, mix, and its own
+/// loop length (`period`). *Where* it plays lives in [`Clip`]s. Firing state is
+/// held per-clip in the playlist, not here.
 struct Track {
     inst: Playable,
     events: Vec<Event>,
-    cursor: usize,
-    /// This track's own loop length in samples — it repeats every `period`,
-    /// independent of the other tracks. Events are stored relative to it
-    /// (`[0, period)`).
+    /// This track's own loop length in samples — it repeats every `period`.
+    /// Events are stored relative to it (`[0, period)`).
     period: u64,
-    /// Where the clip begins on the global timeline (samples).
-    start: u64,
-    /// How long the clip plays from `start` (samples), repeating its `period`
-    /// within. `0` = fill: loop from `start` to the end of the song.
-    span: u64,
-    /// The track's local time (`(pos - start) % period`) last frame — for wrap
-    /// detection.
-    prev_local: u64,
-    /// Whether the clip was inside its active window last frame (to stop cleanly
-    /// at its end and re-arm at its start).
-    was_active: bool,
     muted: bool,
     /// Mixer level (linear) and stereo pan (-1..=1), plus solo.
     volume: f32,
@@ -245,7 +257,6 @@ struct Track {
     // --- Parameter automation (single-instrument tracks only) ---
     /// Recorded parameter moves, sorted by `pos`.
     auto: Vec<AutoEv>,
-    auto_cursor: usize,
     /// The track's model id, used to rebuild it when automation fires.
     model_id: String,
     /// Model params + engine at the track's creation — the state each loop
@@ -373,6 +384,12 @@ pub struct Studio {
     sine: std::sync::Arc<[f32]>,
     live: Playable,
     tracks: Vec<Track>,
+    /// Clip placements of the tracks on the arrangement timeline.
+    arrangement: Vec<Clip>,
+    /// The active firing list for the current play mode (rebuilt on change).
+    playlist: Vec<Clip>,
+    /// Loop = all tracks from 0; Arrange = play the clip placements.
+    play_mode: PlayMode,
     mode: LooperMode,
 
     playing: bool,
@@ -436,6 +453,9 @@ impl Studio {
             sine: sine.clone(),
             live: Playable::Single(Instrument::new(sample_rate, sine)),
             tracks: Vec::new(),
+            arrangement: Vec::new(),
+            playlist: Vec::new(),
+            play_mode: PlayMode::Arrange,
             mode: LooperMode::Pedal,
             playing: false,
             loop_len: None,
@@ -578,15 +598,30 @@ impl Studio {
             Command::Undo => self.undo(),
             Command::Redo => self.redo(),
             Command::TimeStretch(factor) => self.time_stretch(factor),
+            Command::SetPlayMode(m) => {
+                self.play_mode = m;
+                for t in &mut self.tracks {
+                    t.inst.all_notes_off();
+                }
+                self.rebuild_playlist();
+                self.recompute_song_len();
+                self.pos = 0;
+                self.reset_cursors();
+                self.mark_structure_dirty();
+            }
             Command::SetTrackPlacement { track, start, span } => {
                 if track < self.tracks.len() {
                     self.push_undo();
-                    let sr = self.sr;
-                    if let Some(t) = self.tracks.get_mut(track) {
-                        t.start = (start.max(0.0) * sr).round() as u64;
-                        t.span = (span.max(0.0) * sr).round() as u64;
-                        t.was_active = false;
+                    let start = (start.max(0.0) * self.sr).round() as u64;
+                    let length = (span.max(0.0) * self.sr).round() as u64;
+                    // Edit this track's (first) clip, or create one.
+                    if let Some(c) = self.arrangement.iter_mut().find(|c| c.track == track) {
+                        c.start = start;
+                        c.length = length;
+                    } else {
+                        self.arrangement.push(Clip { track, start, length, was_active: false });
                     }
+                    self.rebuild_playlist();
                     self.recompute_song_len();
                     self.mark_structure_dirty();
                 }
@@ -604,7 +639,6 @@ impl Studio {
                 }
                 if let Some(t) = self.tracks.get_mut(i) {
                     t.auto.clear();
-                    t.auto_cursor = 0;
                     t.cur_json = t.base_json.clone();
                     t.cur_engine = t.base_engine.clone();
                     self.mark_structure_dirty();
@@ -613,19 +647,21 @@ impl Studio {
             Command::DeleteTrack(i) => {
                 if i < self.tracks.len() {
                     self.push_undo();
-                    self.tracks.remove(i);
+                    self.remove_track(i); // drops the track's clips + reindexes
                     // Fix up the recording index if needed.
                     self.recording = match self.recording {
                         Some(r) if r == i => None,
                         Some(r) if r > i => Some(r - 1),
                         other => other,
                     };
+                    self.rebuild_playlist();
                     if self.tracks.is_empty() {
                         self.loop_len = None;
                         self.playing = false;
                         self.pos = 0;
+                    } else {
+                        self.recompute_song_len();
                     }
-                    self.renumber_tracks();
                     self.mark_structure_dirty();
                 }
             }
@@ -870,6 +906,8 @@ impl Studio {
 
     fn reset(&mut self) {
         self.tracks.clear();
+        self.arrangement.clear();
+        self.playlist.clear();
         self.recording = None;
         self.armed = false;
         self.defining = false;
@@ -923,6 +961,12 @@ impl Studio {
             t.events.sort_by_key(|e| e.pos);
             t.auto.sort_by_key(|a| a.pos);
         }
+        // Scale clip placements to match.
+        for c in &mut self.arrangement {
+            c.start = (c.start as f64 * f).round() as u64;
+            c.length = (c.length as f64 * f).round() as u64;
+        }
+        self.rebuild_playlist();
         self.recompute_song_len();
         self.pos = 0;
         self.reset_cursors();
@@ -978,6 +1022,8 @@ impl Studio {
     /// song section advances).
     fn install_loop(&mut self, data: LoopData) {
         self.tracks.clear();
+        self.arrangement.clear();
+        self.playlist.clear();
         self.recording = None;
         self.armed = false;
         self.defining = false;
@@ -992,7 +1038,16 @@ impl Studio {
 
         let song = ((data.length * self.sr).round() as u64).max(1);
         self.loop_len = Some(song);
-        for lt in data.tracks {
+        // Migration: old projects stored a single placement per track on the
+        // track itself; build one clip per track from it as a fallback.
+        let mut migrated: Vec<Clip> = Vec::new();
+        for (ti, lt) in data.tracks.into_iter().enumerate() {
+            migrated.push(Clip {
+                track: ti,
+                start: lt.start.map(|s| (s * self.sr).round() as u64).unwrap_or(0),
+                length: lt.span.map(|s| (s * self.sr).round() as u64).unwrap_or(0),
+                was_active: false,
+            });
             let inst = self.track_playable(&lt);
             let label = inst.label();
             // Each track has its own period (defaults to the whole loop for
@@ -1026,17 +1081,10 @@ impl Studio {
                 })
                 .collect();
             auto.sort_by_key(|a| a.pos);
-            let start = lt.start.map(|s| (s * self.sr).round() as u64).unwrap_or(0);
-            let span = lt.span.map(|s| (s * self.sr).round() as u64).unwrap_or(0);
             self.tracks.push(Track {
                 inst,
                 events,
-                cursor: 0,
                 period,
-                start,
-                span,
-                prev_local: 0,
-                was_active: false,
                 muted: lt.muted,
                 volume: lt.volume,
                 pan: lt.pan,
@@ -1046,7 +1094,6 @@ impl Studio {
                 name: lt.name,
                 label,
                 auto,
-                auto_cursor: 0,
                 model_id: lt.model_id.clone(),
                 base_json: lt.params.clone(),
                 base_engine: lt.engine.clone(),
@@ -1054,6 +1101,21 @@ impl Studio {
                 cur_engine: lt.engine,
             });
         }
+        // Use the saved arrangement if present, else the migrated clips.
+        self.arrangement = if data.arrangement.is_empty() {
+            migrated
+        } else {
+            data.arrangement
+                .iter()
+                .map(|c| Clip {
+                    track: c.track,
+                    start: (c.start * self.sr).round() as u64,
+                    length: (c.length * self.sr).round() as u64,
+                    was_active: false,
+                })
+                .collect()
+        };
+        self.rebuild_playlist();
         self.recompute_song_len();
         self.pos = 0;
         self.reset_cursors();
@@ -1081,8 +1143,8 @@ impl Studio {
                 fade_in: t.fade_in,
                 fade_out: t.fade_out,
                 period: Some(t.period as f32 / sr),
-                start: Some(t.start as f32 / sr),
-                span: Some(t.span as f32 / sr),
+                start: None, // placement lives in the arrangement now
+                span: None,
                 zones,
                 automation: t
                     .auto
@@ -1107,7 +1169,16 @@ impl Studio {
                 }
             })
             .collect();
-        LoopData { length, tracks }
+        let arrangement = self
+            .arrangement
+            .iter()
+            .map(|c| ClipData {
+                track: c.track,
+                start: c.start as f32 / sr,
+                length: c.length as f32 / sr,
+            })
+            .collect();
+        LoopData { length, tracks, arrangement }
     }
 
     /// Pedal-mode "+ Rec track": record exactly one loop pass into a new track.
@@ -1150,12 +1221,7 @@ impl Studio {
         self.tracks.push(Track {
             inst,
             events: Vec::new(),
-            cursor: 0,
             period: self.arm_period.unwrap_or(0), // 0 = free take, set on close
-            start: 0,
-            span: 0, // fill: loop from the top
-            prev_local: 0,
-            was_active: false,
             muted: false,
             volume: 1.0,
             pan: 0.0,
@@ -1165,7 +1231,6 @@ impl Studio {
             name: format!("Track {}", idx + 1),
             label,
             auto: Vec::new(),
-            auto_cursor: 0,
             model_id,
             base_json: base_json.clone(),
             base_engine: base_engine.clone(),
@@ -1183,39 +1248,77 @@ impl Studio {
         self.arm_period = None;
         let pos = self.pos;
         if let Some(idx) = self.recording.take() {
+            let mut removed = false;
             if let Some(t) = self.tracks.get_mut(idx) {
                 t.events.sort_by_key(|e| e.pos);
                 t.auto.sort_by_key(|a| a.pos);
                 if t.period == 0 {
                     t.period = pos.max(1); // free take with no set period
                 }
-                let local = pos % t.period.max(1);
-                t.cursor = t.events.partition_point(|e| e.pos < local);
-                t.auto_cursor = t.auto.partition_point(|a| a.pos < local);
-                t.prev_local = local;
                 if t.events.is_empty() {
-                    self.tracks.remove(idx);
-                    self.renumber_tracks();
+                    removed = true;
                 }
             }
+            if removed {
+                self.remove_track(idx);
+            } else if !self.arrangement.iter().any(|c| c.track == idx) {
+                // Auto-place the new track at the top of the arrangement.
+                self.arrangement.push(Clip { track: idx, start: 0, length: 0, was_active: false });
+            }
         }
-        // A finished/removed take can change the song length (shrink an
-        // extension, or add a longer period).
+        self.rebuild_playlist();
         self.recompute_song_len();
+    }
+
+    /// Remove a track and fix up the arrangement (drop its clips, reindex the
+    /// clips that referenced later tracks).
+    fn remove_track(&mut self, idx: usize) {
+        if idx >= self.tracks.len() {
+            return;
+        }
+        self.tracks.remove(idx);
+        self.arrangement.retain(|c| c.track != idx);
+        for c in &mut self.arrangement {
+            if c.track > idx {
+                c.track -= 1;
+            }
+        }
+        self.renumber_tracks();
     }
 
     fn reset_cursors(&mut self) {
         for t in &mut self.tracks {
-            reset_track(t);
+            reset_track_automation(t);
+        }
+        for c in &mut self.playlist {
+            c.was_active = false;
         }
     }
 
-    /// The global song length: the furthest clip end (0 if no tracks). A fill
-    /// clip (`span == 0`) contributes at least `start + period`.
+    /// Rebuild the firing list for the current play mode: one clip per track from
+    /// 0 in Loop mode, or the arrangement's clips in Arrange mode.
+    fn rebuild_playlist(&mut self) {
+        self.playlist = match self.play_mode {
+            PlayMode::Loop => (0..self.tracks.len())
+                .map(|track| Clip { track, start: 0, length: 0, was_active: false })
+                .collect(),
+            PlayMode::Arrange => self
+                .arrangement
+                .iter()
+                .map(|c| Clip { was_active: false, ..c.clone() })
+                .collect(),
+        };
+    }
+
+    /// The global song length (samples): the furthest clip end in the current
+    /// firing list (0 if empty). A fill clip contributes `start + track period`.
     fn song_len(&self) -> u64 {
-        self.tracks
+        self.playlist
             .iter()
-            .map(|t| t.start + if t.span > 0 { t.span } else { t.period.max(1) })
+            .map(|c| {
+                let period = self.tracks.get(c.track).map(|t| t.period.max(1)).unwrap_or(1);
+                c.start + if c.length > 0 { c.length } else { period }
+            })
             .max()
             .unwrap_or(0)
     }
@@ -1397,10 +1500,8 @@ impl Studio {
             }
             t.events.sort_by_key(|e| e.pos);
             t.auto.sort_by_key(|a| a.pos);
-            let local = pos % len;
-            t.cursor = t.events.partition_point(|e| e.pos < local);
-            t.auto_cursor = t.auto.partition_point(|a| a.pos < local);
         }
+        let _ = pos;
         self.mark_structure_dirty();
     }
 
@@ -1482,79 +1583,37 @@ impl Studio {
         let pos = self.pos;
         let recording = self.recording;
         let song = self.loop_len.unwrap_or(0);
-        for (i, t) in self.tracks.iter_mut().enumerate() {
-            let period = t.period.max(1);
-            // The clip's active window on the global timeline.
-            let end = if t.span > 0 { t.start + t.span } else { song };
-            let active = pos >= t.start && pos < end;
-            if Some(i) == recording {
-                // Don't play the take being recorded, but keep its clock in sync.
-                t.prev_local = if active { (pos - t.start) % period } else { 0 };
-                t.was_active = active;
+        for k in 0..self.playlist.len() {
+            let (ti, start, length) = {
+                let c = &self.playlist[k];
+                (c.track, c.start, c.length)
+            };
+            if ti >= self.tracks.len() {
+                continue;
+            }
+            let period = self.tracks[ti].period.max(1);
+            let end = start + if length > 0 { length } else { song.saturating_sub(start) };
+            let active = pos >= start && pos < end;
+            if Some(ti) == recording {
+                // Don't play the take being recorded, but track its window state.
+                self.playlist[k].was_active = active;
                 continue;
             }
             if !active {
-                if t.was_active {
-                    t.inst.all_notes_off(); // clean stop at the clip's end
-                    t.was_active = false;
+                if self.playlist[k].was_active {
+                    self.tracks[ti].inst.all_notes_off(); // clean stop at the clip's end
+                    self.playlist[k].was_active = false;
                 }
                 continue;
             }
-            let local = (pos - t.start) % period;
-            // Entering the clip, a period wrap, or the global wrap rewinds it.
-            if !t.was_active || local < t.prev_local {
-                reset_track(t);
+            let local = (pos - start) % period;
+            // At the top of each period (and at the clip's start) rewind automation.
+            if local == 0 {
+                reset_track_automation(&mut self.tracks[ti]);
             }
-            t.was_active = true;
-            // Skip anything already behind us, then fire everything on this frame.
-            while t.cursor < t.events.len() && t.events[t.cursor].pos < local {
-                t.cursor += 1;
-            }
-            while t.cursor < t.events.len() && t.events[t.cursor].pos == local {
-                match t.events[t.cursor].msg {
-                    EvMsg::On { note, vel } => t.inst.note_on(note, vel),
-                    EvMsg::Off { note } => t.inst.note_off(note),
-                }
-                t.cursor += 1;
-            }
-
-            // Fire any parameter automation landing on this frame.
-            if !t.auto.is_empty() {
-                while t.auto_cursor < t.auto.len() && t.auto[t.auto_cursor].pos < local {
-                    t.auto_cursor += 1;
-                }
-                let (mut model_dirty, mut engine_dirty) = (false, false);
-                while t.auto_cursor < t.auto.len() && t.auto[t.auto_cursor].pos == local {
-                    let (target, value) = {
-                        let ev = &t.auto[t.auto_cursor];
-                        (ev.target.clone(), ev.value)
-                    };
-                    if target == "@bend" {
-                        t.inst.set_bend(2f32.powf(value / 12.0));
-                    } else {
-                        let (m, e) = apply_auto(
-                            &mut t.cur_json,
-                            &mut t.cur_engine,
-                            &t.base_json,
-                            &t.base_engine,
-                            &target,
-                            value,
-                        );
-                        model_dirty |= m;
-                        engine_dirty |= e;
-                    }
-                    t.auto_cursor += 1;
-                }
-                if model_dirty {
-                    if let Some(model) = model_from_id(&t.model_id, &t.cur_json) {
-                        t.inst.set_model(model);
-                    }
-                }
-                if engine_dirty {
-                    t.inst.set_engine(t.cur_engine.clone());
-                }
-            }
-            t.prev_local = local;
+            fire_track_notes(&mut self.tracks[ti], local);
+            fire_track_auto(&mut self.tracks[ti], local);
+            self.playlist[k].was_active = true;
         }
     }
 
@@ -1649,12 +1708,19 @@ impl Studio {
 
     fn mark_structure_dirty(&mut self) {
         let sr = self.sr;
+        let arrangement = &self.arrangement;
         let views = self
             .tracks
             .iter()
-            .map(|t| {
+            .enumerate()
+            .map(|(ti, t)| {
                 let (model_id, params, engine, zones) = t.inst.parts();
                 let period = t.period.max(1) as f32;
+                // Surface the track's first clip placement for the current UI.
+                let clip = arrangement.iter().find(|c| c.track == ti);
+                let (start, span) = clip
+                    .map(|c| (c.start as f32 / sr, c.length as f32 / sr))
+                    .unwrap_or((0.0, 0.0));
                 TrackView {
                     name: t.name.clone(),
                     instrument: t.label.clone(),
@@ -1671,8 +1737,8 @@ impl Studio {
                     fade_in: t.fade_in,
                     fade_out: t.fade_out,
                     period: period / sr,
-                    start: t.start as f32 / sr,
-                    span: t.span as f32 / sr,
+                    start,
+                    span,
                 }
             })
             .collect();
@@ -1697,21 +1763,62 @@ impl Studio {
 }
 
 /// Pair note-on/off events into normalized spans for drawing.
-/// Hard-reset one track's playback state to the top of its loop: rewind the
-/// event/automation cursors and restore the automation base (model, engine,
-/// bend). Called at each of the track's period boundaries.
-fn reset_track(t: &mut Track) {
-    t.cursor = 0;
-    t.prev_local = 0;
-    if !t.auto.is_empty() {
-        t.auto_cursor = 0;
-        t.cur_json = t.base_json.clone();
-        t.cur_engine = t.base_engine.clone();
-        if let Some(model) = model_from_id(&t.model_id, &t.base_json) {
+/// Restore a track's automation to its base (model, engine, bend) — called at
+/// the top of each of the track's loop periods so automation replays.
+fn reset_track_automation(t: &mut Track) {
+    if t.auto.is_empty() {
+        return;
+    }
+    t.cur_json = t.base_json.clone();
+    t.cur_engine = t.base_engine.clone();
+    if let Some(model) = model_from_id(&t.model_id, &t.base_json) {
+        t.inst.set_model(model);
+    }
+    t.inst.set_engine(t.base_engine.clone());
+    t.inst.set_bend(1.0); // bend resets each loop; @bend events re-apply
+}
+
+/// Fire a track's note events that land on local time `local` (binary search).
+fn fire_track_notes(t: &mut Track, local: u64) {
+    let lo = t.events.partition_point(|e| e.pos < local);
+    let mut j = lo;
+    while j < t.events.len() && t.events[j].pos == local {
+        match t.events[j].msg {
+            EvMsg::On { note, vel } => t.inst.note_on(note, vel),
+            EvMsg::Off { note } => t.inst.note_off(note),
+        }
+        j += 1;
+    }
+}
+
+/// Fire a track's automation moves landing on local time `local`, rebuilding the
+/// model / engine only if something changed.
+fn fire_track_auto(t: &mut Track, local: u64) {
+    if t.auto.is_empty() {
+        return;
+    }
+    let lo = t.auto.partition_point(|a| a.pos < local);
+    let (mut model_dirty, mut engine_dirty) = (false, false);
+    let mut j = lo;
+    while j < t.auto.len() && t.auto[j].pos == local {
+        let (target, value) = (t.auto[j].target.clone(), t.auto[j].value);
+        if target == "@bend" {
+            t.inst.set_bend(2f32.powf(value / 12.0));
+        } else {
+            let (m, e) =
+                apply_auto(&mut t.cur_json, &mut t.cur_engine, &t.base_json, &t.base_engine, &target, value);
+            model_dirty |= m;
+            engine_dirty |= e;
+        }
+        j += 1;
+    }
+    if model_dirty {
+        if let Some(model) = model_from_id(&t.model_id, &t.cur_json) {
             t.inst.set_model(model);
         }
-        t.inst.set_engine(t.base_engine.clone());
-        t.inst.set_bend(1.0); // bend resets each loop; @bend events re-apply
+    }
+    if engine_dirty {
+        t.inst.set_engine(t.cur_engine.clone());
     }
 }
 
@@ -2078,6 +2185,7 @@ mod tests {
         use crate::project::{AutoPoint, LoopData, LoopEvent, LoopTrack};
         let data = LoopData {
             length: 0.05,
+            arrangement: Vec::new(),
             tracks: vec![LoopTrack {
                 name: "T".into(),
                 model_id: "drum_membrane".into(),
@@ -2136,6 +2244,7 @@ mod tests {
         use crate::project::{AutoPoint, LoopData, LoopEvent, LoopTrack};
         let data = LoopData {
             length: 0.05,
+            arrangement: Vec::new(),
             tracks: vec![LoopTrack {
                 name: "T".into(),
                 model_id: "drum_membrane".into(),
@@ -2170,6 +2279,7 @@ mod tests {
         use crate::project::{LoopData, LoopEvent, LoopTrack};
         LoopData {
             length: 1.0,
+            arrangement: Vec::new(),
             tracks: vec![LoopTrack {
                 name: "T".into(),
                 model_id: "musical_string".into(),
@@ -2288,7 +2398,7 @@ mod tests {
             ],
         };
         // Track A repeats every 0.1s; track B (the longest) sets the 0.4s song.
-        let data = LoopData { length: 0.4, tracks: vec![track(60, 0.1), track(67, 0.4)] };
+        let data = LoopData { length: 0.4, arrangement: Vec::new(), tracks: vec![track(60, 0.1), track(67, 0.4)] };
         let mut s = Studio::new(48_000.0);
         s.handle(Command::LoadLoop(data));
         assert_eq!(s.loop_len, Some((0.4 * 48_000.0) as u64), "song = longest period");
@@ -2306,6 +2416,7 @@ mod tests {
         use crate::project::{LoopData, LoopEvent, LoopTrack};
         let data = LoopData {
             length: 0.4,
+            arrangement: Vec::new(),
             tracks: vec![LoopTrack {
                 name: "T".into(),
                 model_id: "musical_string".into(),
@@ -2334,6 +2445,50 @@ mod tests {
         assert_eq!(s.tracks[0].inst.active_voices(), 0, "silent before its start");
         drain(&mut s, 5_200); // ~0.208s — the clip has started
         assert!(s.tracks[0].inst.active_voices() > 0, "plays once its start is reached");
+    }
+
+    #[test]
+    fn play_mode_switches_between_loop_and_arrangement() {
+        use crate::project::{ClipData, LoopData, LoopEvent, LoopTrack};
+        let trk = LoopTrack {
+            name: "T".into(),
+            model_id: "musical_string".into(),
+            params: serde_json::json!({}),
+            engine: EngineParams::default(),
+            muted: false,
+            volume: 1.0,
+            pan: 0.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+            period: Some(0.2),
+            start: None,
+            span: None,
+            zones: Vec::new(),
+            automation: Vec::new(),
+            events: vec![
+                LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 },
+                LoopEvent { t: 0.02, on: false, note: 60, vel: 0.0 },
+            ],
+        };
+        // A single track, placed by a clip starting at 0.2s.
+        let data = LoopData {
+            length: 0.4,
+            arrangement: vec![ClipData { track: 0, start: 0.2, length: 0.0 }],
+            tracks: vec![trk],
+        };
+
+        // Arrange mode (default): silent until the clip's start.
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(data.clone()));
+        drain(&mut s, 4_800); // 0.1s
+        assert_eq!(s.tracks[0].inst.active_voices(), 0, "arrange: waits for the clip");
+
+        // Loop mode: plays from the top regardless of the placement.
+        let mut s2 = Studio::new(48_000.0);
+        s2.handle(Command::LoadLoop(data));
+        s2.handle(Command::SetPlayMode(PlayMode::Loop));
+        drain(&mut s2, 200);
+        assert!(s2.tracks[0].inst.active_voices() > 0, "loop: plays from the start");
     }
 
     #[test]
@@ -2386,6 +2541,7 @@ mod tests {
         use crate::project::{LoopData, LoopEvent, LoopTrack};
         LoopData {
             length: 0.1,
+            arrangement: Vec::new(),
             tracks: vec![LoopTrack {
                 name: "T".into(),
                 model_id: "musical_string".into(),
@@ -2472,6 +2628,7 @@ mod tests {
         use crate::project::{LoopData, LoopEvent, LoopTrack};
         let mk = |note: u8| LoopData {
             length: 0.05, // 2400 samples @ 48k
+            arrangement: Vec::new(),
             tracks: vec![LoopTrack {
                 name: "T".into(),
                 model_id: "musical_string".into(),

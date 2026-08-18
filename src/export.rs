@@ -130,6 +130,7 @@ mod tests {
     fn one_note_loop() -> LoopData {
         LoopData {
             length: 0.1,
+            arrangement: Vec::new(),
             tracks: vec![LoopTrack {
                 name: "T".into(),
                 model_id: "musical_string".into(),
@@ -168,6 +169,7 @@ mod tests {
     fn hi_res_maxes_horn_resolution() {
         let mut data = LoopData {
             length: 0.1,
+            arrangement: Vec::new(),
             tracks: vec![LoopTrack {
                 name: "H".into(),
                 model_id: "webster_horn".into(),

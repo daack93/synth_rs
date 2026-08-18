@@ -103,12 +103,29 @@ pub struct LoopTrack {
     pub events: Vec<LoopEvent>,
 }
 
-/// A complete loop: its length and all its tracks.
+/// One placement of a track on the arrangement timeline: the track plays,
+/// looping its own period, over `[start, start + length)` (seconds). A `length`
+/// of 0 means "fill" — loop from `start` to the end of the song. Several clips
+/// may reference the same track (shared content, placed in several spots).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ClipData {
+    pub track: usize,
+    pub start: f32,
+    #[serde(default)]
+    pub length: f32,
+}
+
+/// A complete loop: its tracks (content) plus an arrangement of clips placing
+/// them on the timeline.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct LoopData {
     /// Loop length in seconds (0 = no loop).
     pub length: f32,
     pub tracks: Vec<LoopTrack>,
+    /// Clip placements. Empty in projects saved before the arrangement existed
+    /// (migrated to one clip per track on load).
+    #[serde(default)]
+    pub arrangement: Vec<ClipData>,
 }
 
 impl LoopData {
@@ -254,6 +271,7 @@ mod tests {
     fn sample_loop() -> LoopData {
         LoopData {
             length: 2.0,
+            arrangement: Vec::new(),
             tracks: vec![LoopTrack {
                 name: "Track 1".into(),
                 model_id: "musical_string".into(),
