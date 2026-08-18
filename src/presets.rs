@@ -149,6 +149,8 @@ pub fn factory() -> Vec<Preset> {
                 resolution: 512,
                 damping: 10.0,
                 freq_dep_damping: -0.08,
+                visco_loss: 1.5,  // narrow leadpipe = warm boundary-layer loss
+                radiation: 1.0,   // bright, open bell
                 ..WebsterHorn::default()
             },
             eng(0.6, 30.0, 45.0),
@@ -167,6 +169,8 @@ pub fn factory() -> Vec<Preset> {
                 resolution: 400,
                 damping: 8.0,
                 freq_dep_damping: -0.10,
+                visco_loss: 2.0,  // long narrow tubing = mellow, stuffed
+                radiation: 0.7,
                 ..WebsterHorn::default()
             },
             eng(0.55, 30.0, 150.0),

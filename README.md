@@ -116,7 +116,9 @@ leads — as starting points to tune by ear. **★ Factory** restores/refreshes 
   `φ'' − V(x)φ = λφ` for the resonances (its own symmetric-tridiagonal
   eigensolver). Dial the three radius coefficients, length, and blow position,
   and choose **Open** ends or a **Brass** closed mouthpiece (odd-harmonic base
-  the flare fills in).
+  the flare fills in). Physically-motivated losses: **Keefe** viscothermal wall
+  loss (∝ √f, stronger in narrow bores — warm/stuffed tone) and **radiation**
+  loss at the bell (∝ f² — highs escape, lows sustain).
 - **Basic Wave** — band-limited triangle / sawtooth; the framework's reference
   oscillator.
 

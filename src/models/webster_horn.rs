@@ -59,6 +59,14 @@ pub struct WebsterHorn {
     pub damping: f32,
     /// Frequency-dependent damping d3 (negative = high modes decay faster).
     pub freq_dep_damping: f32,
+    /// Keefe viscothermal wall loss (boundary layer): adds ∝ √f · (bore
+    /// narrowness) damping — the "warm, stuffed" tone of long narrow tubing.
+    #[serde(default)]
+    pub visco_loss: f32,
+    /// Radiation loss at the bell: adds ∝ f² damping — highs escape the bell
+    /// (open, brilliant), lows reflect and sustain.
+    #[serde(default)]
+    pub radiation: f32,
     pub damp_period: f32,
     pub play_magnitude: f32,
     pub max_magnitude: f32,
@@ -81,6 +89,8 @@ impl Default for WebsterHorn {
             resolution: 80,
             damping: 2.0,
             freq_dep_damping: -0.05,
+            visco_loss: 0.0,
+            radiation: 0.0,
             damp_period: 100.0,
             play_magnitude: 0.0,
             max_magnitude: 2500.0,
@@ -187,6 +197,29 @@ impl FtmModel for WebsterHorn {
         let d3 = self.freq_dep_damping as f64;
         let nyq = sr as f64 * 0.45;
 
+        // Keefe viscothermal loss scales with bore narrowness. Use mean(r_bell /
+        // r(x)) over the bore — scale-invariant (a cylinder = 1, a flared horn ≫ 1
+        // because the throat is narrow), so it works whatever the r-coefficients'
+        // absolute size.
+        let visco = self.visco_loss as f64;
+        let radiation = self.radiation as f64;
+        let flare_loss = if visco > 0.0 {
+            let r_of = |x: f64| (r1 + r2 * x + r3 * x * x).abs().max(1e-9);
+            let r_bell = r_of(l);
+            let samples = 32;
+            let mut acc = 0.0;
+            for i in 0..samples {
+                let x = (i as f64 + 0.5) / samples as f64 * l;
+                acc += r_bell / r_of(x);
+            }
+            (acc / samples as f64).max(0.0)
+        } else {
+            0.0
+        };
+        // Empirical scales so a coefficient of ~1 gives a musical amount.
+        const KEEFE_C: f64 = 0.02;
+        const RAD_C: f64 = 5.0;
+
         // First pass: frequency + weight, tracking the amplitude sum for normalizing.
         let mut kept: Vec<(f64, f64, f64)> = Vec::new(); // (freq, weight, decay)
         let mut amp_sum = 0.0f64;
@@ -200,10 +233,12 @@ impl FtmModel for WebsterHorn {
             if freq >= nyq || freq <= 0.0 {
                 continue;
             }
-            // Decay mirrors the other FTM models but keyed on the harmonic ratio
-            // so d1/d3 behave the same regardless of bore length.
+            // Base decay (d1/d3), keyed on the harmonic ratio.
             let sigma = (d3 * kr * kr - d1) / 2.0;
-            let decay = -sigma * TICK_RATE as f64 / (damp_per * damp_per);
+            let mut decay = -sigma * TICK_RATE as f64 / (damp_per * damp_per);
+            // Keefe wall loss ∝ √f · narrowness; radiation loss ∝ f² (high-pass).
+            decay += KEEFE_C * visco * flare_loss * freq.sqrt();
+            decay += RAD_C * radiation * (freq * 1e-3).powi(2);
             kept.push((freq, w, decay));
             amp_sum += w.abs();
         }
@@ -271,6 +306,14 @@ impl FtmModel for WebsterHorn {
             .changed();
         changed |= ui
             .add(unbounded_slider(&mut self.freq_dep_damping, -5.0..=2.0, "Freq-dep damping (d3)"))
+            .changed();
+        changed |= ui
+            .add(unbounded_slider(&mut self.visco_loss, 0.0..=5.0, "Wall loss (Keefe)"))
+            .on_hover_text("Viscothermal boundary-layer loss ∝ √f, stronger in narrow bores — warm/stuffed tone.")
+            .changed();
+        changed |= ui
+            .add(unbounded_slider(&mut self.radiation, 0.0..=5.0, "Radiation (bell)"))
+            .on_hover_text("Loss ∝ f² at the bell: highs radiate out (open, brilliant), lows reflect and sustain.")
             .changed();
 
         ui.add_space(6.0);
@@ -527,6 +570,28 @@ mod tests {
         assert!((buf.freq[0] - 200.0).abs() < 2.0, "fundamental tracks key: {}", buf.freq[0]);
         let ratio = buf.freq[1] / buf.freq[0];
         assert!((ratio - 3.0).abs() < 0.15, "closed-open 2nd mode ~3×, got {ratio}");
+    }
+
+    #[test]
+    fn wall_and_radiation_losses_damp_highs_more() {
+        let mut buf = ModeBuffer::default();
+        let base = WebsterHorn { visco_loss: 0.0, radiation: 0.0, depth: 8, ..WebsterHorn::default() };
+        base.excite(220.0, 1.0, 48_000.0, &mut buf);
+        let (base_lo, base_hi) = (buf.decay[0], buf.decay[buf.n - 1]);
+
+        // Keefe wall loss: the top mode gains more damping than the fundamental.
+        let keefe = WebsterHorn { visco_loss: 2.0, depth: 8, ..WebsterHorn::default() };
+        keefe.excite(220.0, 1.0, 48_000.0, &mut buf);
+        assert!(buf.decay[buf.n - 1] > base_hi, "wall loss speeds up highs");
+        assert!(
+            buf.decay[buf.n - 1] - base_hi > buf.decay[0] - base_lo,
+            "wall loss is frequency-dependent (more on highs)"
+        );
+
+        // Radiation loss (f²) also damps the top more than the fundamental.
+        let rad = WebsterHorn { radiation: 2.0, depth: 8, ..WebsterHorn::default() };
+        rad.excite(220.0, 1.0, 48_000.0, &mut buf);
+        assert!(buf.decay[buf.n - 1] > base_hi, "radiation speeds up highs");
     }
 
     #[test]
