@@ -87,6 +87,9 @@ pub enum Command {
     NoteOff { note: u8 },
     SetModel(Box<dyn FtmModel>),
     SetEngine(EngineParams),
+    /// Whammy / pitch-wheel: global pitch-bend of the live instrument, in
+    /// semitones (0 = no bend). Recorded into the take's automation.
+    SetBend(f32),
     /// Replace the whole live slot — used to enter/exit kit mode or rebuild a
     /// kit's zones. `SetModel`/`SetEngine` still handle single-instrument edits.
     SetLive(LiveConfig),
@@ -432,6 +435,18 @@ impl Studio {
             Command::SetLive(cfg) => {
                 self.live.all_notes_off();
                 self.live = self.build_live(cfg);
+            }
+            Command::SetBend(semitones) => {
+                self.live.set_bend(2f32.powf(semitones / 12.0));
+                // Record the bend into the take so a dive replays with the loop.
+                if let Some(r) = self.recording {
+                    let pos = self.pos;
+                    self.tracks[r].auto.push(AutoEv {
+                        pos,
+                        target: "@bend".to_string(),
+                        value: semitones,
+                    });
+                }
             }
             Command::AllNotesOff => {
                 self.live.all_notes_off();
@@ -1033,6 +1048,7 @@ impl Studio {
                     t.inst.set_model(model);
                 }
                 t.inst.set_engine(t.base_engine.clone());
+                t.inst.set_bend(1.0); // bend resets each loop; @bend events re-apply
             }
         }
     }
@@ -1243,16 +1259,20 @@ impl Studio {
                         let ev = &t.auto[t.auto_cursor];
                         (ev.target.clone(), ev.value)
                     };
-                    let (m, e) = apply_auto(
-                        &mut t.cur_json,
-                        &mut t.cur_engine,
-                        &t.base_json,
-                        &t.base_engine,
-                        &target,
-                        value,
-                    );
-                    model_dirty |= m;
-                    engine_dirty |= e;
+                    if target == "@bend" {
+                        t.inst.set_bend(2f32.powf(value / 12.0));
+                    } else {
+                        let (m, e) = apply_auto(
+                            &mut t.cur_json,
+                            &mut t.cur_engine,
+                            &t.base_json,
+                            &t.base_engine,
+                            &target,
+                            value,
+                        );
+                        model_dirty |= m;
+                        engine_dirty |= e;
+                    }
                     t.auto_cursor += 1;
                 }
                 if model_dirty {
@@ -1788,6 +1808,25 @@ mod tests {
         drain(&mut s, 300);
         let after = s.tracks[0].inst.parts().1.get("damping").and_then(|v| v.as_f64());
         assert_eq!(after, Some(base + 100.0), "automation delta rides on the base");
+    }
+
+    #[test]
+    fn whammy_bend_records_into_the_take() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::Tap); // start recording
+        s.handle(Command::NoteOn { note: 60, vel: 1.0 });
+        drain(&mut s, 500);
+        s.handle(Command::SetBend(-2.0)); // dive mid-take
+        drain(&mut s, 500);
+        s.handle(Command::NoteOff { note: 60 });
+        s.handle(Command::Tap); // close
+        assert_eq!(s.tracks.len(), 1);
+        assert!(
+            s.tracks[0].auto.iter().any(|a| a.target == "@bend" && (a.value + 2.0).abs() < 1e-3),
+            "whammy dive captured as @bend"
+        );
+        let snap = s.snapshot_loop();
+        assert!(snap.tracks[0].automation.iter().any(|a| a.target == "@bend"));
     }
 
     #[test]

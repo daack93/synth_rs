@@ -120,6 +120,9 @@ pub struct Instrument {
     sr: f32,
     engine: EngineParams,
     model: Box<dyn FtmModel>,
+    /// Global pitch-bend as a frequency ratio (1.0 = no bend). Applied to every
+    /// voice's phase increment at render — a whammy/pitch-wheel, plugin-agnostic.
+    bend: f32,
     voices: Vec<Voice>,
     scratch: ModeBuffer,
     sine: Arc<[f32]>,
@@ -143,6 +146,7 @@ impl Instrument {
             sr: sample_rate,
             engine,
             model,
+            bend: 1.0,
             voices: (0..MAX_VOICES).map(|_| Voice::silent()).collect(),
             scratch: ModeBuffer::default(),
             sine,
@@ -187,6 +191,12 @@ impl Instrument {
     pub fn set_engine(&mut self, engine: EngineParams) {
         self.engine = engine;
         self.rebuild_active();
+    }
+
+    /// Set the global pitch-bend ratio (`2^(semitones/12)`); 1.0 = no bend.
+    /// Cheap — applied at render, no voice rebuild.
+    pub fn set_bend(&mut self, ratio: f32) {
+        self.bend = ratio.max(0.0);
     }
 
     #[inline]
@@ -364,12 +374,13 @@ impl Instrument {
             acc += self.sine_at(ph) * self.voices[vi].amp[i] * self.voices[vi].env[i];
         }
 
+        let bend = self.bend;
         let v = &mut self.voices[vi];
         v.elapsed += 1.0 / self.sr;
         let mut alive = false;
         for i in 0..n {
-            v.phase[i] += v.inc[i];
-            if v.phase[i] >= 1.0 {
+            v.phase[i] += v.inc[i] * bend;
+            while v.phase[i] >= 1.0 {
                 v.phase[i] -= 1.0;
             }
             v.env[i] *= v.dmul[i];

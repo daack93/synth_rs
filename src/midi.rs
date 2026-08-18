@@ -7,6 +7,9 @@ use midir::{MidiInput, MidiInputConnection};
 
 use crate::studio::Command;
 
+/// Pitch-wheel bend range in semitones (the usual default).
+const PITCH_WHEEL_RANGE: f32 = 2.0;
+
 pub struct MidiInputHandle {
     _conn: MidiInputConnection<()>,
     pub port_name: String,
@@ -74,6 +77,12 @@ fn handle_message(message: &[u8], tx: &Sender<Command>) {
         0xB0 if note == 123 => {
             // All notes off (CC 123)
             let _ = tx.send(Command::AllNotesOff);
+        }
+        0xE0 => {
+            // Pitch wheel: 14-bit (LSB, MSB), centre 8192. Map to ±2 semitones.
+            let value = ((data2 as i32) << 7) | note as i32;
+            let semitones = (value - 8192) as f32 / 8192.0 * PITCH_WHEEL_RANGE;
+            let _ = tx.send(Command::SetBend(semitones));
         }
         _ => {}
     }

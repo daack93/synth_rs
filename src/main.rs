@@ -122,6 +122,11 @@ struct App {
     /// Master output level (linear).
     master_volume: f32,
 
+    // Whammy (pitch-bend lever), semitones + configurable range.
+    whammy: f32,
+    whammy_down: f32,
+    whammy_up: f32,
+
     // Region editing (chop / crop / rearrange)
     /// Current timeline selection: (track index, start secs, end secs).
     sel: Option<(usize, f32, f32)>,
@@ -205,6 +210,9 @@ impl App {
             arrange_loop_sel: 0,
             arrange_repeats: 4,
             master_volume: 1.0,
+            whammy: 0.0,
+            whammy_down: 12.0,
+            whammy_up: 2.0,
             sel: None,
             drag_start: None,
             region_dest: 0.0,
@@ -551,7 +559,10 @@ impl eframe::App for App {
             self.transport_bar(ui);
 
             ui.add_space(10.0);
-            self.piano(ui);
+            ui.horizontal(|ui| {
+                self.whammy_bar(ui);
+                self.piano(ui);
+            });
 
             ui.add_space(8.0);
             self.tracks_panel(ui);
@@ -1788,6 +1799,31 @@ impl App {
             if ui.button("✕ sel").clicked() {
                 self.sel = None;
             }
+        });
+    }
+
+    /// A spring-loaded whammy lever: drag to bend pitch, release snaps back.
+    fn whammy_bar(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            ui.label(egui::RichText::new("Whammy").small());
+            let resp = ui.add(
+                egui::Slider::new(&mut self.whammy, -self.whammy_down..=self.whammy_up)
+                    .vertical()
+                    .show_value(false),
+            );
+            if resp.changed() {
+                let _ = self.tx.send(Command::SetBend(self.whammy));
+            }
+            // Spring back toward centre when not being held.
+            if !resp.dragged() && self.whammy.abs() > 1e-3 {
+                self.whammy *= 0.6;
+                if self.whammy.abs() < 1e-3 {
+                    self.whammy = 0.0;
+                }
+                let _ = self.tx.send(Command::SetBend(self.whammy));
+                ui.ctx().request_repaint();
+            }
+            ui.label(egui::RichText::new(format!("{:+.1}", self.whammy)).small());
         });
     }
 

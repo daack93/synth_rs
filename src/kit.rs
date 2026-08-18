@@ -112,6 +112,12 @@ impl Kit {
         }
     }
 
+    pub fn set_bend(&mut self, ratio: f32) {
+        for z in &mut self.zones {
+            z.inst.set_bend(ratio);
+        }
+    }
+
     #[inline]
     pub fn render_frame(&mut self) -> f32 {
         let mut s = 0.0;
@@ -181,6 +187,13 @@ impl Playable {
         match self {
             Playable::Single(i) => i.all_notes_off(),
             Playable::Kit(k) => k.all_notes_off(),
+        }
+    }
+
+    pub fn set_bend(&mut self, ratio: f32) {
+        match self {
+            Playable::Single(i) => i.set_bend(ratio),
+            Playable::Kit(k) => k.set_bend(ratio),
         }
     }
 
