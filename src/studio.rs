@@ -134,6 +134,9 @@ pub enum Command {
     Redo,
     /// Stretch the whole loop in time by `factor` (>1 = longer/slower).
     TimeStretch(f32),
+    /// Place a track's clip on the arrangement: `start` and `span` in seconds
+    /// (`span` 0 = fill/loop to the song end).
+    SetTrackPlacement { track: usize, start: f32, span: f32 },
     /// Set a track's fade-in / fade-out length in seconds.
     SetTrackFades { track: usize, fade_in: f32, fade_out: f32 },
     /// Swap a track's instrument model live (rebuilds its sounding voices).
@@ -215,10 +218,19 @@ struct Track {
     cursor: usize,
     /// This track's own loop length in samples — it repeats every `period`,
     /// independent of the other tracks. Events are stored relative to it
-    /// (`[0, period)`). The global song length is the longest track's period.
+    /// (`[0, period)`).
     period: u64,
-    /// The track's local time (`pos % period`) last frame — for wrap detection.
+    /// Where the clip begins on the global timeline (samples).
+    start: u64,
+    /// How long the clip plays from `start` (samples), repeating its `period`
+    /// within. `0` = fill: loop from `start` to the end of the song.
+    span: u64,
+    /// The track's local time (`(pos - start) % period`) last frame — for wrap
+    /// detection.
     prev_local: u64,
+    /// Whether the clip was inside its active window last frame (to stop cleanly
+    /// at its end and re-arm at its start).
+    was_active: bool,
     muted: bool,
     /// Mixer level (linear) and stereo pan (-1..=1), plus solo.
     volume: f32,
@@ -278,6 +290,9 @@ pub struct TrackView {
     pub fade_out: f32,
     /// This track's own loop length in seconds.
     pub period: f32,
+    /// Clip placement on the arrangement (seconds); `span` 0 = fill.
+    pub start: f32,
+    pub span: f32,
 }
 
 /// Lock-free scalars + an occasionally-rebuilt track list for the UI.
@@ -563,6 +578,19 @@ impl Studio {
             Command::Undo => self.undo(),
             Command::Redo => self.redo(),
             Command::TimeStretch(factor) => self.time_stretch(factor),
+            Command::SetTrackPlacement { track, start, span } => {
+                if track < self.tracks.len() {
+                    self.push_undo();
+                    let sr = self.sr;
+                    if let Some(t) = self.tracks.get_mut(track) {
+                        t.start = (start.max(0.0) * sr).round() as u64;
+                        t.span = (span.max(0.0) * sr).round() as u64;
+                        t.was_active = false;
+                    }
+                    self.recompute_song_len();
+                    self.mark_structure_dirty();
+                }
+            }
             Command::SetTrackFades { track, fade_in, fade_out } => {
                 if let Some(t) = self.tracks.get_mut(track) {
                     t.fade_in = fade_in.max(0.0);
@@ -998,12 +1026,17 @@ impl Studio {
                 })
                 .collect();
             auto.sort_by_key(|a| a.pos);
+            let start = lt.start.map(|s| (s * self.sr).round() as u64).unwrap_or(0);
+            let span = lt.span.map(|s| (s * self.sr).round() as u64).unwrap_or(0);
             self.tracks.push(Track {
                 inst,
                 events,
                 cursor: 0,
                 period,
+                start,
+                span,
                 prev_local: 0,
+                was_active: false,
                 muted: lt.muted,
                 volume: lt.volume,
                 pan: lt.pan,
@@ -1048,6 +1081,8 @@ impl Studio {
                 fade_in: t.fade_in,
                 fade_out: t.fade_out,
                 period: Some(t.period as f32 / sr),
+                start: Some(t.start as f32 / sr),
+                span: Some(t.span as f32 / sr),
                 zones,
                 automation: t
                     .auto
@@ -1117,7 +1152,10 @@ impl Studio {
             events: Vec::new(),
             cursor: 0,
             period: self.arm_period.unwrap_or(0), // 0 = free take, set on close
-            prev_local: self.pos,
+            start: 0,
+            span: 0, // fill: loop from the top
+            prev_local: 0,
+            was_active: false,
             muted: false,
             volume: 1.0,
             pan: 0.0,
@@ -1172,9 +1210,14 @@ impl Studio {
         }
     }
 
-    /// The global song length: the longest track's period (0 if no tracks).
+    /// The global song length: the furthest clip end (0 if no tracks). A fill
+    /// clip (`span == 0`) contributes at least `start + period`.
     fn song_len(&self) -> u64 {
-        self.tracks.iter().map(|t| t.period.max(1)).max().unwrap_or(0)
+        self.tracks
+            .iter()
+            .map(|t| t.start + if t.span > 0 { t.span } else { t.period.max(1) })
+            .max()
+            .unwrap_or(0)
     }
 
     /// Set the transport wrap length to the current song length.
@@ -1438,18 +1481,31 @@ impl Studio {
     fn fire_events(&mut self) {
         let pos = self.pos;
         let recording = self.recording;
+        let song = self.loop_len.unwrap_or(0);
         for (i, t) in self.tracks.iter_mut().enumerate() {
             let period = t.period.max(1);
-            let local = pos % period;
+            // The clip's active window on the global timeline.
+            let end = if t.span > 0 { t.start + t.span } else { song };
+            let active = pos >= t.start && pos < end;
             if Some(i) == recording {
                 // Don't play the take being recorded, but keep its clock in sync.
-                t.prev_local = local;
+                t.prev_local = if active { (pos - t.start) % period } else { 0 };
+                t.was_active = active;
                 continue;
             }
-            // A period wrap (or the global wrap) rewinds this track to its top.
-            if local < t.prev_local {
+            if !active {
+                if t.was_active {
+                    t.inst.all_notes_off(); // clean stop at the clip's end
+                    t.was_active = false;
+                }
+                continue;
+            }
+            let local = (pos - t.start) % period;
+            // Entering the clip, a period wrap, or the global wrap rewinds it.
+            if !t.was_active || local < t.prev_local {
                 reset_track(t);
             }
+            t.was_active = true;
             // Skip anything already behind us, then fire everything on this frame.
             while t.cursor < t.events.len() && t.events[t.cursor].pos < local {
                 t.cursor += 1;
@@ -1615,6 +1671,8 @@ impl Studio {
                     fade_in: t.fade_in,
                     fade_out: t.fade_out,
                     period: period / sr,
+                    start: t.start as f32 / sr,
+                    span: t.span as f32 / sr,
                 }
             })
             .collect();
@@ -2031,6 +2089,8 @@ mod tests {
                 fade_in: 0.0,
                 fade_out: 0.0,
                 period: None,
+                start: None,
+                span: None,
                 zones: Vec::new(),
                 // Delta of +100 from the base damping (default 8) → effective 108.
                 automation: vec![AutoPoint { t: 0.005, target: "damping".into(), value: 100.0 }],
@@ -2087,6 +2147,8 @@ mod tests {
                 fade_in: 0.0,
                 fade_out: 0.0,
                 period: None,
+                start: None,
+                span: None,
                 zones: Vec::new(),
                 automation: vec![AutoPoint { t: 0.005, target: "damping".into(), value: 100.0 }],
                 events: vec![LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
@@ -2119,6 +2181,8 @@ mod tests {
                 fade_in: 0.0,
                 fade_out: 0.0,
                 period: None,
+                start: None,
+                span: None,
                 zones: Vec::new(),
                 automation: Vec::new(),
                 events: vec![
@@ -2214,6 +2278,8 @@ mod tests {
             fade_in: 0.0,
             fade_out: 0.0,
             period: Some(period),
+            start: None,
+            span: None,
             zones: Vec::new(),
             automation: Vec::new(),
             events: vec![
@@ -2233,6 +2299,41 @@ mod tests {
         // to silence long ago.
         drain(&mut s, 14_880);
         assert!(s.tracks[0].inst.active_voices() > 0, "short track re-fired inside the song");
+    }
+
+    #[test]
+    fn clip_start_offset_delays_playback() {
+        use crate::project::{LoopData, LoopEvent, LoopTrack};
+        let data = LoopData {
+            length: 0.4,
+            tracks: vec![LoopTrack {
+                name: "T".into(),
+                model_id: "musical_string".into(),
+                params: serde_json::json!({}),
+                engine: EngineParams::default(),
+                muted: false,
+                volume: 1.0,
+                pan: 0.0,
+                fade_in: 0.0,
+                fade_out: 0.0,
+                period: Some(0.2),
+                start: Some(0.2), // clip begins at 0.2s
+                span: None,
+                zones: Vec::new(),
+                automation: Vec::new(),
+                events: vec![
+                    LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 },
+                    LoopEvent { t: 0.02, on: false, note: 60, vel: 0.0 },
+                ],
+            }],
+        };
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(data));
+        assert_eq!(s.loop_len, Some((0.4 * 48_000.0) as u64), "song = start + period");
+        drain(&mut s, 4_800); // 0.1s — before the clip starts
+        assert_eq!(s.tracks[0].inst.active_voices(), 0, "silent before its start");
+        drain(&mut s, 5_200); // ~0.208s — the clip has started
+        assert!(s.tracks[0].inst.active_voices() > 0, "plays once its start is reached");
     }
 
     #[test]
@@ -2296,6 +2397,8 @@ mod tests {
                 fade_in: 0.0,
                 fade_out: 0.0,
                 period: None,
+                start: None,
+                span: None,
                 zones: Vec::new(),
                 automation: Vec::new(),
                 events: vec![LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
@@ -2380,6 +2483,8 @@ mod tests {
                 fade_in: 0.0,
                 fade_out: 0.0,
                 period: None,
+                start: None,
+                span: None,
                 zones: Vec::new(),
                 automation: Vec::new(),
                 events: vec![

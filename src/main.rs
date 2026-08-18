@@ -132,6 +132,8 @@ struct App {
     sel: Option<(usize, f32, f32)>,
     /// Drag anchor (loop fraction) while dragging out a selection.
     drag_start: Option<f32>,
+    /// While dragging a clip in the arrangement: (track index, previewed start s).
+    drag_clip: Option<(usize, f32)>,
     /// Destination time (secs) for duplicate / move.
     region_dest: f32,
     /// Note-edit params for the selection: transpose semitones, velocity factor.
@@ -218,6 +220,7 @@ impl App {
             whammy_up: 2.0,
             sel: None,
             drag_start: None,
+            drag_clip: None,
             region_dest: 0.0,
             region_transpose: 0,
             region_vel: 1.0,
@@ -1649,8 +1652,10 @@ impl App {
             return;
         }
 
+        self.arrangement_overview(ui, &tracks, loop_secs, play);
+
         ui.label(
-            egui::RichText::new("Drag across a track's timeline to select a span, then chop/crop/duplicate/move it below. Move sliders while recording to automate.")
+            egui::RichText::new("Below: each track's own loop. Drag across it to select a span, then chop/crop/duplicate/move. Move sliders while recording to automate.")
                 .weak()
                 .small(),
         );
@@ -1658,6 +1663,7 @@ impl App {
         let mut toggle_mute = None;
         let mut toggle_solo = None;
         let mut mix_change: Option<(usize, f32, f32)> = None;
+        let mut place_change: Option<(usize, f32, f32)> = None;
         let mut delete = None;
         let mut edit = None;
         let mut clear_auto = None;
@@ -1735,6 +1741,23 @@ impl App {
                 if pan_resp.on_hover_text("Pan").changed() || vol_resp.on_hover_text("Volume").changed() {
                     mix_change = Some((i, vol, pan));
                 }
+                // Precise clip placement: start + length (0 = loop to song end).
+                let mut start = t.start;
+                let mut span = t.span;
+                let s_resp = ui.add_sized(
+                    [56.0, 18.0],
+                    egui::DragValue::new(&mut start).range(0.0..=600.0).speed(0.01).prefix("@").suffix("s"),
+                );
+                let l_resp = ui.add_sized(
+                    [56.0, 18.0],
+                    egui::DragValue::new(&mut span).range(0.0..=600.0).speed(0.01).suffix("s")
+                        .custom_formatter(|n, _| if n < 0.005 { "loop".into() } else { format!("{n:.2}") }),
+                );
+                if s_resp.on_hover_text("Clip start").changed()
+                    || l_resp.on_hover_text("Clip length (loop = fill to song end)").changed()
+                {
+                    place_change = Some((i, start, span));
+                }
                 if t.automation > 0
                     && ui
                         .button(format!("🎚 {}", t.automation))
@@ -1765,6 +1788,9 @@ impl App {
         if let Some((i, volume, pan)) = mix_change {
             let _ = self.tx.send(Command::SetTrackMix { track: i, volume, pan });
         }
+        if let Some((i, start, span)) = place_change {
+            let _ = self.tx.send(Command::SetTrackPlacement { track: i, start, span });
+        }
         if let Some(i) = clear_auto {
             let _ = self.tx.send(Command::ClearTrackAutomation(i));
         }
@@ -1780,6 +1806,134 @@ impl App {
                 self.sel = None;
             }
         }
+    }
+
+    /// The arrangement: every track drawn as a clip on one shared time axis.
+    /// Drag a clip to move where it starts (snapped to bars); click to select.
+    fn arrangement_overview(
+        &mut self,
+        ui: &mut egui::Ui,
+        tracks: &[TrackView],
+        song_secs: f32,
+        play: f32,
+    ) {
+        if song_secs <= 0.0 || tracks.is_empty() {
+            return;
+        }
+        ui.label(egui::RichText::new("Arrangement — drag a clip to move it, click to select").weak().small());
+        let lane_h = 22.0;
+        let label_w = 96.0;
+        let width = ui.available_width().max(240.0);
+        let (rect, resp) = ui.allocate_exact_size(
+            egui::vec2(width, tracks.len() as f32 * lane_h),
+            egui::Sense::click_and_drag(),
+        );
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 3.0, egui::Color32::from_gray(24));
+        let tl_x = rect.left() + label_w;
+        let tl_w = (rect.right() - tl_x - 4.0).max(10.0);
+        let x_of = |secs: f32| tl_x + (secs / song_secs).clamp(0.0, 1.0) * tl_w;
+        let secs_of = |x: f32| ((x - tl_x) / tl_w).clamp(0.0, 1.0) * song_secs;
+        let bar_secs =
+            60.0 / self.project.tempo.bpm.max(1.0) * self.project.tempo.beats_per_bar.max(1) as f32;
+
+        // Bar gridlines.
+        if bar_secs > 0.0 {
+            let mut b = 0.0;
+            while b <= song_secs && (b / bar_secs) < 512.0 {
+                let x = x_of(b);
+                painter.vline(x, rect.y_range(), egui::Stroke::new(1.0_f32, egui::Color32::from_gray(40)));
+                b += bar_secs;
+            }
+        }
+
+        let font = egui::FontId::proportional(11.0);
+        for (i, t) in tracks.iter().enumerate() {
+            let y0 = rect.top() + i as f32 * lane_h;
+            painter.text(
+                egui::pos2(rect.left() + 3.0, y0 + lane_h * 0.5),
+                egui::Align2::LEFT_CENTER,
+                &t.name,
+                font.clone(),
+                egui::Color32::from_gray(180),
+            );
+            let start = match self.drag_clip {
+                Some((di, ds)) if di == i => ds,
+                _ => t.start,
+            };
+            let span_secs = if t.span > 0.0 { t.span } else { (song_secs - start).max(0.0) };
+            let cx0 = x_of(start);
+            let cx1 = x_of(start + span_secs);
+            let clip = egui::Rect::from_min_max(
+                egui::pos2(cx0, y0 + 2.0),
+                egui::pos2(cx1.max(cx0 + 3.0), y0 + lane_h - 2.0),
+            );
+            let selected = self.edit_target == Target::Track(i);
+            let fill = if t.muted {
+                egui::Color32::from_gray(70)
+            } else if selected {
+                egui::Color32::from_rgb(80, 130, 90)
+            } else {
+                egui::Color32::from_rgb(60, 90, 130)
+            };
+            painter.rect_filled(clip, 2.0, fill);
+            // Notes, repeated across the clip's span (period-relative fractions).
+            let period = t.period.max(1e-6);
+            let reps = ((span_secs / period).ceil() as i32).clamp(1, 256);
+            for r in 0..reps {
+                let base = start + r as f32 * period;
+                for n in &t.notes {
+                    let ns = base + n.start * period;
+                    if ns >= start + span_secs {
+                        continue;
+                    }
+                    let ne = (base + n.end * period).min(start + span_secs);
+                    let y = y0 + lane_h * 0.5;
+                    painter.line_segment(
+                        [egui::pos2(x_of(ns), y), egui::pos2(x_of(ne).max(x_of(ns) + 1.0), y)],
+                        egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(190, 215, 255)),
+                    );
+                }
+            }
+        }
+        // Playhead.
+        let px = x_of(play * song_secs);
+        painter.vline(px, rect.y_range(), egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(240, 240, 120)));
+
+        // Interaction.
+        let lane_at = |p: egui::Pos2| -> Option<usize> {
+            if p.x < tl_x {
+                return None;
+            }
+            let i = ((p.y - rect.top()) / lane_h) as usize;
+            (i < tracks.len()).then_some(i)
+        };
+        if resp.drag_started() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                if let Some(i) = lane_at(p) {
+                    self.drag_clip = Some((i, tracks[i].start));
+                    self.set_target(Target::Track(i), tracks);
+                }
+            }
+        }
+        if resp.dragged() {
+            if let (Some((i, _)), Some(p)) = (self.drag_clip, resp.interact_pointer_pos()) {
+                let raw = secs_of(p.x);
+                let snapped = if bar_secs > 0.0 { (raw / bar_secs).round() * bar_secs } else { raw };
+                self.drag_clip = Some((i, snapped.max(0.0)));
+            }
+        }
+        if resp.drag_stopped() {
+            if let Some((i, start)) = self.drag_clip.take() {
+                let span = tracks.get(i).map(|t| t.span).unwrap_or(0.0);
+                let _ = self.tx.send(Command::SetTrackPlacement { track: i, start, span });
+            }
+        } else if resp.clicked() {
+            if let Some(i) = resp.interact_pointer_pos().and_then(lane_at) {
+                self.set_target(Target::Track(i), tracks);
+            }
+        }
+        ui.add_space(4.0);
     }
 
     /// The chop/crop/rearrange toolbar shown under the selected track.

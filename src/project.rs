@@ -88,6 +88,13 @@ pub struct LoopTrack {
     /// whole loop; otherwise the track repeats at this period independently.
     #[serde(default)]
     pub period: Option<f32>,
+    /// Where the clip starts on the arrangement timeline (seconds; default 0).
+    #[serde(default)]
+    pub start: Option<f32>,
+    /// How long the clip plays from `start` (seconds); `None`/0 = fill to the
+    /// song end.
+    #[serde(default)]
+    pub span: Option<f32>,
     #[serde(default)]
     pub zones: Vec<ZoneData>,
     /// Recorded parameter automation (per-knob moves over the loop).
@@ -258,6 +265,8 @@ mod tests {
                 fade_in: 0.0,
                 fade_out: 0.0,
                 period: None,
+                start: None,
+                span: None,
                 zones: Vec::new(),
                 automation: vec![
                     AutoPoint { t: 0.1, target: "damping".into(), value: 5.0 },
