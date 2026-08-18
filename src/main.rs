@@ -1517,7 +1517,7 @@ impl App {
             if self.looper_mode == LooperMode::Pedal && loop_secs > 0.0 {
                 if ui
                     .button("＋ Rec track")
-                    .on_hover_text("Record a new layer. Set Loop to a bar count first to record a longer part over the beat.")
+                    .on_hover_text("Record a new layer. In 🎬 Arrange mode it punches in at the playhead; in 🔁 Loop mode it records from the top.")
                     .clicked()
                 {
                     let _ = self.tx.send(Command::ArmOverdub);

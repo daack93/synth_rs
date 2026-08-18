@@ -459,6 +459,9 @@ pub struct Studio {
     arm_period: Option<u64>,
     /// Frames elapsed since arming (measures the one-pass window).
     rec_frames: u64,
+    /// The global position a take is recorded relative to (0 in Loop mode; the
+    /// playhead when punching into the Arrangement). Events store `pos - origin`.
+    rec_origin: u64,
 
     // Song arrangement playback
     song: Vec<SongSection>,
@@ -517,6 +520,7 @@ impl Studio {
             auto_finalize_at: None,
             arm_period: None,
             rec_frames: 0,
+            rec_origin: 0,
             song: Vec::new(),
             song_active: false,
             song_pos: 0,
@@ -572,7 +576,7 @@ impl Studio {
                 self.live.set_bend(2f32.powf(semitones / 12.0));
                 // Record the bend into the take so a dive replays with the loop.
                 if let Some(r) = self.recording {
-                    let pos = self.pos;
+                    let pos = self.pos.saturating_sub(self.rec_origin);
                     self.tracks[r].auto.push(AutoEv {
                         pos,
                         target: "@bend".to_string(),
@@ -778,10 +782,13 @@ impl Studio {
         }
         if let Some(r) = self.recording {
             // Quantize note-ons to the grid; leave note-offs at their real time.
+            // Events are stored relative to the take's origin (the playhead when
+            // punching into the arrangement; 0 in Loop mode).
             let pos = match msg {
                 EvMsg::On { .. } => self.quantize_pos(self.pos),
                 EvMsg::Off { .. } => self.pos,
-            };
+            }
+            .saturating_sub(self.rec_origin);
             self.tracks[r].events.push(Event { pos, msg });
         }
     }
@@ -793,7 +800,7 @@ impl Studio {
         let Some(r) = self.recording else { return };
         let old = self.live.parts().1; // detect which field the user moved
         let new = new_model.to_json();
-        let pos = self.pos;
+        let pos = self.pos.saturating_sub(self.rec_origin);
         for (id, val) in numeric_fields(&new) {
             let changed = numeric_at(&old, &id).map(|o| o != val).unwrap_or(true);
             if changed {
@@ -807,7 +814,7 @@ impl Studio {
     fn capture_engine_auto(&mut self, new_engine: &EngineParams) {
         let Some(r) = self.recording else { return };
         let (_, _, live_old, _) = self.live.parts();
-        let pos = self.pos;
+        let pos = self.pos.saturating_sub(self.rec_origin);
         let base = self.tracks[r].base_engine.clone();
         let t = &mut self.tracks[r];
         let mut push = |name: &str, ov: f32, nv: f32, base_v: f32| {
@@ -859,6 +866,7 @@ impl Studio {
         self.arm(true);
         self.playing = true;
         self.pos = 0;
+        self.rec_origin = 0; // first take defines the song start
         self.metro_phase = 0;
         self.beat_index = 0;
         if self.tempo.bars > 0 {
@@ -1315,8 +1323,10 @@ impl Studio {
     fn arm_overdub(&mut self) {
         let period = self.take_period().max(1);
         self.arm_period = Some(period);
+        // In Arrange mode, punch in at the playhead; in Loop mode, record from 0.
+        self.rec_origin = if self.play_mode == PlayMode::Arrange { self.pos } else { 0 };
         let cur = self.loop_len.unwrap_or(0);
-        self.loop_len = Some(cur.max(period));
+        self.loop_len = Some(cur.max(self.rec_origin + period));
         self.arm(false);
     }
 
@@ -1374,14 +1384,15 @@ impl Studio {
         self.armed = false;
         self.auto_finalize_at = None;
         self.arm_period = None;
-        let pos = self.pos;
+        let origin = self.rec_origin;
+        let recorded_len = self.pos.saturating_sub(origin);
         if let Some(idx) = self.recording.take() {
             let mut removed = false;
             if let Some(t) = self.tracks.get_mut(idx) {
                 t.events.sort_by_key(|e| e.pos);
                 t.auto.sort_by_key(|a| a.pos);
                 if t.period == 0 {
-                    t.period = pos.max(1); // free take with no set period
+                    t.period = recorded_len.max(1); // free take with no set period
                 }
                 if t.events.is_empty() {
                     removed = true;
@@ -1390,10 +1401,11 @@ impl Studio {
             if removed {
                 self.remove_track(idx);
             } else if !self.arrangement.iter().any(|c| c.track == idx) {
-                // Auto-place the new track at the top of the arrangement.
-                self.arrangement.push(Clip::at(idx, 0, 0));
+                // Auto-place the new track — at the playhead (arrange punch-in) or 0.
+                self.arrangement.push(Clip::at(idx, origin, 0));
             }
         }
+        self.rec_origin = 0;
         self.rebuild_playlist();
         self.recompute_song_len();
     }
@@ -2644,6 +2656,35 @@ mod tests {
         assert_eq!(s.arrangement[2].start, (0.8 * 48_000.0) as u64);
         s.handle(Command::RemoveClip { index: 0 });
         assert_eq!(s.arrangement.len(), 2);
+    }
+
+    #[test]
+    fn arrange_mode_recording_punches_in_at_the_playhead() {
+        let mut s = Studio::new(48_000.0);
+        // Build a first loop (defines the song; clip at 0).
+        s.handle(Command::Tap);
+        s.handle(Command::NoteOn { note: 60, vel: 1.0 });
+        drain(&mut s, 4_800); // 0.1s
+        s.handle(Command::NoteOff { note: 60 });
+        s.handle(Command::Tap); // close
+        assert_eq!(s.arrangement.len(), 1);
+        assert_eq!(s.arrangement[0].start, 0);
+        assert_eq!(s.tracks.len(), 1);
+
+        // Seek to 0.05s and punch in a new track (default play mode is Arrange).
+        s.handle(Command::Seek(0.05));
+        let origin = s.pos;
+        assert!(origin > 0);
+        s.handle(Command::ArmOverdub);
+        s.handle(Command::NoteOn { note: 67, vel: 1.0 });
+        drain(&mut s, 200);
+        s.handle(Command::Tap); // finalize the overdub
+
+        assert_eq!(s.tracks.len(), 2, "punched-in take made a new track");
+        let clip = s.arrangement.iter().find(|c| c.track == 1).expect("clip for the new track");
+        assert_eq!(clip.start, origin, "clip placed at the playhead, not bar 0");
+        // Its notes are stored relative to the take (first note at local 0).
+        assert_eq!(s.tracks[1].events.first().map(|e| e.pos), Some(0));
     }
 
     #[test]
