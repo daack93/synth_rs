@@ -1450,9 +1450,16 @@ impl App {
             return;
         }
 
+        ui.label(
+            egui::RichText::new("Tip: move sliders while recording — the moves are captured as automation and replay with the loop.")
+                .weak()
+                .small(),
+        );
+
         let mut toggle_mute = None;
         let mut delete = None;
         let mut edit = None;
+        let mut clear_auto = None;
         for (i, t) in tracks.iter().enumerate() {
             let editing = self.edit_target == Target::Track(i);
             ui.horizontal(|ui| {
@@ -1478,6 +1485,14 @@ impl App {
                     },
                 );
                 draw_track_timeline(ui, &t.notes, play, t.muted);
+                if t.automation > 0
+                    && ui
+                        .button(format!("🎚 {}", t.automation))
+                        .on_hover_text("Recorded parameter automation — click to clear")
+                        .clicked()
+                {
+                    clear_auto = Some(i);
+                }
                 if ui.button("🗑").on_hover_text("Delete track").clicked() {
                     delete = Some(i);
                 }
@@ -1485,6 +1500,9 @@ impl App {
         }
         if let Some(i) = toggle_mute {
             let _ = self.tx.send(Command::ToggleMute(i));
+        }
+        if let Some(i) = clear_auto {
+            let _ = self.tx.send(Command::ClearTrackAutomation(i));
         }
         if let Some(i) = edit {
             self.set_target(Target::Track(i), &tracks);

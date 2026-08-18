@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use crate::instrument::{make_sine_table, EngineParams, Instrument};
 use crate::kit::{Kit, Playable};
 use crate::models::{default_model, model_from_id, FtmModel};
-use crate::project::{LoopData, LoopEvent, LoopTrack, TempoGrid, ZoneData};
+use crate::project::{AutoPoint, LoopData, LoopEvent, LoopTrack, TempoGrid, ZoneData};
 
 const TWO_PI_F64: f64 = std::f64::consts::TAU;
 
@@ -93,6 +93,8 @@ pub enum Command {
     ArmOverdub,
     ToggleMute(usize),
     DeleteTrack(usize),
+    /// Erase a track's recorded parameter automation.
+    ClearTrackAutomation(usize),
     /// Swap a track's instrument model live (rebuilds its sounding voices).
     SetTrackModel(usize, Box<dyn FtmModel>),
     /// Update a track's engine params live.
@@ -132,6 +134,14 @@ struct Event {
     msg: EvMsg,
 }
 
+/// One captured parameter move, timed in samples.
+#[derive(Clone)]
+struct AutoEv {
+    pos: u64,
+    target: String,
+    value: f32,
+}
+
 struct Track {
     inst: Playable,
     events: Vec<Event>,
@@ -139,6 +149,20 @@ struct Track {
     muted: bool,
     name: String,
     label: String,
+
+    // --- Parameter automation (single-instrument tracks only) ---
+    /// Recorded parameter moves, sorted by `pos`.
+    auto: Vec<AutoEv>,
+    auto_cursor: usize,
+    /// The track's model id, used to rebuild it when automation fires.
+    model_id: String,
+    /// Model params + engine at the track's creation — the state each loop
+    /// resets to before automation replays.
+    base_json: serde_json::Value,
+    base_engine: EngineParams,
+    /// The evolving state as automation is applied through the loop.
+    cur_json: serde_json::Value,
+    cur_engine: EngineParams,
 }
 
 // --- Shared view (audio thread writes, UI reads) ---
@@ -164,6 +188,8 @@ pub struct TrackView {
     pub params: serde_json::Value,
     pub engine: EngineParams,
     pub zones: Vec<ZoneData>,
+    /// Number of recorded automation points on this track.
+    pub automation: usize,
 }
 
 /// Lock-free scalars + an occasionally-rebuilt track list for the UI.
@@ -329,8 +355,14 @@ impl Studio {
                 self.live.note_off(note);
                 self.record_event(EvMsg::Off { note });
             }
-            Command::SetModel(m) => self.live.set_model(m),
-            Command::SetEngine(e) => self.live.set_engine(e),
+            Command::SetModel(m) => {
+                self.capture_model_auto(m.as_ref());
+                self.live.set_model(m);
+            }
+            Command::SetEngine(e) => {
+                self.capture_engine_auto(&e);
+                self.live.set_engine(e);
+            }
             Command::SetLive(cfg) => {
                 self.live.all_notes_off();
                 self.live = self.build_live(cfg);
@@ -380,6 +412,15 @@ impl Studio {
             Command::SetSong(sections) => self.song = sections,
             Command::PlaySong => self.play_song(),
             Command::SetTempo(t) => self.tempo = t,
+            Command::ClearTrackAutomation(i) => {
+                if let Some(t) = self.tracks.get_mut(i) {
+                    t.auto.clear();
+                    t.auto_cursor = 0;
+                    t.cur_json = t.base_json.clone();
+                    t.cur_engine = t.base_engine.clone();
+                    self.mark_structure_dirty();
+                }
+            }
             Command::DeleteTrack(i) => {
                 if i < self.tracks.len() {
                     self.tracks.remove(i);
@@ -416,6 +457,38 @@ impl Studio {
             };
             self.tracks[r].events.push(Event { pos, msg });
         }
+    }
+
+    /// While recording a single-instrument track, capture the model params that
+    /// changed (vs the live model's current values) as automation on that track.
+    fn capture_model_auto(&mut self, new_model: &dyn FtmModel) {
+        let Some(r) = self.recording else { return };
+        let old = self.live.parts().1; // Null for a kit → no numeric fields
+        let new = new_model.to_json();
+        let pos = self.pos;
+        for (id, val) in numeric_fields(&new) {
+            let changed = numeric_at(&old, &id).map(|o| o != val).unwrap_or(true);
+            if changed {
+                self.tracks[r].auto.push(AutoEv { pos, target: id, value: val as f32 });
+            }
+        }
+    }
+
+    /// While recording, capture engine parameters that changed as automation.
+    fn capture_engine_auto(&mut self, new_engine: &EngineParams) {
+        let Some(r) = self.recording else { return };
+        let (_, _, old, _) = self.live.parts();
+        let pos = self.pos;
+        let push = |name: &str, ov: f32, nv: f32, t: &mut Track| {
+            if ov != nv {
+                t.auto.push(AutoEv { pos, target: format!("eng:{name}"), value: nv });
+            }
+        };
+        let t = &mut self.tracks[r];
+        push("gain", old.gain, new_engine.gain, t);
+        push("attack", old.attack_ms, new_engine.attack_ms, t);
+        push("release", old.release_ms, new_engine.release_ms, t);
+        push("retrigger", old.retrigger_ms, new_engine.retrigger_ms, t);
     }
 
     // ---- tempo / grid helpers ----
@@ -695,6 +768,16 @@ impl Studio {
                 })
                 .collect();
             events.sort_by_key(|e| e.pos);
+            let mut auto: Vec<AutoEv> = lt
+                .automation
+                .iter()
+                .map(|a| AutoEv {
+                    pos: ((a.t * self.sr).round() as u64).min(len - 1),
+                    target: a.target.clone(),
+                    value: a.value,
+                })
+                .collect();
+            auto.sort_by_key(|a| a.pos);
             self.tracks.push(Track {
                 inst,
                 events,
@@ -702,6 +785,13 @@ impl Studio {
                 muted: lt.muted,
                 name: lt.name,
                 label,
+                auto,
+                auto_cursor: 0,
+                model_id: lt.model_id.clone(),
+                base_json: lt.params.clone(),
+                base_engine: lt.engine.clone(),
+                cur_json: lt.params,
+                cur_engine: lt.engine,
             });
         }
         self.pos = 0;
@@ -726,6 +816,15 @@ impl Studio {
                 engine,
                 muted: t.muted,
                 zones,
+                automation: t
+                    .auto
+                    .iter()
+                    .map(|a| AutoPoint {
+                        t: a.pos as f32 / sr,
+                        target: a.target.clone(),
+                        value: a.value,
+                    })
+                    .collect(),
                 events: t
                     .events
                     .iter()
@@ -769,6 +868,7 @@ impl Studio {
         let idx = self.tracks.len();
         let inst = self.live.snapshot();
         let label = inst.label();
+        let (model_id, base_json, base_engine, _zones) = self.live.parts();
         self.tracks.push(Track {
             inst,
             events: Vec::new(),
@@ -776,6 +876,13 @@ impl Studio {
             muted: false,
             name: format!("Track {}", idx + 1),
             label,
+            auto: Vec::new(),
+            auto_cursor: 0,
+            model_id,
+            base_json: base_json.clone(),
+            base_engine: base_engine.clone(),
+            cur_json: base_json,
+            cur_engine: base_engine,
         });
         self.recording = Some(idx);
         self.armed = false;
@@ -788,8 +895,10 @@ impl Studio {
         if let Some(idx) = self.recording.take() {
             if let Some(t) = self.tracks.get_mut(idx) {
                 t.events.sort_by_key(|e| e.pos);
+                t.auto.sort_by_key(|a| a.pos);
                 let pos = self.pos;
                 t.cursor = t.events.partition_point(|e| e.pos < pos);
+                t.auto_cursor = t.auto.partition_point(|a| a.pos < pos);
                 if t.events.is_empty() {
                     self.tracks.remove(idx);
                     self.renumber_tracks();
@@ -801,6 +910,16 @@ impl Studio {
     fn reset_cursors(&mut self) {
         for t in &mut self.tracks {
             t.cursor = 0;
+            // Rewind automation to the track's base state so the loop repeats.
+            if !t.auto.is_empty() {
+                t.auto_cursor = 0;
+                t.cur_json = t.base_json.clone();
+                t.cur_engine = t.base_engine.clone();
+                if let Some(model) = model_from_id(&t.model_id, &t.base_json) {
+                    t.inst.set_model(model);
+                }
+                t.inst.set_engine(t.base_engine.clone());
+            }
         }
     }
 
@@ -863,6 +982,32 @@ impl Studio {
                     EvMsg::Off { note } => t.inst.note_off(note),
                 }
                 t.cursor += 1;
+            }
+
+            // Fire any parameter automation landing on this frame.
+            if !t.auto.is_empty() {
+                while t.auto_cursor < t.auto.len() && t.auto[t.auto_cursor].pos < pos {
+                    t.auto_cursor += 1;
+                }
+                let (mut model_dirty, mut engine_dirty) = (false, false);
+                while t.auto_cursor < t.auto.len() && t.auto[t.auto_cursor].pos == pos {
+                    let (target, value) = {
+                        let ev = &t.auto[t.auto_cursor];
+                        (ev.target.clone(), ev.value)
+                    };
+                    let (m, e) = apply_auto(&mut t.cur_json, &mut t.cur_engine, &target, value);
+                    model_dirty |= m;
+                    engine_dirty |= e;
+                    t.auto_cursor += 1;
+                }
+                if model_dirty {
+                    if let Some(model) = model_from_id(&t.model_id, &t.cur_json) {
+                        t.inst.set_model(model);
+                    }
+                }
+                if engine_dirty {
+                    t.inst.set_engine(t.cur_engine.clone());
+                }
             }
         }
     }
@@ -969,6 +1114,7 @@ impl Studio {
                     params,
                     engine,
                     zones,
+                    automation: t.auto.len(),
                 }
             })
             .collect();
@@ -993,6 +1139,54 @@ impl Studio {
 }
 
 /// Pair note-on/off events into normalized spans for drawing.
+/// The numeric (`f64`-valued) top-level fields of a params object — the
+/// automatable parameters. Non-numbers (enums, bools) are skipped.
+fn numeric_fields(v: &serde_json::Value) -> Vec<(String, f64)> {
+    match v.as_object() {
+        Some(map) => map
+            .iter()
+            .filter_map(|(k, val)| val.as_f64().map(|f| (k.clone(), f)))
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// The numeric value of one field, if present and numeric.
+fn numeric_at(v: &serde_json::Value, id: &str) -> Option<f64> {
+    v.get(id).and_then(|x| x.as_f64())
+}
+
+/// Apply one automation move to the evolving state, returning whether the model
+/// or the engine needs rebuilding. Integer-valued fields (mode counts) keep
+/// their integer JSON type so the model still deserializes.
+fn apply_auto(
+    cur_json: &mut serde_json::Value,
+    cur_engine: &mut EngineParams,
+    target: &str,
+    value: f32,
+) -> (bool, bool) {
+    if let Some(name) = target.strip_prefix("eng:") {
+        match name {
+            "gain" => cur_engine.gain = value,
+            "attack" => cur_engine.attack_ms = value,
+            "release" => cur_engine.release_ms = value,
+            "retrigger" => cur_engine.retrigger_ms = value,
+            _ => return (false, false),
+        }
+        return (false, true);
+    }
+    if let Some(slot) = cur_json.get_mut(target) {
+        let is_int = slot.is_i64() || slot.is_u64();
+        *slot = if is_int {
+            serde_json::json!(value.round() as i64)
+        } else {
+            serde_json::json!(value as f64)
+        };
+        return (true, false);
+    }
+    (false, false)
+}
+
 fn note_spans(events: &[Event], loop_len: f32) -> Vec<NoteSpan> {
     let mut sorted: Vec<Event> = events.to_vec();
     sorted.sort_by_key(|e| e.pos);
@@ -1168,6 +1362,62 @@ mod tests {
     }
 
     #[test]
+    fn automation_is_captured_and_serialized() {
+        use crate::models::drum_membrane::DrumMembrane;
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::SetModel(Box::new(DrumMembrane::default())));
+        s.handle(Command::Tap); // begin take
+        s.handle(Command::NoteOn { note: 60, vel: 1.0 });
+        drain(&mut s, 1000);
+        // Tweak a param mid-take → captured as automation on the recording track.
+        let mut d = DrumMembrane::default();
+        d.damping += 10.0;
+        s.handle(Command::SetModel(Box::new(d)));
+        s.handle(Command::SetEngine(EngineParams { gain: 1.5, ..EngineParams::default() }));
+        drain(&mut s, 1000);
+        s.handle(Command::NoteOff { note: 60 });
+        s.handle(Command::Tap); // close
+
+        assert_eq!(s.tracks.len(), 1);
+        let targets: Vec<_> = s.tracks[0].auto.iter().map(|a| a.target.clone()).collect();
+        assert!(targets.iter().any(|t| t == "damping"), "model move captured: {targets:?}");
+        assert!(targets.iter().any(|t| t == "eng:gain"), "engine move captured: {targets:?}");
+
+        let snap = s.snapshot_loop();
+        assert!(snap.tracks[0].automation.iter().any(|a| a.target == "damping"));
+    }
+
+    #[test]
+    fn automation_replays_and_changes_the_model() {
+        use crate::models::drum_membrane::DrumMembrane;
+        use crate::models::FtmModel;
+        use crate::project::{AutoPoint, LoopData, LoopEvent, LoopTrack};
+        let data = LoopData {
+            length: 0.05,
+            tracks: vec![LoopTrack {
+                name: "T".into(),
+                model_id: "drum_membrane".into(),
+                params: DrumMembrane::default().to_json(),
+                engine: EngineParams::default(),
+                muted: false,
+                zones: Vec::new(),
+                automation: vec![AutoPoint { t: 0.005, target: "damping".into(), value: 123.0 }],
+                events: vec![LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
+            }],
+        };
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(data));
+        // Before the automation point (t=0.005 → 240 samples) it sits at the base.
+        drain(&mut s, 100);
+        let before = s.tracks[0].inst.parts().1.get("damping").and_then(|v| v.as_f64());
+        assert_ne!(before, Some(123.0), "not yet automated");
+        // After the point, the model has been rebuilt with the automated value.
+        drain(&mut s, 300);
+        let after = s.tracks[0].inst.parts().1.get("damping").and_then(|v| v.as_f64());
+        assert_eq!(after, Some(123.0), "automation drove the param");
+    }
+
+    #[test]
     fn loop_snapshot_and_load_roundtrip() {
         let mut s = Studio::new(48_000.0);
         s.handle(Command::Tap);
@@ -1207,6 +1457,7 @@ mod tests {
                 engine: EngineParams::default(),
                 muted: false,
                 zones: Vec::new(),
+                automation: Vec::new(),
                 events: vec![
                     LoopEvent { t: 0.0, on: true, note, vel: 1.0 },
                     LoopEvent { t: 0.02, on: false, note, vel: 0.0 },

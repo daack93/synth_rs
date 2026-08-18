@@ -43,6 +43,17 @@ pub struct ZoneData {
     pub engine: EngineParams,
 }
 
+/// One recorded parameter move: at time `t` (seconds), `target` was set to
+/// `value`. `target` is a model parameter id (e.g. `"damping"`) or an engine
+/// parameter prefixed `eng:` (`"eng:gain"`, `"eng:attack"`, `"eng:release"`,
+/// `"eng:retrigger"`). These are the per-knob deltas captured while recording.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AutoPoint {
+    pub t: f32,
+    pub target: String,
+    pub value: f32,
+}
+
 /// One track of a loop: its instrument plus the notes it plays.
 ///
 /// A track is either a **single instrument** (`zones` empty — the top-level
@@ -60,6 +71,9 @@ pub struct LoopTrack {
     pub muted: bool,
     #[serde(default)]
     pub zones: Vec<ZoneData>,
+    /// Recorded parameter automation (per-knob moves over the loop).
+    #[serde(default)]
+    pub automation: Vec<AutoPoint>,
     pub events: Vec<LoopEvent>,
 }
 
@@ -221,6 +235,10 @@ mod tests {
                 engine: EngineParams::default(),
                 muted: false,
                 zones: Vec::new(),
+                automation: vec![
+                    AutoPoint { t: 0.1, target: "damping".into(), value: 5.0 },
+                    AutoPoint { t: 0.3, target: "eng:gain".into(), value: 0.8 },
+                ],
                 events: vec![
                     LoopEvent { t: 0.0, on: true, note: 60, vel: 0.9 },
                     LoopEvent { t: 0.5, on: false, note: 60, vel: 0.0 },
