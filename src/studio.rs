@@ -146,6 +146,12 @@ pub enum Command {
     RemoveClip { index: usize },
     /// Set the playhead position (seconds).
     Seek(f32),
+    /// Set a clip's linked edit layer: transpose (semitones) + velocity scale.
+    SetClipLayer { index: usize, transpose: i32, vel: f32 },
+    /// Fork a clip's notes so edits to it stop tracking the base track.
+    MakeClipUnique { index: usize },
+    /// Chop/edit a clip's own notes (auto-forks first) with a region op.
+    ClipRegionEdit { index: usize, op: RegionOp },
     /// Set a track's fade-in / fade-out length in seconds.
     SetTrackFades { track: usize, fade_in: f32, fade_out: f32 },
     /// Swap a track's instrument model live (rebuilds its sounding voices).
@@ -232,6 +238,11 @@ pub enum PlayMode {
 
 /// One placement of a track on the arrangement timeline. Several clips may
 /// reference the same track (shared content). `was_active` is runtime only.
+///
+/// A clip carries a per-reference **edit layer**: `transpose` and `vel` are
+/// non-destructive transforms that stay linked to the base track; `own_events`,
+/// once set ("make unique"), forks the clip's notes so edits to the base no
+/// longer reach it. The sound (instrument/mix) is always shared from the track.
 #[derive(Clone)]
 struct Clip {
     track: usize,
@@ -239,6 +250,17 @@ struct Clip {
     /// `0` = fill: loop from `start` to the end of the song.
     length: u64,
     was_active: bool,
+    /// Per-clip transpose (semitones) and velocity scale — linked to the base.
+    transpose: i32,
+    vel: f32,
+    /// Forked notes for this clip only (make-unique). `None` = use the track's.
+    own_events: Option<Vec<Event>>,
+}
+
+impl Clip {
+    fn at(track: usize, start: u64, length: u64) -> Clip {
+        Clip { track, start, length, was_active: false, transpose: 0, vel: 1.0, own_events: None }
+    }
 }
 
 /// A track is pure **content** now — its instrument, notes, mix, and its own
@@ -316,6 +338,10 @@ pub struct ClipView {
     pub track: usize,
     pub start: f32,
     pub length: f32,
+    pub transpose: i32,
+    pub vel: f32,
+    /// True if the clip's notes have been forked from the track (make-unique).
+    pub unique: bool,
 }
 
 /// Lock-free scalars + an occasionally-rebuilt track list for the UI.
@@ -639,12 +665,11 @@ impl Studio {
                 if track < self.tracks.len() {
                     self.push_undo();
                     let sr = self.sr;
-                    self.arrangement.push(Clip {
+                    self.arrangement.push(Clip::at(
                         track,
-                        start: (start.max(0.0) * sr).round() as u64,
-                        length: (length.max(0.0) * sr).round() as u64,
-                        was_active: false,
-                    });
+                        (start.max(0.0) * sr).round() as u64,
+                        (length.max(0.0) * sr).round() as u64,
+                    ));
                     self.after_arrangement_change();
                 }
             }
@@ -676,6 +701,23 @@ impl Studio {
                     self.after_arrangement_change();
                 }
             }
+            Command::SetClipLayer { index, transpose, vel } => {
+                if index < self.arrangement.len() {
+                    self.push_undo();
+                    let c = &mut self.arrangement[index];
+                    c.transpose = transpose.clamp(-48, 48);
+                    c.vel = vel.clamp(0.0, 2.0);
+                    self.mark_structure_dirty();
+                }
+            }
+            Command::MakeClipUnique { index } => {
+                if index < self.arrangement.len() && self.arrangement[index].own_events.is_none() {
+                    self.push_undo();
+                    self.ensure_clip_unique(index);
+                    self.mark_structure_dirty();
+                }
+            }
+            Command::ClipRegionEdit { index, op } => self.clip_region_edit(index, op),
             Command::Seek(secs) => {
                 let p = (secs.max(0.0) * self.sr).round() as u64;
                 self.pos = self.loop_len.map(|l| p.min(l.saturating_sub(1))).unwrap_or(0);
@@ -1101,12 +1143,11 @@ impl Studio {
         // track itself; build one clip per track from it as a fallback.
         let mut migrated: Vec<Clip> = Vec::new();
         for (ti, lt) in data.tracks.into_iter().enumerate() {
-            migrated.push(Clip {
-                track: ti,
-                start: lt.start.map(|s| (s * self.sr).round() as u64).unwrap_or(0),
-                length: lt.span.map(|s| (s * self.sr).round() as u64).unwrap_or(0),
-                was_active: false,
-            });
+            migrated.push(Clip::at(
+                ti,
+                lt.start.map(|s| (s * self.sr).round() as u64).unwrap_or(0),
+                lt.span.map(|s| (s * self.sr).round() as u64).unwrap_or(0),
+            ));
             let inst = self.track_playable(&lt);
             let label = inst.label();
             // Each track has its own period (defaults to the whole loop for
@@ -1164,13 +1205,28 @@ impl Studio {
         self.arrangement = if data.arrangement.is_empty() {
             migrated
         } else {
+            let sr = self.sr;
             data.arrangement
                 .iter()
                 .map(|c| Clip {
                     track: c.track,
-                    start: (c.start * self.sr).round() as u64,
-                    length: (c.length * self.sr).round() as u64,
+                    start: (c.start * sr).round() as u64,
+                    length: (c.length * sr).round() as u64,
                     was_active: false,
+                    transpose: c.transpose,
+                    vel: c.vel,
+                    own_events: c.own_events.as_ref().map(|evs| {
+                        evs.iter()
+                            .map(|e| Event {
+                                pos: (e.t * sr).round() as u64,
+                                msg: if e.on {
+                                    EvMsg::On { note: e.note, vel: e.vel }
+                                } else {
+                                    EvMsg::Off { note: e.note }
+                                },
+                            })
+                            .collect()
+                    }),
                 })
                 .collect()
         };
@@ -1235,6 +1291,19 @@ impl Studio {
                 track: c.track,
                 start: c.start as f32 / sr,
                 length: c.length as f32 / sr,
+                transpose: c.transpose,
+                vel: c.vel,
+                own_events: c.own_events.as_ref().map(|evs| {
+                    evs.iter()
+                        .map(|e| {
+                            let (on, note, vel) = match e.msg {
+                                EvMsg::On { note, vel } => (true, note, vel),
+                                EvMsg::Off { note } => (false, note, 0.0),
+                            };
+                            LoopEvent { t: e.pos as f32 / sr, on, note, vel }
+                        })
+                        .collect()
+                }),
             })
             .collect();
         LoopData { length, tracks, arrangement }
@@ -1322,7 +1391,7 @@ impl Studio {
                 self.remove_track(idx);
             } else if !self.arrangement.iter().any(|c| c.track == idx) {
                 // Auto-place the new track at the top of the arrangement.
-                self.arrangement.push(Clip { track: idx, start: 0, length: 0, was_active: false });
+                self.arrangement.push(Clip::at(idx, 0, 0));
             }
         }
         self.rebuild_playlist();
@@ -1366,7 +1435,7 @@ impl Studio {
     fn rebuild_playlist(&mut self) {
         self.playlist = match self.play_mode {
             PlayMode::Loop => (0..self.tracks.len())
-                .map(|track| Clip { track, start: 0, length: 0, was_active: false })
+                .map(|track| Clip::at(track, 0, 0))
                 .collect(),
             PlayMode::Arrange => self
                 .arrangement
@@ -1443,131 +1512,47 @@ impl Studio {
 
     /// Chop / crop / rearrange a track's timeline. Positions and loop length are
     /// preserved; only the selected notes + automation move.
+    /// Grid spacing (samples) for Quantize — the current grid, or 1/16 if off.
+    fn quant_grid(&self) -> f64 {
+        let steps = if self.tempo.quantize > 0 { self.tempo.quantize } else { 4 };
+        (self.spb() / steps as f64).max(1.0)
+    }
+
     fn region_edit(&mut self, i: usize, op: RegionOp) {
         self.push_undo();
-        let sr = self.sr;
-        let pos = self.pos;
-        // Grid spacing (samples) for Quantize — the current grid, or 1/16 if off.
-        let steps = if self.tempo.quantize > 0 { self.tempo.quantize } else { 4 };
-        let grid = (self.spb() / steps as f64).max(1.0);
-        {
-            let Some(t) = self.tracks.get_mut(i) else { return };
-            // Region edits are relative to this track's own period, not the song.
-            let len = t.period.max(1);
-            let p = |secs: f32| ((secs * sr).round().max(0.0) as u64).min(len);
-            match op {
-                RegionOp::Delete { a, b } => {
-                    let (a, b) = (p(a), p(b));
-                    let spans = events_to_spans(&t.events, len);
-                    let kept: Vec<Span> =
-                        spans.into_iter().filter(|s| !(s.start >= a && s.start < b)).collect();
-                    t.events = spans_to_events(&kept);
-                    t.auto.retain(|x| !(x.pos >= a && x.pos < b));
-                }
-                RegionOp::Keep { a, b } => {
-                    let (a, b) = (p(a), p(b));
-                    let spans = events_to_spans(&t.events, len);
-                    let kept: Vec<Span> =
-                        spans.into_iter().filter(|s| s.start >= a && s.start < b).collect();
-                    t.events = spans_to_events(&kept);
-                    t.auto.retain(|x| x.pos >= a && x.pos < b);
-                }
-                RegionOp::Duplicate { a, b, dest } => {
-                    let (a, b, dest) = (p(a), p(b), p(dest));
-                    let spans = events_to_spans(&t.events, len);
-                    t.events = spans_to_events(&dup_spans(&spans, a, b, dest, len));
-                    t.auto = dup_auto(&t.auto, a, b, dest, len);
-                }
-                RegionOp::Move { a, b, dest } => {
-                    let (a, b, dest) = (p(a), p(b), p(dest));
-                    let spans = events_to_spans(&t.events, len);
-                    let dup = dup_spans(&spans, a, b, dest, len);
-                    let kept: Vec<Span> =
-                        dup.into_iter().filter(|s| !(s.start >= a && s.start < b)).collect();
-                    t.events = spans_to_events(&kept);
-                    let mut au = dup_auto(&t.auto, a, b, dest, len);
-                    au.retain(|x| !(x.pos >= a && x.pos < b));
-                    t.auto = au;
-                }
-                RegionOp::Shift { delta } => {
-                    let d = (delta * sr).round() as i64;
-                    let spans = events_to_spans(&t.events, len);
-                    let shifted: Vec<Span> = spans
-                        .iter()
-                        .map(|s| {
-                            let dur = s.end.saturating_sub(s.start);
-                            let ns = wrap_pos(s.start as i64 + d, len);
-                            Span { start: ns, end: (ns + dur).min(len), note: s.note, vel: s.vel }
-                        })
-                        .collect();
-                    t.events = spans_to_events(&shifted);
-                    for x in &mut t.auto {
-                        x.pos = wrap_pos(x.pos as i64 + d, len);
-                    }
-                }
-                RegionOp::Transpose { a, b, semitones } => {
-                    let (a, b) = (p(a), p(b));
-                    let mut spans = events_to_spans(&t.events, len);
-                    for s in &mut spans {
-                        if s.start >= a && s.start < b {
-                            s.note = (s.note as i32 + semitones).clamp(0, 127) as u8;
-                        }
-                    }
-                    t.events = spans_to_events(&spans);
-                }
-                RegionOp::VelScale { a, b, factor } => {
-                    let (a, b) = (p(a), p(b));
-                    let mut spans = events_to_spans(&t.events, len);
-                    for s in &mut spans {
-                        if s.start >= a && s.start < b {
-                            s.vel = (s.vel * factor).clamp(0.0, 1.0);
-                        }
-                    }
-                    t.events = spans_to_events(&spans);
-                }
-                RegionOp::VelRamp { a, b, from, to } => {
-                    let (a, b) = (p(a), p(b));
-                    let span_len = (b.saturating_sub(a)).max(1) as f32;
-                    let mut spans = events_to_spans(&t.events, len);
-                    for s in &mut spans {
-                        if s.start >= a && s.start < b {
-                            let frac = (s.start - a) as f32 / span_len;
-                            s.vel = (from + (to - from) * frac).clamp(0.0, 1.0);
-                        }
-                    }
-                    t.events = spans_to_events(&spans);
-                }
-                RegionOp::Quantize { a, b } => {
-                    let (a, b) = (p(a), p(b));
-                    let mut spans = events_to_spans(&t.events, len);
-                    for s in &mut spans {
-                        if s.start >= a && s.start < b {
-                            let dur = s.end.saturating_sub(s.start);
-                            let q = ((s.start as f64 / grid).round() * grid).round() as u64;
-                            s.start = q.min(len.saturating_sub(1));
-                            s.end = (s.start + dur).min(len);
-                        }
-                    }
-                    t.events = spans_to_events(&spans);
-                }
-                RegionOp::Reverse { a, b } => {
-                    let (a, b) = (p(a), p(b));
-                    let mut spans = events_to_spans(&t.events, len);
-                    for s in &mut spans {
-                        if s.start >= a && s.start < b {
-                            // Mirror the span within [a, b), preserving duration.
-                            let (ns, ne) = (a + b.saturating_sub(s.end), a + b.saturating_sub(s.start));
-                            s.start = ns.min(len);
-                            s.end = ne.min(len);
-                        }
-                    }
-                    t.events = spans_to_events(&spans);
-                }
-            }
-            t.events.sort_by_key(|e| e.pos);
-            t.auto.sort_by_key(|a| a.pos);
+        let (sr, grid) = (self.sr, self.quant_grid());
+        if let Some(t) = self.tracks.get_mut(i) {
+            let len = t.period.max(1); // edits are relative to the track's period
+            apply_region_events(&mut t.events, len, &op, sr, grid);
+            apply_region_auto(&mut t.auto, len, &op, sr);
         }
-        let _ = pos;
+        self.mark_structure_dirty();
+    }
+
+    /// Fork a clip's notes from its track (no-op if already unique). No undo.
+    fn ensure_clip_unique(&mut self, index: usize) {
+        let Some(c) = self.arrangement.get(index) else { return };
+        if c.own_events.is_some() {
+            return;
+        }
+        let track = c.track;
+        let events = self.tracks.get(track).map(|t| t.events.clone()).unwrap_or_default();
+        self.arrangement[index].own_events = Some(events);
+    }
+
+    /// Chop/edit a clip's own notes (auto-forks first) with a region op.
+    fn clip_region_edit(&mut self, index: usize, op: RegionOp) {
+        if index >= self.arrangement.len() {
+            return;
+        }
+        self.push_undo();
+        self.ensure_clip_unique(index);
+        let (sr, grid) = (self.sr, self.quant_grid());
+        let track = self.arrangement[index].track;
+        let len = self.tracks.get(track).map(|t| t.period.max(1)).unwrap_or(1);
+        if let Some(ev) = self.arrangement[index].own_events.as_mut() {
+            apply_region_events(ev, len, &op, sr, grid);
+        }
         self.mark_structure_dirty();
     }
 
@@ -1650,9 +1635,9 @@ impl Studio {
         let recording = self.recording;
         let song = self.loop_len.unwrap_or(0);
         for k in 0..self.playlist.len() {
-            let (ti, start, length) = {
+            let (ti, start, length, transpose, velscale) = {
                 let c = &self.playlist[k];
-                (c.track, c.start, c.length)
+                (c.track, c.start, c.length, c.transpose, c.vel)
             };
             if ti >= self.tracks.len() {
                 continue;
@@ -1677,7 +1662,33 @@ impl Studio {
             if local == 0 {
                 reset_track_automation(&mut self.tracks[ti]);
             }
-            fire_track_notes(&mut self.tracks[ti], local);
+            // Collect the notes on this frame (from the clip's own events if it was
+            // made unique, else the track's), applying the clip's transpose/vel.
+            let to_fire: Vec<(bool, u8, f32)> = {
+                let events: &[Event] = match &self.playlist[k].own_events {
+                    Some(ev) => ev,
+                    None => &self.tracks[ti].events,
+                };
+                let lo = events.partition_point(|e| e.pos < local);
+                events[lo..]
+                    .iter()
+                    .take_while(|e| e.pos == local)
+                    .map(|e| match e.msg {
+                        EvMsg::On { note, vel } => {
+                            (true, (note as i32 + transpose).clamp(0, 127) as u8, (vel * velscale).clamp(0.0, 4.0))
+                        }
+                        EvMsg::Off { note } => (false, (note as i32 + transpose).clamp(0, 127) as u8, 0.0),
+                    })
+                    .collect()
+            };
+            let inst = &mut self.tracks[ti].inst;
+            for (on, note, vel) in to_fire {
+                if on {
+                    inst.note_on(note, vel);
+                } else {
+                    inst.note_off(note);
+                }
+            }
             fire_track_auto(&mut self.tracks[ti], local);
             self.playlist[k].was_active = true;
         }
@@ -1810,6 +1821,9 @@ impl Studio {
                 track: c.track,
                 start: c.start as f32 / self.sr,
                 length: c.length as f32 / self.sr,
+                transpose: c.transpose,
+                vel: c.vel,
+                unique: c.own_events.is_some(),
             })
             .collect();
         self.pending_structure = Some(views);
@@ -1851,19 +1865,6 @@ fn reset_track_automation(t: &mut Track) {
     }
     t.inst.set_engine(t.base_engine.clone());
     t.inst.set_bend(1.0); // bend resets each loop; @bend events re-apply
-}
-
-/// Fire a track's note events that land on local time `local` (binary search).
-fn fire_track_notes(t: &mut Track, local: u64) {
-    let lo = t.events.partition_point(|e| e.pos < local);
-    let mut j = lo;
-    while j < t.events.len() && t.events[j].pos == local {
-        match t.events[j].msg {
-            EvMsg::On { note, vel } => t.inst.note_on(note, vel),
-            EvMsg::Off { note } => t.inst.note_off(note),
-        }
-        j += 1;
-    }
 }
 
 /// Fire a track's automation moves landing on local time `local`, rebuilding the
@@ -1982,6 +1983,112 @@ fn dup_auto(auto: &[AutoEv], a: u64, b: u64, dest: u64, loop_len: u64) -> Vec<Au
 fn wrap_pos(p: i64, len: u64) -> u64 {
     let l = len as i64;
     (((p % l) + l) % l) as u64
+}
+
+/// Apply a [`RegionOp`] to a note-event list (period `len` samples). Shared by
+/// track editing and per-clip editing.
+fn apply_region_events(events: &mut Vec<Event>, len: u64, op: &RegionOp, sr: f32, grid: f64) {
+    let p = |secs: f32| ((secs * sr).round().max(0.0) as u64).min(len);
+    let mut spans = events_to_spans(events, len);
+    match *op {
+        RegionOp::Delete { a, b } => {
+            let (a, b) = (p(a), p(b));
+            spans.retain(|s| !(s.start >= a && s.start < b));
+        }
+        RegionOp::Keep { a, b } => {
+            let (a, b) = (p(a), p(b));
+            spans.retain(|s| s.start >= a && s.start < b);
+        }
+        RegionOp::Duplicate { a, b, dest } => {
+            spans = dup_spans(&spans, p(a), p(b), p(dest), len);
+        }
+        RegionOp::Move { a, b, dest } => {
+            let (a, b) = (p(a), p(b));
+            spans = dup_spans(&spans, a, b, p(dest), len);
+            spans.retain(|s| !(s.start >= a && s.start < b));
+        }
+        RegionOp::Shift { delta } => {
+            let d = (delta * sr).round() as i64;
+            for s in &mut spans {
+                let dur = s.end.saturating_sub(s.start);
+                s.start = wrap_pos(s.start as i64 + d, len);
+                s.end = (s.start + dur).min(len);
+            }
+        }
+        RegionOp::Transpose { a, b, semitones } => {
+            let (a, b) = (p(a), p(b));
+            for s in &mut spans {
+                if s.start >= a && s.start < b {
+                    s.note = (s.note as i32 + semitones).clamp(0, 127) as u8;
+                }
+            }
+        }
+        RegionOp::VelScale { a, b, factor } => {
+            let (a, b) = (p(a), p(b));
+            for s in &mut spans {
+                if s.start >= a && s.start < b {
+                    s.vel = (s.vel * factor).clamp(0.0, 1.0);
+                }
+            }
+        }
+        RegionOp::VelRamp { a, b, from, to } => {
+            let (a, b) = (p(a), p(b));
+            let span_len = (b.saturating_sub(a)).max(1) as f32;
+            for s in &mut spans {
+                if s.start >= a && s.start < b {
+                    let frac = (s.start - a) as f32 / span_len;
+                    s.vel = (from + (to - from) * frac).clamp(0.0, 1.0);
+                }
+            }
+        }
+        RegionOp::Quantize { a, b } => {
+            let (a, b) = (p(a), p(b));
+            for s in &mut spans {
+                if s.start >= a && s.start < b {
+                    let dur = s.end.saturating_sub(s.start);
+                    let q = ((s.start as f64 / grid).round() * grid).round() as u64;
+                    s.start = q.min(len.saturating_sub(1));
+                    s.end = (s.start + dur).min(len);
+                }
+            }
+        }
+        RegionOp::Reverse { a, b } => {
+            let (a, b) = (p(a), p(b));
+            for s in &mut spans {
+                if s.start >= a && s.start < b {
+                    let (ns, ne) = (a + b.saturating_sub(s.end), a + b.saturating_sub(s.start));
+                    s.start = ns.min(len);
+                    s.end = ne.min(len);
+                }
+            }
+        }
+    }
+    *events = spans_to_events(&spans);
+    events.sort_by_key(|e| e.pos);
+}
+
+/// Apply the range-moving region ops to an automation list (others are no-ops).
+fn apply_region_auto(auto: &mut Vec<AutoEv>, len: u64, op: &RegionOp, sr: f32) {
+    let p = |secs: f32| ((secs * sr).round().max(0.0) as u64).min(len);
+    match *op {
+        RegionOp::Delete { a, b } => auto.retain(|x| !(x.pos >= p(a) && x.pos < p(b))),
+        RegionOp::Keep { a, b } => auto.retain(|x| x.pos >= p(a) && x.pos < p(b)),
+        RegionOp::Duplicate { a, b, dest } => *auto = dup_auto(auto, p(a), p(b), p(dest), len),
+        RegionOp::Move { a, b, dest } => {
+            let (a, b) = (p(a), p(b));
+            let mut d = dup_auto(auto, a, b, p(dest), len);
+            d.retain(|x| !(x.pos >= a && x.pos < b));
+            *auto = d;
+        }
+        RegionOp::Shift { delta } => {
+            let d = (delta * sr).round() as i64;
+            for x in auto.iter_mut() {
+                x.pos = wrap_pos(x.pos as i64 + d, len);
+            }
+        }
+        _ => {}
+    }
+    auto.sort_by_key(|a| a.pos);
 }
 
 /// The numeric (`f64`-valued) top-level fields of a params object — the
@@ -2540,6 +2647,31 @@ mod tests {
     }
 
     #[test]
+    fn clip_layer_transpose_and_make_unique() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        assert_eq!(s.arrangement.len(), 1);
+
+        // Linked transpose + velocity.
+        s.handle(Command::SetClipLayer { index: 0, transpose: 5, vel: 0.5 });
+        assert_eq!(s.arrangement[0].transpose, 5);
+        assert!((s.arrangement[0].vel - 0.5).abs() < 1e-6);
+        assert!(s.arrangement[0].own_events.is_none(), "transpose stays linked");
+
+        // Make unique forks the notes; the base track is untouched.
+        let is_on = |e: &Event| matches!(e.msg, EvMsg::On { .. });
+        let base_ons = s.tracks[0].events.iter().filter(|e| is_on(e)).count();
+        s.handle(Command::MakeClipUnique { index: 0 });
+        assert!(s.arrangement[0].own_events.is_some());
+
+        // Chopping the clip empties its own notes but leaves the track intact.
+        s.handle(Command::ClipRegionEdit { index: 0, op: RegionOp::Delete { a: 0.0, b: 10.0 } });
+        let clip_ons = s.arrangement[0].own_events.as_ref().unwrap().iter().filter(|e| is_on(e)).count();
+        assert_eq!(clip_ons, 0, "clip notes deleted");
+        assert_eq!(s.tracks[0].events.iter().filter(|e| is_on(e)).count(), base_ons, "base track untouched");
+    }
+
+    #[test]
     fn play_mode_switches_between_loop_and_arrangement() {
         use crate::project::{ClipData, LoopData, LoopEvent, LoopTrack};
         let trk = LoopTrack {
@@ -2565,7 +2697,7 @@ mod tests {
         // A single track, placed by a clip starting at 0.2s.
         let data = LoopData {
             length: 0.4,
-            arrangement: vec![ClipData { track: 0, start: 0.2, length: 0.0 }],
+            arrangement: vec![ClipData { track: 0, start: 0.2, length: 0.0, transpose: 0, vel: 1.0, own_events: None }],
             tracks: vec![trk],
         };
 

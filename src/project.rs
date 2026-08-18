@@ -113,6 +113,18 @@ pub struct ClipData {
     pub start: f32,
     #[serde(default)]
     pub length: f32,
+    /// Per-clip edit layer: transpose (semitones) + velocity scale (default 1).
+    #[serde(default)]
+    pub transpose: i32,
+    #[serde(default = "one")]
+    pub vel: f32,
+    /// Forked notes ("make unique"); absent means the clip uses its track's.
+    #[serde(default)]
+    pub own_events: Option<Vec<LoopEvent>>,
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 /// A complete loop: its tracks (content) plus an arrangement of clips placing

@@ -2118,6 +2118,55 @@ impl App {
                 self.sel_clips.clear();
             }
         });
+
+        // Per-clip edit layer (one clip selected).
+        if self.sel_clips.len() == 1 {
+            let ci = self.sel_clips[0];
+            if let Some(c) = clips.get(ci).cloned() {
+                let tname = tracks.get(c.track).map(|t| t.name.clone()).unwrap_or_default();
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("Clip · {tname}:")).small());
+                    let mut tr = c.transpose;
+                    let mut vl = c.vel;
+                    let a = ui.add(egui::DragValue::new(&mut tr).range(-24..=24).suffix(" st"))
+                        .on_hover_text("Transpose this clip (stays linked to the loop)");
+                    let b = ui.add(egui::DragValue::new(&mut vl).range(0.0..=2.0).speed(0.02).prefix("×"))
+                        .on_hover_text("Velocity scale for this clip");
+                    if a.changed() || b.changed() {
+                        let _ = self.tx.send(Command::SetClipLayer { index: ci, transpose: tr, vel: vl });
+                    }
+                    ui.separator();
+                    if c.unique {
+                        ui.label(egui::RichText::new("🔓 unique notes").small());
+                    } else if ui
+                        .button("Make unique")
+                        .on_hover_text("Fork this clip's notes so edits don't touch the loop or other clips")
+                        .clicked()
+                    {
+                        let _ = self.tx.send(Command::MakeClipUnique { index: ci });
+                    }
+                });
+                // Chop this clip using the loop-editor selection, if it's on this track.
+                if let Some((st, sa, sb)) = self.sel {
+                    if st == c.track {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(format!("chop clip ⟦{sa:.2}–{sb:.2}s⟧:")).small());
+                            if ui.button("Crop").clicked() {
+                                let _ = self.tx.send(Command::ClipRegionEdit { index: ci, op: RegionOp::Keep { a: sa, b: sb } });
+                            }
+                            if ui.button("Delete").clicked() {
+                                let _ = self.tx.send(Command::ClipRegionEdit { index: ci, op: RegionOp::Delete { a: sa, b: sb } });
+                            }
+                            if ui.button("Reverse").clicked() {
+                                let _ = self.tx.send(Command::ClipRegionEdit { index: ci, op: RegionOp::Reverse { a: sa, b: sb } });
+                            }
+                        });
+                    } else {
+                        ui.label(egui::RichText::new("(select a range on this clip's track below to chop it)").weak().small());
+                    }
+                }
+            }
+        }
         ui.add_space(4.0);
     }
 
