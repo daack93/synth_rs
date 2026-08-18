@@ -55,6 +55,11 @@ pub struct ModeBuffer {
     pub freq: [f32; MAX_MODES],
     pub amp: [f32; MAX_MODES],
     pub decay: [f32; MAX_MODES],
+    /// If true the modes are **driven/sustained** (a blown wind instrument): they
+    /// hold at constant amplitude while the note is played and only fade on
+    /// release, and `decay` shapes the steady-state spectrum instead of ending
+    /// the note. Struck/plucked models (string, drum) leave this false.
+    pub sustain: bool,
 }
 
 impl Default for ModeBuffer {
@@ -64,6 +69,7 @@ impl Default for ModeBuffer {
             freq: [0.0; MAX_MODES],
             amp: [0.0; MAX_MODES],
             decay: [0.0; MAX_MODES],
+            sustain: false,
         }
     }
 }
@@ -71,6 +77,7 @@ impl Default for ModeBuffer {
 impl ModeBuffer {
     pub fn clear(&mut self) {
         self.n = 0;
+        self.sustain = false;
     }
 
     /// Append one mode. Silently ignores modes past `MAX_MODES`.

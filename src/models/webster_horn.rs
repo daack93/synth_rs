@@ -134,6 +134,7 @@ impl FtmModel for WebsterHorn {
 
     fn excite(&self, freq_hz: f32, vel: f32, sr: f32, out: &mut ModeBuffer) {
         out.clear();
+        out.sustain = true; // a horn is blown/driven — it holds while played
         let amp_strike = strike_amplitude(vel, self.play_magnitude, self.max_magnitude);
         if amp_strike <= 0.0 {
             return;

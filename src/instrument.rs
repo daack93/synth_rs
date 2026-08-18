@@ -14,6 +14,9 @@ use crate::models::{default_model, FtmModel, ModeBuffer, MAX_MODES};
 pub const MAX_VOICES: usize = 16;
 /// Ceiling on a mode's envelope, so a "swell" (negative decay) can't run away.
 const ENV_CAP: f32 = 4.0;
+/// For sustained (driven) modes, how strongly per-mode loss attenuates the
+/// held amplitude: `amp /= 1 + decay·SUSTAIN_SHAPE`. Small = subtle high rolloff.
+const SUSTAIN_SHAPE: f32 = 0.01;
 
 const TABLE_SIZE: usize = 4096;
 const TABLE_MASK: usize = TABLE_SIZE - 1;
@@ -272,11 +275,24 @@ impl Instrument {
         let n = buf.n.min(MAX_MODES);
         for i in 0..n {
             v.inc[i] = (buf.freq[i] / sr).max(0.0);
-            v.amp[i] = buf.amp[i];
-            v.dmul[i] = (-buf.decay[i] / sr).exp();
-            if i >= old_n {
-                v.phase[i] = 0.0;
-                v.env[i] = (-buf.decay[i] * elapsed).exp().min(ENV_CAP);
+            if buf.sustain {
+                // Driven/sustained (wind): hold the mode (no decay) while played;
+                // its loss becomes steady-state attenuation instead — a lossier
+                // mode is quieter, like a driven resonance. It fades on release
+                // via the voice gate.
+                v.amp[i] = buf.amp[i] / (1.0 + buf.decay[i].max(0.0) * SUSTAIN_SHAPE);
+                v.dmul[i] = 1.0;
+                if i >= old_n {
+                    v.phase[i] = 0.0;
+                    v.env[i] = 1.0;
+                }
+            } else {
+                v.amp[i] = buf.amp[i];
+                v.dmul[i] = (-buf.decay[i] / sr).exp();
+                if i >= old_n {
+                    v.phase[i] = 0.0;
+                    v.env[i] = (-buf.decay[i] * elapsed).exp().min(ENV_CAP);
+                }
             }
         }
         v.n_modes = n;
@@ -378,6 +394,29 @@ mod tests {
         let end = render_rms(&mut inst, 0.1);
         assert!(start > 0.01, "attack too quiet: {start}");
         assert!(end < start, "expected decay: {start} -> {end}");
+    }
+
+    #[test]
+    fn wind_sustains_while_string_decays() {
+        use crate::models::pure_string::PureString;
+        use crate::models::webster_horn::WebsterHorn;
+        let hold = |model: Box<dyn FtmModel>| {
+            let mut inst = Instrument::with_config(
+                48_000.0,
+                make_sine_table(),
+                model,
+                EngineParams::default(),
+            );
+            inst.note_on(60, 1.0);
+            let start = render_rms(&mut inst, 0.05);
+            let _ = render_rms(&mut inst, 2.0); // hold, no note-off
+            let end = render_rms(&mut inst, 0.05);
+            (start, end)
+        };
+        let (s0, s1) = hold(Box::new(PureString::default()));
+        assert!(s1 < s0 * 0.5, "plucked string decays while held ({s0} -> {s1})");
+        let (h0, h1) = hold(Box::new(WebsterHorn::default()));
+        assert!(h1 > h0 * 0.7, "blown horn sustains while held ({h0} -> {h1})");
     }
 
     #[test]

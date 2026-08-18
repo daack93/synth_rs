@@ -25,6 +25,10 @@ whole app is built on:
 Adding a new mode (a 2-D drum head, a 3-D solid, a different excitation) is just
 a new file implementing `FtmModel` and one line in the registry.
 
+Models can be **struck** (an impulse rings and decays — strings, drums) or
+**sustained/driven** (a blown wind holds while the note is played and its loss
+shapes the steady-state spectrum — the horn), set by a flag on the modal bank.
+
 ## Playing it
 
 ```sh
