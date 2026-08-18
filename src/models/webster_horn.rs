@@ -28,6 +28,17 @@ use super::{strike_amplitude, unbounded_slider, FtmModel, ModeBuffer, TICK_RATE}
 const TWO_PI: f64 = std::f64::consts::TAU;
 const SQRT_2: f64 = std::f64::consts::SQRT_2;
 
+/// Wavefront geometry used to build the horn potential.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Wavefront {
+    /// Flat cross-sectional discs (classic Webster) — `V = r''/r`.
+    Planar,
+    /// Curved spherical-cap wavefronts — `V = (√S)''/√S`, cap area
+    /// `S = 2π r²/(1 + cos θ)`, flare angle `θ = arctan r'`. More accurate high
+    /// partials and bell behaviour, especially where the flare is steep.
+    Spherical,
+}
+
 /// Boundary conditions at the two ends of the bore.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Boundary {
@@ -74,6 +85,13 @@ pub struct WebsterHorn {
     pub key_tracks_pitch: bool,
     /// End conditions: open both ends, or a closed (brass) mouthpiece.
     pub boundary: Boundary,
+    /// Wavefront geometry: flat discs, or curved spherical caps.
+    #[serde(default = "default_wavefront")]
+    pub wavefront: Wavefront,
+}
+
+fn default_wavefront() -> Wavefront {
+    Wavefront::Planar
 }
 
 impl Default for WebsterHorn {
@@ -96,6 +114,7 @@ impl Default for WebsterHorn {
             max_magnitude: 2500.0,
             key_tracks_pitch: true,
             boundary: Boundary::Open,
+            wavefront: Wavefront::Planar,
         }
     }
 }
@@ -125,12 +144,51 @@ impl FtmModel for WebsterHorn {
         let n = self.resolution.clamp(16, 512);
         let h = l / n as f64;
         let inv_h2 = 1.0 / (h * h);
-        let v_at = |x: f64| {
-            let r = r1 + r2 * x + r3 * x * x;
-            if r.abs() > 1e-9 {
-                2.0 * r3 / r
-            } else {
-                0.0
+
+        // The horn potential V(x) and the throat coefficient β = (√area)'/(√area)|₀.
+        // Planar: flat discs, V = r''/r = 2r3/r (analytic). Spherical: curved
+        // wavefronts of cap area S = 2π r²/(1+cos θ), θ = arctan r', so
+        // V = (√S)''/√S computed numerically on the grid.
+        let (v_arr, beta): (Vec<f64>, f64) = match self.wavefront {
+            Wavefront::Planar => {
+                let v = (0..=n)
+                    .map(|i| {
+                        let x = i as f64 * h;
+                        let r = r1 + r2 * x + r3 * x * x;
+                        if r.abs() > 1e-9 {
+                            2.0 * r3 / r
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                let b = if r1.abs() > 1e-9 { r2 / r1 } else { 0.0 };
+                (v, b)
+            }
+            Wavefront::Spherical => {
+                // g = √S = √(2π)·r / √(1 + cos θ), cos θ = 1/√(1+r'²).
+                let g = |x: f64| {
+                    let r = (r1 + r2 * x + r3 * x * x).abs().max(1e-9);
+                    let rp = r2 + 2.0 * r3 * x;
+                    let cos_t = 1.0 / (1.0 + rp * rp).sqrt();
+                    TWO_PI.sqrt() * r / (1.0 + cos_t).sqrt()
+                };
+                let gvals: Vec<f64> = (0..=n).map(|i| g(i as f64 * h)).collect();
+                let v: Vec<f64> = (0..=n)
+                    .map(|i| {
+                        let gi = gvals[i].max(1e-12);
+                        let gpp = if i == 0 {
+                            (gvals[0] - 2.0 * gvals[1] + gvals[2]) * inv_h2
+                        } else if i == n {
+                            (gvals[n] - 2.0 * gvals[n - 1] + gvals[n - 2]) * inv_h2
+                        } else {
+                            (gvals[i - 1] - 2.0 * gvals[i] + gvals[i + 1]) * inv_h2
+                        };
+                        gpp / gi
+                    })
+                    .collect();
+                let b = (gvals[1] - gvals[0]) / (h * gvals[0].max(1e-12)); // g'(0)/g(0)
+                (v, b)
             }
         };
 
@@ -140,20 +198,18 @@ impl FtmModel for WebsterHorn {
         //
         //  * Open:  unknowns are interior nodes i = 1..n-1 (x = i·h).
         //  * Brass: the throat node i = 0 is an unknown with a Robin condition
-        //    ψ'(0) = (r'(0)/r(0))·ψ(0) = (r2/r1)·ψ(0). The one-sided second
-        //    difference makes row 0 asymmetric; a diagonal similarity restores
-        //    symmetry (off-diagonal → √2/h², eigenvector[0] scales by √2).
+        //    ψ'(0) = β·ψ(0). The one-sided second difference makes row 0
+        //    asymmetric; a diagonal similarity restores symmetry (off-diagonal →
+        //    √2/h², eigenvector[0] scales by √2).
         let brass = self.boundary == Boundary::Brass;
         let (m, node_start) = if brass { (n, 0usize) } else { (n - 1, 1usize) };
         let mut diag = vec![0.0f64; m];
         let mut off = vec![inv_h2; m];
         for j in 0..m {
-            let x = (j + node_start) as f64 * h;
-            diag[j] = -2.0 * inv_h2 - v_at(x);
+            diag[j] = -2.0 * inv_h2 - v_arr[j + node_start];
         }
         if brass {
-            let beta = if r1.abs() > 1e-9 { r2 / r1 } else { 0.0 }; // r'(0)/r(0)
-            diag[0] = -2.0 * (1.0 + h * beta) * inv_h2 - v_at(0.0);
+            diag[0] = -2.0 * (1.0 + h * beta) * inv_h2 - v_arr[0];
             if m > 1 {
                 off[1] = SQRT_2 * inv_h2; // symmetrized (0,1) off-diagonal
             }
@@ -268,6 +324,21 @@ impl FtmModel for WebsterHorn {
                     .changed();
                 changed |= ui
                     .selectable_value(&mut self.boundary, Boundary::Brass, "Brass (closed throat)")
+                    .changed();
+            });
+        egui::ComboBox::from_label("Wavefront")
+            .selected_text(match self.wavefront {
+                Wavefront::Planar => "Planar (flat discs)",
+                Wavefront::Spherical => "Spherical (curved)",
+            })
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(&mut self.wavefront, Wavefront::Planar, "Planar (flat discs)")
+                    .on_hover_text("Classic Webster: flat cross-sectional discs.")
+                    .changed();
+                changed |= ui
+                    .selectable_value(&mut self.wavefront, Wavefront::Spherical, "Spherical (curved)")
+                    .on_hover_text("Curved spherical-cap wavefronts — more accurate high partials where the flare is steep.")
                     .changed();
             });
         ui.add_space(4.0);
@@ -592,6 +663,26 @@ mod tests {
         let rad = WebsterHorn { radiation: 2.0, depth: 8, ..WebsterHorn::default() };
         rad.excite(220.0, 1.0, 48_000.0, &mut buf);
         assert!(buf.decay[buf.n - 1] > base_hi, "radiation speeds up highs");
+    }
+
+    #[test]
+    fn spherical_wavefront_shifts_flared_horn() {
+        let mut buf = ModeBuffer::default();
+        // Use a high partial — the curvature correction is largest up top.
+        let ratio = |h: &WebsterHorn, buf: &mut ModeBuffer| {
+            h.excite(220.0, 1.0, 48_000.0, buf);
+            buf.freq[buf.n - 1] / buf.freq[0]
+        };
+        // Cylinder (no flare): spherical caps == flat discs.
+        let cyl_p = WebsterHorn { r1: 1.0, r2: 0.0, r3: 0.0, depth: 6, wavefront: Wavefront::Planar, ..WebsterHorn::default() };
+        let cyl_s = WebsterHorn { wavefront: Wavefront::Spherical, ..cyl_p.clone() };
+        assert!((ratio(&cyl_p, &mut buf) - ratio(&cyl_s, &mut buf)).abs() < 1e-3, "cylinder unchanged");
+
+        // Flared horn: the curved wavefronts move the partial ratios.
+        let flr_p = WebsterHorn { r1: 1.0, r2: 0.0, r3: 3.0, depth: 6, wavefront: Wavefront::Planar, ..WebsterHorn::default() };
+        let flr_s = WebsterHorn { wavefront: Wavefront::Spherical, ..flr_p.clone() };
+        let (fp, fs) = (ratio(&flr_p, &mut buf), ratio(&flr_s, &mut buf));
+        assert!((fp - fs).abs() > 1e-2, "flared horn: spherical shifts partials ({fp} vs {fs})");
     }
 
     #[test]

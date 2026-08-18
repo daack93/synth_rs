@@ -118,7 +118,9 @@ leads — as starting points to tune by ear. **★ Factory** restores/refreshes 
   and choose **Open** ends or a **Brass** closed mouthpiece (odd-harmonic base
   the flare fills in). Physically-motivated losses: **Keefe** viscothermal wall
   loss (∝ √f, stronger in narrow bores — warm/stuffed tone) and **radiation**
-  loss at the bell (∝ f² — highs escape, lows sustain).
+  loss at the bell (∝ f² — highs escape, lows sustain). Wavefronts can be flat
+  discs (**Planar**) or curved spherical caps (**Spherical**, `S = 2π r²/(1+cos θ)`)
+  for more accurate high partials where the flare is steep.
 - **Basic Wave** — band-limited triangle / sawtooth; the framework's reference
   oscillator.
 
