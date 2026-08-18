@@ -109,6 +109,11 @@ as starting points to tune by ear. **★ Factory** restores them.
   Laplacian ∇², so the modes are the inharmonic Bessel-zero series (1 : 1.59 :
   2.14 : 2.30 …). Controls for wave speed, stiffness, damping, radius, and
   strike position (centre → rim).
+- **Quadratic Webster Horn** — a flaring air column via Webster's horn equation.
+  A quadratic bore `r(x) = r1 + r2·x + r3·x²` becomes a geometric potential
+  `V(x) = 2r3/r(x)`; the synth numerically solves the eigenproblem
+  `φ'' − V(x)φ = λφ` for the resonances (its own symmetric-tridiagonal
+  eigensolver). Dial the three radius coefficients, length, and blow position.
 - **Basic Wave** — band-limited triangle / sawtooth; the framework's reference
   oscillator.
 

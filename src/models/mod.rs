@@ -16,6 +16,7 @@ pub mod basic_wave;
 pub mod drum_membrane;
 pub mod musical_string;
 pub mod pure_string;
+pub mod webster_horn;
 
 /// Maximum partials a single voice can hold (hard array bound).
 pub const MAX_MODES: usize = 512;
@@ -116,6 +117,7 @@ pub fn model_from_id(id: &str, params: &serde_json::Value) -> Option<Box<dyn Ftm
         "musical_string" => boxed::<musical_string::MusicalString>(params),
         "pure_string" => boxed::<pure_string::PureString>(params),
         "drum_membrane" => boxed::<drum_membrane::DrumMembrane>(params),
+        "webster_horn" => boxed::<webster_horn::WebsterHorn>(params),
         _ => None,
     }
 }
@@ -132,6 +134,7 @@ pub fn registry() -> Vec<Box<dyn FtmModel>> {
         Box::new(musical_string::MusicalString::default()),
         Box::new(pure_string::PureString::default()),
         Box::new(drum_membrane::DrumMembrane::default()),
+        Box::new(webster_horn::WebsterHorn::default()),
         Box::new(basic_wave::BasicWave::default()),
     ]
 }
