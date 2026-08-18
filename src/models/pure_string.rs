@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{strike_amplitude, unbounded_slider, FtmModel, ModeBuffer, TICK_RATE};
+use super::{strike_amplitude, unbounded_slider, FtmModel, ModeBuffer, PitchMode, TICK_RATE};
 
 const PI: f32 = std::f32::consts::PI;
 const TWO_PI: f32 = std::f32::consts::TAU;
@@ -28,6 +28,10 @@ pub struct PureString {
     pub max_magnitude: f32,     // MAX_MAGNITUDE
     /// If true the key sets pitch; if false, c/2l does (original air-guitar).
     pub key_tracks_pitch: bool,
+    /// How the key sets pitch: transpose a fixed string, or shorten the string
+    /// for higher notes (note-dependent inharmonicity + decay).
+    #[serde(default)]
+    pub pitch_mode: PitchMode,
 }
 
 impl Default for PureString {
@@ -46,6 +50,7 @@ impl Default for PureString {
             play_magnitude: 0.0, // orig 2000; 0 keeps soft keypresses audible
             max_magnitude: 2500.0,
             key_tracks_pitch: true,
+            pitch_mode: PitchMode::Transpose,
         }
     }
 }
@@ -70,17 +75,31 @@ impl FtmModel for PureString {
             return; // below play threshold — silent, like a gentle shake
         }
 
-        // Length-normalize exactly as the firmware did.
-        let l = self.string_length;
-        let l_safe = if l.abs() < 1e-3 { 1e-3 } else { l };
-        let d3 = self.freq_dep_damping / (l_safe * l_safe);
-        let c = self.prop_speed / l_safe;
-        let s = self.stiffness / l_safe;
+        // Reference length; in Physical mode the string shortens for higher
+        // notes so it matches Transpose at C4 and gets more inharmonic above it.
+        let l_ref = self.string_length;
+        let l_ref_safe = if l_ref.abs() < 1e-3 { 1e-3 } else { l_ref };
+        let (l_freq, decay_scale) =
+            if self.key_tracks_pitch && self.pitch_mode == PitchMode::Physical {
+                let ratio = (super::REF_PITCH_HZ / freq_hz.max(1.0)).clamp(0.02, 50.0);
+                // Full length scaling for pitch/inharmonicity; a gentler power for
+                // the decay so highs speed up without vanishing (the raw 1/l² is
+                // too aggressive).
+                (l_ref_safe * ratio, (freq_hz.max(1.0) / super::REF_PITCH_HZ).powf(0.6))
+            } else {
+                (l_ref_safe, 1.0)
+            };
 
-        let om_m = PI * PI * d3 / 2.0; // sigma[m] = om_m*m^2 + om_c
-        let om_c = -self.damping / 2.0;
+        // Frequency (inharmonicity) terms use the note's length.
+        let c = self.prop_speed / l_freq;
+        let s = self.stiffness / l_freq;
         let wm_a = (PI * s).powi(4); // W^2 = wm_a*m^4 + wm_b*m^2 - O^2
         let wm_b = (c * PI).powi(2);
+        // Decay terms use the reference length; Physical mode scales the whole
+        // decay by `decay_scale` instead.
+        let d3 = self.freq_dep_damping / (l_ref_safe * l_ref_safe);
+        let om_m = PI * PI * d3 / 2.0; // sigma[m] = om_m*m^2 + om_c
+        let om_c = -self.damping / 2.0;
 
         let damp_per = self.damp_period.max(1e-3);
         let n_req = self.depth.clamp(1, super::MAX_MODES);
@@ -133,7 +152,7 @@ impl FtmModel for PureString {
             // The firmware multiplied D by O = exp(sigma/DAMP_PERIOD) every
             // DAMP_PERIOD board-ticks; over a second that is a per-second rate of
             // sigma*TICK_RATE/DAMP_PERIOD^2. decay = -that (sigma <= 0 => decay >= 0).
-            let decay = -sig[i] * TICK_RATE / (damp_per * damp_per);
+            let decay = -sig[i] * TICK_RATE / (damp_per * damp_per) * decay_scale;
             out.push(freq, kk[i] * norm, decay);
         }
     }
@@ -213,6 +232,23 @@ impl FtmModel for PureString {
             .checkbox(&mut self.key_tracks_pitch, "Key tracks pitch")
             .on_hover_text("Off: c/2l sets the pitch and the key transposes — the original air-guitar behavior.")
             .changed();
+        ui.add_enabled_ui(self.key_tracks_pitch, |ui| {
+            egui::ComboBox::from_label("Pitch mode")
+                .selected_text(match self.pitch_mode {
+                    PitchMode::Transpose => "Transpose",
+                    PitchMode::Physical => "Physical length",
+                })
+                .show_ui(ui, |ui| {
+                    changed |= ui
+                        .selectable_value(&mut self.pitch_mode, PitchMode::Transpose, "Transpose")
+                        .on_hover_text("One string stretched to each note — uniform timbre.")
+                        .changed();
+                    changed |= ui
+                        .selectable_value(&mut self.pitch_mode, PitchMode::Physical, "Physical length")
+                        .on_hover_text("Shorten the string for higher notes: more inharmonic and faster-decaying up top.")
+                        .changed();
+                });
+        });
         changed
     }
 
@@ -242,6 +278,28 @@ mod tests {
         let edge = PureString { pluck_pos: 0.12, depth: 8, ..PureString::default() };
         edge.excite(220.0, 1.0, 48_000.0, &mut buf);
         assert!(buf.amp[1].abs() > 1e-3, "even mode present when plucked off-center");
+    }
+
+    #[test]
+    fn physical_mode_stretches_high_notes() {
+        let mut buf = ModeBuffer::default();
+        let ratio = |m: &PureString, f: f32, buf: &mut ModeBuffer| {
+            m.excite(f, 1.0, 48_000.0, buf);
+            buf.freq[1] / buf.freq[0]
+        };
+        // Real stiffness so inharmonicity is visible.
+        let phys = PureString { pitch_mode: PitchMode::Physical, stiffness: 8.0, pluck_pos: 0.12, depth: 8, ..PureString::default() };
+        let r_low = ratio(&phys, 261.63, &mut buf); // C4
+        let r_high = ratio(&phys, 1046.5, &mut buf); // C6
+        assert!(r_high > r_low + 1e-3, "physical: high notes more inharmonic ({r_low} -> {r_high})");
+
+        // Transpose mode: the partial ratio is the same at every pitch.
+        let trans = PureString { pitch_mode: PitchMode::Transpose, stiffness: 8.0, pluck_pos: 0.12, depth: 8, ..PureString::default() };
+        let t_low = ratio(&trans, 261.63, &mut buf);
+        let t_high = ratio(&trans, 1046.5, &mut buf);
+        assert!((t_low - t_high).abs() < 1e-4, "transpose: ratio is note-independent");
+        // Physical matches Transpose at the C4 reference.
+        assert!((r_low - t_low).abs() < 1e-3, "physical == transpose at C4 ({r_low} vs {t_low})");
     }
 
     #[test]

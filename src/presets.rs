@@ -79,6 +79,7 @@ pub fn factory() -> Vec<Preset> {
             play_magnitude: 0.0,
             max_magnitude: 2500.0,
             key_tracks_pitch: true,
+            ..PureString::default()
         }
     }
     fn eng(gain: f32, attack_ms: f32, release_ms: f32) -> EngineParams {

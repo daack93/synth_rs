@@ -17,7 +17,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{strike_amplitude, unbounded_slider, FtmModel, ModeBuffer, TICK_RATE};
+use super::{strike_amplitude, unbounded_slider, FtmModel, ModeBuffer, PitchMode, TICK_RATE};
 
 const PI: f64 = std::f64::consts::PI;
 const TWO_PI: f32 = std::f32::consts::TAU;
@@ -45,6 +45,10 @@ pub struct DrumMembrane {
     pub max_magnitude: f32,
     /// If true the key sets the pitch (the fundamental (0,1) mode lands on it).
     pub key_tracks_pitch: bool,
+    /// Transpose a fixed drum, or resize it per note (bigger = lower): higher
+    /// notes become more inharmonic and decay faster.
+    #[serde(default)]
+    pub pitch_mode: PitchMode,
 }
 
 impl Default for DrumMembrane {
@@ -62,6 +66,7 @@ impl Default for DrumMembrane {
             play_magnitude: 0.0,
             max_magnitude: 2500.0,
             key_tracks_pitch: true,
+            pitch_mode: PitchMode::Transpose,
         }
     }
 }
@@ -95,6 +100,18 @@ impl FtmModel for DrumMembrane {
         let damp_per = self.damp_period.max(1e-3) as f64;
         let n_req = self.depth.clamp(1, super::MAX_MODES);
 
+        // Physical mode resizes the head per note (bigger = lower), matching
+        // Transpose at C4. The frequency terms use the note's radius; decay keeps
+        // the fixed-radius shape and speeds up gently with pitch.
+        let (radius_freq, decay_scale) =
+            if self.key_tracks_pitch && self.pitch_mode == PitchMode::Physical {
+                let f0 = freq_hz.max(1.0) as f64;
+                let fref = super::REF_PITCH_HZ as f64;
+                (radius * (fref / f0).clamp(0.02, 50.0), (f0 / fref).powf(0.6))
+            } else {
+                (radius, 1.0)
+            };
+
         // Enumerate the `n_req` lowest-frequency modes. α_{ν,j} grows with both
         // ν and j, so a triangular grid of candidates covers the lowest ones.
         let span = ((2 * n_req) as f64).sqrt().ceil() as u32 + 6;
@@ -117,13 +134,14 @@ impl FtmModel for DrumMembrane {
         let mut modes: Vec<Mode> = Vec::with_capacity(cands.len());
         let mut amp_sum = 0.0f64;
         for &(alpha, nu) in &cands {
-            let k = alpha / radius;
-            let k2 = k * k;
-            let k4 = k2 * k2;
+            let kf = alpha / radius_freq; // frequency wavenumber (note's radius)
+            let kf2 = kf * kf;
+            let kf4 = kf2 * kf2;
+            let kd2 = (alpha / radius).powi(2); // fixed-radius wavenumber for decay
             // sigma < 0 for a decaying mode (d3 negative dominates at high k).
-            let sigma = (d3 * k2 - d1) / 2.0;
+            let sigma = (d3 * kd2 - d1) / 2.0;
             let o_lin = (sigma / damp_per).exp(); // ~1, mirrors the firmware O[i]
-            let w2 = (c * c * k2 + s_stiff.powi(4) * k4 - o_lin * o_lin).max(0.0);
+            let w2 = (c * c * kf2 + s_stiff.powi(4) * kf4 - o_lin * o_lin).max(0.0);
             let k_weight = bessel_jn(nu, alpha * rho);
             amp_sum += k_weight.abs();
             modes.push(Mode {
@@ -155,7 +173,7 @@ impl FtmModel for DrumMembrane {
             }
             // Same decay mapping as the string: sigma applied every DAMP_PERIOD
             // board-tick => per-second rate −sigma·TICK_RATE/DAMP_PERIOD².
-            let decay = -m.sigma * TICK_RATE as f64 / (damp_per * damp_per);
+            let decay = -m.sigma * TICK_RATE as f64 / (damp_per * damp_per) * decay_scale;
             out.push(freq as f32, (m.k_weight * norm) as f32, decay as f32);
         }
     }
@@ -226,6 +244,23 @@ impl FtmModel for DrumMembrane {
             .checkbox(&mut self.key_tracks_pitch, "Key tracks pitch")
             .on_hover_text("On: the fundamental (0,1) mode lands on the played key.")
             .changed();
+        ui.add_enabled_ui(self.key_tracks_pitch, |ui| {
+            egui::ComboBox::from_label("Pitch mode")
+                .selected_text(match self.pitch_mode {
+                    PitchMode::Transpose => "Transpose",
+                    PitchMode::Physical => "Physical size",
+                })
+                .show_ui(ui, |ui| {
+                    changed |= ui
+                        .selectable_value(&mut self.pitch_mode, PitchMode::Transpose, "Transpose")
+                        .on_hover_text("One drum stretched to each note — uniform timbre.")
+                        .changed();
+                    changed |= ui
+                        .selectable_value(&mut self.pitch_mode, PitchMode::Physical, "Physical size")
+                        .on_hover_text("Resize the head per note (bigger = lower): more inharmonic, faster-decaying highs.")
+                        .changed();
+                });
+        });
         changed
     }
 

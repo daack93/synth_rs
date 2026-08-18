@@ -26,6 +26,27 @@ pub const MAX_MODES: usize = 512;
 /// board-ticks onto real seconds the way they did on hardware.
 pub const TICK_RATE: f32 = 10_000.0;
 
+/// Reference pitch (C4). Physical-pitch mode scales the geometry so it matches
+/// transpose mode at this note and diverges from there.
+pub const REF_PITCH_HZ: f32 = 261.625_57;
+
+/// How pitch is realized for a played note.
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PitchMode {
+    /// Transpose a fixed modal template to the note — uniform timbre across the
+    /// keyboard.
+    Transpose,
+    /// Modulate the geometry (string length / drum size) with pitch, so higher
+    /// notes are physically more inharmonic and decay faster.
+    Physical,
+}
+
+impl Default for PitchMode {
+    fn default() -> Self {
+        PitchMode::Transpose
+    }
+}
+
 /// A bank of modes: parallel arrays of frequency (Hz), linear amplitude, and
 /// per-second decay rate. `env(t) = amp * exp(-decay * t)`; a negative `decay`
 /// is a swell (the engine bounds it so it can't run away).
