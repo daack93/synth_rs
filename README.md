@@ -2,13 +2,132 @@
 
 A real-time physical-modeling synthesizer in Rust — a desktop re-imagining of a
 2014 embedded "electric air guitar" that generated audio from a plucked-string
-model (the Function Transformation Method).
+model (the **Function Transformation Method**, FTM). The original derived pitch
+and strike from an accelerometer; here a keyboard does.
 
-Work lands in reviewable pieces:
+## Architecture
 
-1. **Base framework** — audio + MIDI + on-screen keyboard, the generic modal
-   engine, and a basic triangle/saw oscillator plugin.
-2. **Musical String** plugin — a music-friendly plucked string.
-3. **Pure String** plugin — the firmware-faithful FTM string.
+The FTM represents any vibrating object — a string, a membrane, a solid — as a
+finite sum of exponentially-decaying sinusoids (*modes*). That is the seam the
+whole app is built on:
 
-More to come (2-D membranes, 3-D solids).
+- **`synth`** — a generic polyphonic engine. It owns voices, phase accumulators,
+  the amplitude envelope, voice-stealing, and live parameter rebuilds. It knows
+  nothing about strings or drums.
+- **`models`** — pluggable synthesis "modes". Each plugin implements one trait,
+  [`FtmModel`], whose only job is to fill a `ModeBuffer` with the
+  `(frequency, amplitude, decay)` of each mode for a struck note. The engine
+  plays whatever bank the active plugin produced.
+- **`audio`** / **`midi`** — `cpal` output and `midir` input.
+- **`main`** — the `egui` UI: model picker, per-model parameters, an on-screen
+  piano, and computer-keyboard / MIDI input.
+
+Adding a new mode (a 2-D drum head, a 3-D solid, a different excitation) is just
+a new file implementing `FtmModel` and one line in the registry.
+
+Models can be **struck** (an impulse rings and decays — strings, drums) or
+**sustained/driven** (a blown wind holds while the note is played and its loss
+shapes the steady-state spectrum — the horn), set by a flag on the modal bank.
+
+## Playing it
+
+```sh
+cargo run --release
+```
+
+- **Computer keys:** `A W S E D F T G Y H U J K`; `Z` / `X` shift octave.
+- **Mouse:** click the on-screen piano (vertical position sets velocity).
+- **MIDI:** pick your device from the dropdown (Rescan if you plug in later).
+
+## Tempo & grid
+
+The transport has a **Tempo** row: BPM, beats-per-bar, a **Loop** length in bars
+(or *Free*), a **Quantize** grid (Off / ¼ / ⅛ / ⅛T / 1⁄16), a metronome **🔔 Click**,
+and **Count-in**. With a fixed bar length, recording auto-closes exactly on the
+bar; quantize snaps recorded notes to the grid so takes lock together. Tempo
+settings save with the project.
+
+## Looper
+
+Build up a jam from layered loops, shown as tracks below the keyboard. The
+**spacebar is the pedal**:
+
+- **Tap** — the mode's primary action.
+- **Hold ~0.4 s** — Stop (keep the loops).
+- **Hold ~1.5 s** — Reset (clear everything).
+
+Two modes (dropdown):
+
+- **Pedal cycle** — tap: record → close loop & play → stop → play… Add more
+  layers with **＋ Rec track** (records one pass into a new track).
+- **Overdub** — tap records the base loop; each later tap finalizes the current
+  take and starts a new track, so you can layer hands-free.
+
+It's **multi-timbral**: a track remembers the instrument it was recorded with,
+so you can lay a bass line, switch to the guitar preset, and overdub on top.
+Each track row has mute, a note timeline with a moving playhead, delete, and an
+**✎ edit** button — pick a track and the right-hand panel edits *that track's*
+instrument (model, parameters, engine, or load a preset onto it) live while the
+loop keeps playing.
+
+## Projects
+
+The **Project** bar along the bottom saves your work. Record a loop, give it a
+name, and **＋ Add loop** captures it (all tracks — their note events *and*
+instruments) into the project. Build up several loops, then **💾 Save** the
+project to a JSON file (in `projects/`, or `$FTM_SYNTH_PROJECTS`). **Open…**
+reloads a project; **▶** loads a saved loop back into the tracks to keep playing
+or editing. Loop timings are stored in seconds, so projects are portable across
+sample rates.
+
+### Song arrangement
+
+The **Song** row builds a linear arrangement: pick a loop, set a repeat count,
+and **＋ Section** adds it to the timeline (reorder with ← →, remove with ✕).
+**▶ Play song** runs the sections straight through — loop A, then loop B ×4, then
+loop C ×4 … — switching at loop boundaries (sample-accurate); the playing section
+is highlighted. The arrangement saves with the project.
+
+## Presets
+
+Build a library of instruments in the top bar. A **preset** is a model + its
+parameters + engine settings + a name, saved as one JSON file per preset. Type a
+name and **Save**; pick from the dropdown to **Load**; **Delete** removes the
+saved file. Presets live in `presets/` under the working directory, or wherever
+`$FTM_SYNTH_PRESETS` points.
+
+On first run the folder is seeded with a **factory kit** spanning every model —
+strings (basses, guitars, piano, banjo, harp), a couple of musical-string plucks,
+drums (tom, kick, timpani), horns (trumpet, French horn, didgeridoo), and simple
+leads — as starting points to tune by ear. **★ Factory** restores/refreshes them.
+
+## Models
+
+- **Musical String** — a plucked string with music-friendly controls
+  (inharmonicity, decay time, a pluck-position sweep from triangle to saw).
+- **Pure String** — the FTM string driven by the exact `#define`s from the 2014
+  `main.h` (stiffness, propagation speed, damping, frequency-dependent damping,
+  length, `DEPTH`, `DAMP_PERIOD`, `TIME_SCALE`) plus a continuous pluck position
+  (the firmware's triangle and saw are its center and near-end extremes) and the
+  accelerometer velocity mapping.
+- **Drum (2D membrane)** — a circular drumhead: the same FTM equations with the
+  Laplacian ∇², so the modes are the inharmonic Bessel-zero series (1 : 1.59 :
+  2.14 : 2.30 …). Controls for wave speed, stiffness, damping, radius, and
+  strike position (centre → rim).
+- **Quadratic Webster Horn** — a flaring air column via Webster's horn equation.
+  A quadratic bore `r(x) = r1 + r2·x + r3·x²` becomes a geometric potential
+  `V(x) = 2r3/r(x)`; the synth numerically solves the eigenproblem
+  `φ'' − V(x)φ = λφ` for the resonances (its own symmetric-tridiagonal
+  eigensolver). Dial the three radius coefficients, length, and blow position,
+  and choose **Open** ends or a **Brass** closed mouthpiece (odd-harmonic base
+  the flare fills in). Physically-motivated losses: **Keefe** viscothermal wall
+  loss (∝ √f, stronger in narrow bores — warm/stuffed tone) and **radiation**
+  loss at the bell (∝ f² — highs escape, lows sustain). Wavefronts can be flat
+  discs (**Planar**) or curved spherical caps (**Spherical**, `S = 2π r²/(1+cos θ)`)
+  for more accurate high partials where the flare is steep.
+- **Basic Wave** — band-limited triangle / sawtooth; the framework's reference
+  oscillator.
+
+## Roadmap
+
+- 3-D solid FTM models.
