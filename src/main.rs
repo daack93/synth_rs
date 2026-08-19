@@ -1441,7 +1441,7 @@ impl App {
             changed |= ui.checkbox(&mut t.metronome, "🔔 Click").changed();
             changed |= ui
                 .checkbox(&mut t.count_in, "Count-in")
-                .on_hover_text("Play one bar of clicks before a fixed-bars recording.")
+                .on_hover_text("Play one audible bar of clicks before recording starts — for the first take and for ＋Rec track (which punches in at the seek cursor). Clicks even when 🔔 Click is off.")
                 .changed();
         });
         if changed {

@@ -230,6 +230,15 @@ pub enum PlayMode {
     Arrange,
 }
 
+/// What a count-in should start once it finishes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    /// The first (loop-defining) take, recorded from bar 0.
+    FirstTake,
+    /// A one-pass overdub, punched in at the current playhead (the seek cursor).
+    PunchIn,
+}
+
 /// One placement of a track on the arrangement timeline. Several clips may
 /// reference the same track (shared content). `was_active` is runtime only.
 ///
@@ -454,8 +463,8 @@ pub struct Studio {
     tempo: TempoGrid,
     /// Count-in samples remaining before a pending recording starts.
     pre_roll: u64,
-    /// True while `pre_roll` is counting toward a first (fixed-bars) recording.
-    pending_record: bool,
+    /// What the count-in should start when `pre_roll` reaches 0 (if anything).
+    pending: Option<Pending>,
     /// Metronome beat clock: samples into the current beat, and beat index.
     metro_phase: u64,
     beat_index: u32,
@@ -504,7 +513,7 @@ impl Studio {
             rec_origin: 0,
             tempo: TempoGrid::default(),
             pre_roll: 0,
-            pending_record: false,
+            pending: None,
             metro_phase: 0,
             beat_index: 0,
             click_env: 0.0,
@@ -574,7 +583,7 @@ impl Studio {
             Command::Tap => self.tap(),
             Command::Stop => self.stop(),
             Command::Reset => self.reset(),
-            Command::ArmOverdub => self.arm_overdub_one_pass(),
+            Command::ArmOverdub => self.request_overdub_one_pass(),
             Command::ToggleMute(i) => {
                 if let Some(t) = self.tracks.get_mut(i) {
                     t.muted = !t.muted;
@@ -910,11 +919,8 @@ impl Studio {
         self.click_freq = if accent { 1568.0 } else { 1047.0 };
     }
 
-    /// Advance the beat clock one sample and fire a click at each beat.
-    fn metro_tick(&mut self) {
-        if !self.tempo.metronome {
-            return;
-        }
+    /// Advance the beat clock one sample and fire a click at each beat boundary.
+    fn beat_clock_tick(&mut self) {
         if self.metro_phase == 0 {
             let accent = self.beat_index % self.tempo.beats_per_bar.max(1) == 0;
             self.trigger_click(accent);
@@ -924,6 +930,20 @@ impl Studio {
             self.metro_phase = 0;
             self.beat_index += 1;
         }
+    }
+
+    /// The metronome during playback — clicks only when the click is enabled.
+    fn metro_tick(&mut self) {
+        if !self.tempo.metronome {
+            return;
+        }
+        self.beat_clock_tick();
+    }
+
+    /// The count-in tick: always clicks, so a count-in is audible even when the
+    /// metronome click is turned off for normal playback.
+    fn count_in_tick(&mut self) {
+        self.beat_clock_tick();
     }
 
     /// One sample of the metronome click (decaying sine), 0 when silent.
@@ -950,13 +970,8 @@ impl Studio {
         match (self.loop_len, self.defining) {
             // Idle: arm the first (loop-defining) take.
             (None, false) if !self.armed && !recording => {
-                if self.tempo.bars > 0 && self.tempo.count_in {
-                    // Count in one bar of clicks, then begin recording.
-                    self.pre_roll = self.bar_samples();
-                    self.pending_record = true;
-                    self.playing = false;
-                    self.metro_phase = 0;
-                    self.beat_index = 0;
+                if self.tempo.count_in {
+                    self.start_count_in(Pending::FirstTake);
                 } else {
                     self.begin_first_take();
                 }
@@ -1013,7 +1028,7 @@ impl Studio {
         self.playing = false;
         self.defining = false;
         self.pre_roll = 0;
-        self.pending_record = false;
+        self.pending = None;
         self.live.all_notes_off();
         for t in &mut self.tracks {
             t.inst.all_notes_off();
@@ -1033,7 +1048,7 @@ impl Studio {
         self.pos = 0;
         self.playing = false;
         self.pre_roll = 0;
-        self.pending_record = false;
+        self.pending = None;
         self.clear_history();
         self.live.all_notes_off();
         self.mark_structure_dirty();
@@ -1343,6 +1358,32 @@ impl Studio {
         self.mark_structure_dirty();
     }
 
+    /// "+ Rec track": punch in a one-pass overdub at the seek cursor. With
+    /// count-in enabled this first plays a bar of clicks (the transport parked at
+    /// the cursor), then arms and records from there.
+    fn request_overdub_one_pass(&mut self) {
+        if self.loop_len.is_none() || self.recording.is_some() || self.armed || self.pre_roll > 0 {
+            return;
+        }
+        if self.tempo.count_in {
+            self.start_count_in(Pending::PunchIn);
+            self.mark_structure_dirty();
+        } else {
+            self.arm_overdub_one_pass();
+        }
+    }
+
+    /// Begin a count-in: park the transport and play one bar of clicks, then run
+    /// `pending` when it finishes. Clicks sound regardless of the metronome
+    /// toggle so the count-in is always audible.
+    fn start_count_in(&mut self, pending: Pending) {
+        self.pre_roll = self.bar_samples().max(1);
+        self.pending = Some(pending);
+        self.playing = false;
+        self.metro_phase = 0;
+        self.beat_index = 0;
+    }
+
     /// Arm capture into a new (not-yet-created) track.
     fn arm(&mut self, defining: bool) {
         self.armed = true;
@@ -1627,12 +1668,15 @@ impl Studio {
         self.flush_structure();
         for frame in out.chunks_mut(channels) {
             if self.pre_roll > 0 {
-                // Count-in: clicks only, no playback/recording.
-                self.metro_tick();
+                // Count-in: clicks only (always audible), no playback/recording.
+                self.count_in_tick();
                 self.pre_roll -= 1;
-                if self.pre_roll == 0 && self.pending_record {
-                    self.pending_record = false;
-                    self.begin_first_take();
+                if self.pre_roll == 0 {
+                    match self.pending.take() {
+                        Some(Pending::FirstTake) => self.begin_first_take(),
+                        Some(Pending::PunchIn) => self.arm_overdub_one_pass(),
+                        None => {}
+                    }
                 }
             } else if self.playing {
                 self.fire_events();
@@ -2405,6 +2449,46 @@ mod tests {
         );
         let snap = s.snapshot_loop();
         assert!(snap.tracks[0].automation.iter().any(|a| a.target == "@bend"));
+    }
+
+    #[test]
+    fn count_in_precedes_punch_in_and_clicks_without_metronome() {
+        use crate::project::TempoGrid;
+        let mut s = Studio::new(48_000.0);
+        // Lay down a base loop so an overdub has something to punch into.
+        s.handle(Command::Tap);
+        s.handle(Command::NoteOn { note: 60, vel: 1.0 });
+        drain(&mut s, 4_800);
+        s.handle(Command::NoteOff { note: 60 });
+        s.handle(Command::Tap); // close
+        assert_eq!(s.tracks.len(), 1);
+
+        // Count-in on, metronome (click) OFF, free length.
+        s.handle(Command::SetTempo(TempoGrid {
+            bpm: 120.0,
+            beats_per_bar: 4,
+            bars: 0,
+            quantize: 0,
+            metronome: false,
+            count_in: true,
+        }));
+        // Seek and request a punch-in (+ Rec track).
+        s.handle(Command::Seek(0.05));
+        let cursor = s.pos;
+        s.handle(Command::ArmOverdub);
+
+        // A count-in is running: not recording yet.
+        assert!(s.pre_roll > 0, "count-in started");
+        assert!(s.recording.is_none() && !s.armed, "not armed during the count-in");
+
+        // One frame in, a click has fired even though the metronome is off.
+        drain(&mut s, 1);
+        assert!(s.click_env > 0.0, "count-in is audible without the metronome");
+
+        // One bar at 120 bpm / 4 beats = 2.0s = 96 000 samples; finish it.
+        drain(&mut s, 96_000);
+        assert!(s.armed || s.recording.is_some(), "recording arms after the count-in");
+        assert_eq!(s.rec_origin, cursor, "punches in at the seek cursor");
     }
 
     #[test]
