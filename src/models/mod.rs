@@ -13,6 +13,7 @@
 //! amplitudes and decay rates of its modes and register it in [`registry`].
 
 pub mod basic_wave;
+pub mod drum_membrane;
 pub mod musical_string;
 pub mod pure_string;
 
@@ -182,6 +183,7 @@ pub fn model_from_id(id: &str, params: &serde_json::Value) -> Option<Box<dyn Ftm
         "basic_wave" => boxed::<basic_wave::BasicWave>(params),
         "musical_string" => boxed::<musical_string::MusicalString>(params),
         "pure_string" => boxed::<pure_string::PureString>(params),
+        "drum_membrane" => boxed::<drum_membrane::DrumMembrane>(params),
         _ => None,
     }
 }
@@ -197,6 +199,7 @@ pub fn registry() -> Vec<Box<dyn FtmModel>> {
     vec![
         Box::new(musical_string::MusicalString::default()),
         Box::new(pure_string::PureString::default()),
+        Box::new(drum_membrane::DrumMembrane::default()),
         Box::new(basic_wave::BasicWave::default()),
     ]
 }
