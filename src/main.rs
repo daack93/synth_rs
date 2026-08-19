@@ -139,6 +139,8 @@ struct App {
     sel_clips: Vec<usize>,
     /// Active clip drag: (clip index, kind, preview_start_s, preview_len_s).
     arr_drag: Option<(usize, DragKind, f32, f32)>,
+    /// True while scrubbing the wrapped seek strip inside the arrangement.
+    arr_seeking: bool,
     /// Destination time (secs) for duplicate / move.
     region_dest: f32,
     /// Note-edit params for the selection: transpose semitones, velocity factor.
@@ -226,6 +228,7 @@ impl App {
             edit_track_open: None,
             sel_clips: Vec::new(),
             arr_drag: None,
+            arr_seeking: false,
             region_dest: 0.0,
             region_transpose: 0,
             region_vel: 1.0,
@@ -1503,7 +1506,6 @@ impl App {
         }
 
         self.arrangement_editor(ui, &tracks, &clips, loop_secs, play, arrange_mode);
-        self.seek_bar(ui, loop_secs, play);
         ui.separator();
 
         // Controls for the selected track / clip.
@@ -1542,7 +1544,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.strong("Arrangement");
             let hint = if arrange_mode {
-                "click to select · drag a clip to move · drag an edge to grow/shrink the loop · dbl-click empty lane to place (snaps to 1/4 note)"
+                "click to select · drag a clip to move · drag an edge to grow/shrink the loop · click the strip under a row to seek · dbl-click empty lane to place (snaps to 1/4 note)"
             } else {
                 "(Loop mode — playback ignores placement; switch to 🎬 Arrange to hear it)"
             };
@@ -1550,7 +1552,8 @@ impl App {
         });
 
         let lane_h = 22.0;
-        let row_gap = 12.0;
+        let seek_h = 10.0; // thin scrub strip under each wrapped row
+        let row_gap = 10.0;
         let label_w = 66.0;
         let px_per_bar = 84.0;
         let bar_secs =
@@ -1564,7 +1567,8 @@ impl App {
         let n_rows = (((song / row_secs).ceil() as usize) + 1).clamp(1, 200);
         // Full timeline extent (incl. the spare row) — resize can reach here.
         let grid_secs = n_rows as f32 * row_secs;
-        let row_h = n as f32 * lane_h + row_gap;
+        let lanes_h = n as f32 * lane_h;
+        let row_h = lanes_h + seek_h + row_gap;
         let (rect, resp) =
             ui.allocate_exact_size(egui::vec2(avail, n_rows as f32 * row_h), egui::Sense::click_and_drag());
         let painter = ui.painter_at(rect);
@@ -1597,6 +1601,22 @@ impl App {
             }
             let lane = ((rel - r as f32 * row_h) / lane_h) as usize;
             (lane < n).then_some(lane)
+        };
+        // Pointer in a row's seek strip (the thin band below its lanes)?
+        let in_seek_strip = |p: egui::Pos2| -> bool {
+            if p.x < tl_x {
+                return false;
+            }
+            let rel = p.y - rect.top();
+            if rel < 0.0 {
+                return false;
+            }
+            let r = (rel / row_h) as usize;
+            if r >= n_rows {
+                return false;
+            }
+            let off = rel - r as f32 * row_h;
+            off >= lanes_h && off < lanes_h + seek_h
         };
         let hit_clip = |p: egui::Pos2| -> Option<(usize, DragKind)> {
             let lane = lane_at(p)?;
@@ -1651,6 +1671,38 @@ impl App {
                     font.clone(),
                     egui::Color32::from_gray(150),
                 );
+            }
+            // Seek strip for this row: a thin scrub band under the lanes, covering
+            // exactly this row's slice of the song. Only the part before song end.
+            let strip_y0 = row_top(r) + lanes_h;
+            let strip_end = ((r as f32 + 1.0) * row_secs).min(song);
+            if strip_end > r as f32 * row_secs {
+                let strip_x1 = x_in_row(strip_end, r);
+                let strip = egui::Rect::from_min_max(
+                    egui::pos2(tl_x, strip_y0),
+                    egui::pos2(strip_x1.max(tl_x + 1.0), strip_y0 + seek_h),
+                );
+                painter.rect_filled(strip, 2.0, egui::Color32::from_gray(38));
+                for b in 0..=bars_per_row {
+                    let secs = r as f32 * row_secs + b as f32 * bar_secs;
+                    if secs > strip_end + 1e-3 {
+                        break;
+                    }
+                    painter.vline(
+                        x_in_row(secs, r),
+                        egui::Rangef::new(strip_y0, strip_y0 + seek_h),
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(52)),
+                    );
+                }
+                // Playhead handle, drawn in the row that holds it.
+                let pl = play * song;
+                if pl >= r as f32 * row_secs && pl <= strip_end + 1e-3 {
+                    painter.vline(
+                        x_in_row(pl, r),
+                        egui::Rangef::new(strip_y0 - 1.0, strip_y0 + seek_h + 1.0),
+                        egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(240, 240, 120)),
+                    );
+                }
             }
         }
 
@@ -1745,9 +1797,18 @@ impl App {
                         self.sel_clips = vec![ci];
                     }
                     self.sel_track = Some(c.track);
+                } else if in_seek_strip(p) {
+                    self.arr_drag = None;
+                    self.arr_seeking = true;
+                    let _ = self.tx.send(Command::Seek(time_at(p)));
                 } else {
                     self.arr_drag = None;
                 }
+            }
+        }
+        if resp.dragged() && self.arr_seeking {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let _ = self.tx.send(Command::Seek(time_at(p)));
             }
         }
         if resp.dragged() {
@@ -1773,6 +1834,7 @@ impl App {
             }
         }
         if resp.drag_stopped() {
+            self.arr_seeking = false;
             if let Some((ci, kind, start, len)) = self.arr_drag.take() {
                 match kind {
                     DragKind::ResizeR => {
@@ -1813,8 +1875,11 @@ impl App {
             }
         } else if resp.clicked() {
             if let Some(p) = resp.interact_pointer_pos() {
-                // A click selects: a clip if it lands on one, else the lane's track.
-                if let Some((ci, _)) = hit_clip(p) {
+                // A click on the seek strip moves the playhead; otherwise it
+                // selects a clip if it lands on one, else the lane's track.
+                if in_seek_strip(p) {
+                    let _ = self.tx.send(Command::Seek(time_at(p)));
+                } else if let Some((ci, _)) = hit_clip(p) {
                     if shift {
                         if let Some(k) = self.sel_clips.iter().position(|&x| x == ci) {
                             self.sel_clips.remove(k);
@@ -1833,36 +1898,6 @@ impl App {
         }
         let _ = time_at; // (seeking lives in the seek bar below)
         ui.add_space(4.0);
-    }
-
-    /// A thin scrubber below the arrangement: click or drag to move the playhead
-    /// across the whole song.
-    fn seek_bar(&mut self, ui: &mut egui::Ui, song_secs: f32, play: f32) {
-        let song = song_secs.max(0.001);
-        let width = ui.available_width().max(120.0);
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 14.0), egui::Sense::click_and_drag());
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 3.0, egui::Color32::from_gray(34));
-        // Bar ticks.
-        let bar_secs =
-            60.0 / self.project.tempo.bpm.max(1.0) * self.project.tempo.beats_per_bar.max(1) as f32;
-        if bar_secs > 0.0 {
-            let mut b = 0.0;
-            while b <= song && (b / bar_secs) < 512.0 {
-                let x = rect.left() + (b / song) * rect.width();
-                painter.vline(x, rect.y_range(), egui::Stroke::new(1.0_f32, egui::Color32::from_gray(48)));
-                b += bar_secs;
-            }
-        }
-        // Playhead marker.
-        let px = rect.left() + play.clamp(0.0, 1.0) * rect.width();
-        painter.vline(px, rect.y_range(), egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(240, 240, 120)));
-        if resp.clicked() || resp.dragged() {
-            if let Some(p) = resp.interact_pointer_pos() {
-                let frac = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                let _ = self.tx.send(Command::Seek(frac * song));
-            }
-        }
     }
 
     /// Controls for the currently-selected track and clip, always on screen.
