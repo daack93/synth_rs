@@ -16,6 +16,7 @@ use crate::models::drum_membrane::DrumMembrane;
 use crate::models::metal_bell::MetalBell;
 use crate::models::musical_string::MusicalString;
 use crate::models::pure_string::PureString;
+use crate::models::snare::Snare;
 use crate::models::webster_horn::{Boundary, Wavefront, WebsterHorn};
 use crate::models::{model_from_id, Excitation, FtmModel};
 use crate::instrument::EngineParams;
@@ -266,6 +267,11 @@ pub fn factory() -> Vec<Preset> {
             "Cowbell",
             MetalBell { partials: 3, spread: 0.48, inharmonicity: 0.06, brightness: 0.4, decay_time: 0.35, strike_noise: 0.3, key_tracks_pitch: true },
             eng(0.6, 1.0, 40.0),
+        ),
+        make(
+            "Snare",
+            Snare { tension: 750.0, damping: 14.0, strike_pos: 0.4, depth: 24, snares: 0.7, snare_decay: 16.0, tone: 0.65, key_tracks_pitch: true },
+            eng(0.7, 1.0, 50.0),
         ),
         // ---- Basic Wave (reference oscillators) ----
         make("Triangle Lead", BasicWave { waveform: Waveform::Triangle, harmonics: 16, decay_time: 1.5 }, eng(0.5, 3.0, 120.0)),
