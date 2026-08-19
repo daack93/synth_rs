@@ -2018,6 +2018,19 @@ impl App {
             if fic || foc {
                 let _ = self.tx.send(Command::SetTrackFades { track: ti, fade_in: fi, fade_out: fo });
             }
+            ui.separator();
+            // Loop length (period) of this track, in beats — how often it
+            // repeats. Lets a track loop faster/slower than the base loop.
+            let beat_secs = (60.0 / self.project.tempo.bpm.max(1.0)).max(1e-4);
+            ui.label("Loop").on_hover_text("Track loop length — how often it repeats");
+            let mut beats = (t.period / beat_secs).max(0.25);
+            if ui
+                .add(egui::DragValue::new(&mut beats).range(0.25..=256.0).speed(0.25).suffix(" beat"))
+                .on_hover_text(format!("{:.2}s per loop", t.period))
+                .changed()
+            {
+                let _ = self.tx.send(Command::SetTrackPeriod { track: ti, secs: beats * beat_secs });
+            }
         });
 
         // --- Clip row ---

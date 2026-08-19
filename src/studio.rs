@@ -152,6 +152,8 @@ pub enum Command {
     MakeClipUnique { index: usize },
     /// Chop/edit a clip's own notes (auto-forks first) with a region op.
     ClipRegionEdit { index: usize, op: RegionOp },
+    /// Set a track's loop length (period) in seconds — how often it repeats.
+    SetTrackPeriod { track: usize, secs: f32 },
     /// Set a track's fade-in / fade-out length in seconds.
     SetTrackFades { track: usize, fade_in: f32, fade_out: f32 },
     /// Swap a track's instrument model live (rebuilds its sounding voices).
@@ -703,6 +705,16 @@ impl Studio {
                 }
                 self.reset_cursors();
                 self.publish_scalars();
+            }
+            Command::SetTrackPeriod { track, secs } => {
+                if track < self.tracks.len() {
+                    self.push_undo();
+                    let period = ((secs.max(0.0) * self.sr).round() as u64).max(1);
+                    self.tracks[track].period = period;
+                    // Notes are stored relative to the take, so shrinking the
+                    // period just changes which fire — nothing is destroyed.
+                    self.after_arrangement_change();
+                }
             }
             Command::SetTrackFades { track, fade_in, fade_out } => {
                 if let Some(t) = self.tracks.get_mut(track) {
@@ -2611,6 +2623,22 @@ mod tests {
         assert_eq!(s.arrangement[2].start, (0.8 * 48_000.0) as u64);
         s.handle(Command::RemoveClip { index: 0 });
         assert_eq!(s.arrangement.len(), 2);
+    }
+
+    #[test]
+    fn set_track_period_changes_the_loop_length_nondestructively() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        let original = s.tracks[0].period;
+        assert!(original > 0);
+        // Halve the loop length: the track now repeats twice as often.
+        s.handle(Command::SetTrackPeriod { track: 0, secs: 0.05 });
+        assert_eq!(s.tracks[0].period, (0.05 * 48_000.0) as u64);
+        // Events are retained (stored relative to the take), not truncated.
+        assert_eq!(s.tracks[0].events.len(), 1);
+        // Restoring the period restores the original loop length.
+        s.handle(Command::SetTrackPeriod { track: 0, secs: 0.1 });
+        assert_eq!(s.tracks[0].period, original);
     }
 
     #[test]
