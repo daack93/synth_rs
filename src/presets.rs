@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::models::basic_wave::{BasicWave, Waveform};
+use crate::models::drum_membrane::DrumMembrane;
 use crate::models::musical_string::MusicalString;
 use crate::models::pure_string::PureString;
 use crate::models::{model_from_id, Excitation, FtmModel};
@@ -158,6 +159,22 @@ pub fn factory() -> Vec<Preset> {
             "Glass Pluck",
             MusicalString { pluck_pos: 0.10, inharmonicity: 0.0018, decay_time: 2.4, hf_damping: 0.7, num_modes: 44 },
             eng(0.6, 3.0, 160.0),
+        ),
+        // ---- Drum (2D membrane) ----
+        make(
+            "Tom",
+            DrumMembrane { strike_pos: 0.5, damping: 9.0, freq_dep_damping: -3.5, radius: 10.0, depth: 40, stiffness: 0.5, ..DrumMembrane::default() },
+            eng(0.7, 1.0, 90.0),
+        ),
+        make(
+            "Kick",
+            DrumMembrane { strike_pos: 0.35, damping: 28.0, freq_dep_damping: -4.0, radius: 14.0, depth: 28, stiffness: 0.2, ..DrumMembrane::default() },
+            eng(0.85, 1.0, 60.0),
+        ),
+        make(
+            "Timpani",
+            DrumMembrane { strike_pos: 0.7, damping: 2.5, freq_dep_damping: -1.5, radius: 9.0, depth: 48, stiffness: 1.0, ..DrumMembrane::default() },
+            eng(0.6, 2.0, 200.0),
         ),
         // ---- Basic Wave (reference oscillators) ----
         make("Triangle Lead", BasicWave { waveform: Waveform::Triangle, harmonics: 16, decay_time: 1.5 }, eng(0.5, 3.0, 120.0)),
