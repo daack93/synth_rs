@@ -61,6 +61,15 @@ struct TrackEdit {
     engine: EngineParams,
 }
 
+/// What a clip drag is doing: sliding it, or dragging one of its edges to
+/// grow/shrink the looped region.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DragKind {
+    Move,
+    ResizeR,
+    ResizeL,
+}
+
 struct App {
     tx: Sender<Command>,
     _audio: Option<AudioEngine>,
@@ -128,8 +137,8 @@ struct App {
     edit_track_open: Option<usize>,
     /// Selected clip indices in the arrangement editor.
     sel_clips: Vec<usize>,
-    /// Active clip drag: (clip index, is_resize, preview_start_s, preview_len_s).
-    arr_drag: Option<(usize, bool, f32, f32)>,
+    /// Active clip drag: (clip index, kind, preview_start_s, preview_len_s).
+    arr_drag: Option<(usize, DragKind, f32, f32)>,
     /// Destination time (secs) for duplicate / move.
     region_dest: f32,
     /// Note-edit params for the selection: transpose semitones, velocity factor.
@@ -1533,7 +1542,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.strong("Arrangement");
             let hint = if arrange_mode {
-                "click to move the playback cursor · drag a clip to move · right edge to resize · dbl-click empty lane to place"
+                "click to select · drag a clip to move · drag an edge to grow/shrink the loop · dbl-click empty lane to place (snaps to 1/4 note)"
             } else {
                 "(Loop mode — playback ignores placement; switch to 🎬 Arrange to hear it)"
             };
@@ -1550,7 +1559,11 @@ impl App {
         let tl_w = (avail - label_w - 8.0).max(60.0);
         let bars_per_row = ((tl_w / px_per_bar).floor() as usize).max(1);
         let row_secs = (bars_per_row as f32 * bar_secs).max(0.001);
-        let n_rows = ((song / row_secs).ceil() as usize).clamp(1, 200);
+        // One spare row past the song end so a clip's right edge can be dragged
+        // out to grow the arrangement.
+        let n_rows = (((song / row_secs).ceil() as usize) + 1).clamp(1, 200);
+        // Full timeline extent (incl. the spare row) — resize can reach here.
+        let grid_secs = n_rows as f32 * row_secs;
         let row_h = n as f32 * lane_h + row_gap;
         let (rect, resp) =
             ui.allocate_exact_size(egui::vec2(avail, n_rows as f32 * row_h), egui::Sense::click_and_drag());
@@ -1563,11 +1576,12 @@ impl App {
         let x_in_row = |secs: f32, r: usize| {
             tl_x + ((secs - r as f32 * row_secs) / row_secs).clamp(0.0, 1.0) * tl_w
         };
-        // Pointer → absolute time (any row); and → (lane, time) when over a lane.
+        // Pointer → absolute time (any row), clamped to the full grid extent
+        // (which includes a spare row past the song, so edges can grow it).
         let time_at = |p: egui::Pos2| -> f32 {
             let rel = (p.y - rect.top()).max(0.0);
             let r = ((rel / row_h) as usize).min(n_rows - 1);
-            (r as f32 * row_secs + ((p.x - tl_x) / tl_w).clamp(0.0, 1.0) * row_secs).clamp(0.0, song)
+            (r as f32 * row_secs + ((p.x - tl_x) / tl_w).clamp(0.0, 1.0) * row_secs).clamp(0.0, grid_secs)
         };
         let lane_at = |p: egui::Pos2| -> Option<usize> {
             if p.x < tl_x {
@@ -1584,7 +1598,7 @@ impl App {
             let lane = ((rel - r as f32 * row_h) / lane_h) as usize;
             (lane < n).then_some(lane)
         };
-        let hit_clip = |p: egui::Pos2| -> Option<(usize, bool)> {
+        let hit_clip = |p: egui::Pos2| -> Option<(usize, DragKind)> {
             let lane = lane_at(p)?;
             let t = time_at(p);
             let resize_secs = (6.0 / tl_w) * row_secs;
@@ -1594,7 +1608,14 @@ impl App {
                 }
                 let len = if c.length > 0.0 { c.length } else { (song - c.start).max(0.0) };
                 if t >= c.start && t <= c.start + len {
-                    return Some((ci, t >= c.start + len - resize_secs));
+                    let kind = if t >= c.start + len - resize_secs {
+                        DragKind::ResizeR
+                    } else if t <= c.start + resize_secs {
+                        DragKind::ResizeL
+                    } else {
+                        DragKind::Move
+                    };
+                    return Some((ci, kind));
                 }
             }
             None
@@ -1641,8 +1662,8 @@ impl App {
             let t = &tracks[c.track];
             let default_len = if c.length > 0.0 { c.length } else { (song - c.start).max(0.0) };
             let (start, len) = match self.arr_drag {
-                Some((di, resize, ps, pl)) if di == ci => (ps, if resize { pl } else { default_len }),
-                Some((di, false, ps, _)) if self.sel_clips.contains(&ci) && self.sel_clips.contains(&di) => {
+                Some((di, _, ps, pl)) if di == ci => (ps, pl),
+                Some((di, DragKind::Move, ps, _)) if self.sel_clips.contains(&ci) && self.sel_clips.contains(&di) => {
                     let delta = ps - clips.get(di).map(|d| d.start).unwrap_or(0.0);
                     ((c.start + delta).max(0.0), default_len)
                 }
@@ -1704,14 +1725,16 @@ impl App {
         }
 
         // ---- interaction ----
-        let snap = |s: f32| if bar_secs > 0.0 { (s / bar_secs).round() * bar_secs } else { s };
+        // Snap to a quarter note (one beat), the natural editing grid.
+        let beat_secs = (bar_secs / self.project.tempo.beats_per_bar.max(1) as f32).max(1e-4);
+        let snap = |s: f32| (s / beat_secs).round() * beat_secs;
         let shift = ui.input(|i| i.modifiers.shift);
         if resp.drag_started() {
             if let Some(p) = resp.interact_pointer_pos() {
-                if let Some((ci, resize)) = hit_clip(p) {
+                if let Some((ci, kind)) = hit_clip(p) {
                     let c = &clips[ci];
                     let len = if c.length > 0.0 { c.length } else { (song - c.start).max(0.0) };
-                    self.arr_drag = Some((ci, resize, c.start, len));
+                    self.arr_drag = Some((ci, kind, c.start, len));
                     if shift {
                         if let Some(k) = self.sel_clips.iter().position(|&x| x == ci) {
                             self.sel_clips.remove(k);
@@ -1728,30 +1751,47 @@ impl App {
             }
         }
         if resp.dragged() {
-            if let (Some((ci, resize, _, _)), Some(p)) = (self.arr_drag, resp.interact_pointer_pos()) {
-                if resize {
-                    let len = snap((time_at(p) - clips[ci].start).max(bar_secs.max(0.05)));
-                    self.arr_drag = Some((ci, true, clips[ci].start, len));
-                } else {
-                    let len = self.arr_drag.map(|d| d.3).unwrap_or(0.0);
-                    self.arr_drag = Some((ci, false, snap(time_at(p)).max(0.0), len));
+            if let (Some((ci, kind, _, _)), Some(p)) = (self.arr_drag, resp.interact_pointer_pos()) {
+                let c = &clips[ci];
+                let orig_len = if c.length > 0.0 { c.length } else { (song - c.start).max(0.0) };
+                match kind {
+                    DragKind::ResizeR => {
+                        // Right edge: keep start, grow/shrink length (min one beat).
+                        let len = snap((time_at(p) - c.start).max(beat_secs));
+                        self.arr_drag = Some((ci, kind, c.start, len));
+                    }
+                    DragKind::ResizeL => {
+                        // Left edge: keep the end fixed, move start (min one beat).
+                        let end = c.start + orig_len;
+                        let start = snap(time_at(p)).clamp(0.0, end - beat_secs);
+                        self.arr_drag = Some((ci, kind, start, end - start));
+                    }
+                    DragKind::Move => {
+                        self.arr_drag = Some((ci, kind, snap(time_at(p)).max(0.0), orig_len));
+                    }
                 }
             }
         }
         if resp.drag_stopped() {
-            if let Some((ci, resize, start, len)) = self.arr_drag.take() {
-                if resize {
-                    let _ = self.tx.send(Command::SetClip { index: ci, start, length: len });
-                } else {
-                    let delta = start - clips[ci].start;
-                    let sel = if self.sel_clips.contains(&ci) { self.sel_clips.clone() } else { vec![ci] };
-                    for si in sel {
-                        if let Some(c) = clips.get(si) {
-                            let _ = self.tx.send(Command::SetClip {
-                                index: si,
-                                start: (c.start + delta).max(0.0),
-                                length: c.length,
-                            });
+            if let Some((ci, kind, start, len)) = self.arr_drag.take() {
+                match kind {
+                    DragKind::ResizeR => {
+                        let _ = self.tx.send(Command::SetClip { index: ci, start, length: len });
+                    }
+                    DragKind::ResizeL => {
+                        let _ = self.tx.send(Command::SetClip { index: ci, start, length: len });
+                    }
+                    DragKind::Move => {
+                        let delta = start - clips[ci].start;
+                        let sel = if self.sel_clips.contains(&ci) { self.sel_clips.clone() } else { vec![ci] };
+                        for si in sel {
+                            if let Some(c) = clips.get(si) {
+                                let _ = self.tx.send(Command::SetClip {
+                                    index: si,
+                                    start: (c.start + delta).max(0.0),
+                                    length: c.length,
+                                });
+                            }
                         }
                     }
                 }
@@ -1760,10 +1800,13 @@ impl App {
             if let Some(p) = resp.interact_pointer_pos() {
                 if hit_clip(p).is_none() {
                     if let Some(lane) = lane_at(p) {
+                        // Default to one loop (the track's period) — a concrete block
+                        // the user can then drag out to loop further.
+                        let period = tracks.get(lane).map(|t| t.period).unwrap_or(0.0);
                         let _ = self.tx.send(Command::AddClip {
                             track: lane,
                             start: snap(time_at(p)).max(0.0),
-                            length: 0.0,
+                            length: period.max(0.0),
                         });
                     }
                 }
