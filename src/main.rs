@@ -139,6 +139,9 @@ struct App {
     sel_clips: Vec<usize>,
     /// Active clip drag: (clip index, kind, preview_start_s, preview_len_s).
     arr_drag: Option<(usize, DragKind, f32, f32)>,
+    /// Offset (secs) from the dragged clip's start to where it was grabbed, so a
+    /// move keeps the grab point under the cursor instead of snapping the start.
+    arr_grab: f32,
     /// True while scrubbing the wrapped seek strip inside the arrangement.
     arr_seeking: bool,
     /// Destination time (secs) for duplicate / move.
@@ -228,6 +231,7 @@ impl App {
             edit_track_open: None,
             sel_clips: Vec::new(),
             arr_drag: None,
+            arr_grab: 0.0,
             arr_seeking: false,
             region_dest: 0.0,
             region_transpose: 0,
@@ -1621,7 +1625,7 @@ impl App {
         let hit_clip = |p: egui::Pos2| -> Option<(usize, DragKind)> {
             let lane = lane_at(p)?;
             let t = time_at(p);
-            let resize_secs = (6.0 / tl_w) * row_secs;
+            let resize_secs = (8.0 / tl_w) * row_secs;
             for (ci, c) in clips.iter().enumerate().rev() {
                 if c.track != lane {
                     continue;
@@ -1750,14 +1754,14 @@ impl App {
                     let handle = egui::Color32::from_rgb(225, 245, 225);
                     if r == r0 {
                         painter.rect_filled(
-                            egui::Rect::from_min_max(egui::pos2(x0, y0 + 2.0), egui::pos2(x0 + 4.0, y0 + lane_h - 1.0)),
+                            egui::Rect::from_min_max(egui::pos2(x0, y0 + 2.0), egui::pos2(x0 + 6.0, y0 + lane_h - 1.0)),
                             1.0,
                             handle,
                         );
                     }
                     if r == r1.min(n_rows - 1) {
                         painter.rect_filled(
-                            egui::Rect::from_min_max(egui::pos2(x1 - 4.0, y0 + 2.0), egui::pos2(x1, y0 + lane_h - 1.0)),
+                            egui::Rect::from_min_max(egui::pos2(x1 - 6.0, y0 + 2.0), egui::pos2(x1, y0 + lane_h - 1.0)),
                             1.0,
                             handle,
                         );
@@ -1799,11 +1803,19 @@ impl App {
         let snap = |s: f32| (s / beat_secs).round() * beat_secs;
         let shift = ui.input(|i| i.modifiers.shift);
         if resp.drag_started() {
-            if let Some(p) = resp.interact_pointer_pos() {
+            // Use the press origin (where the mouse went down), not the current
+            // pointer: egui only starts a drag after a few px of movement, and
+            // that shift would otherwise pull an edge-grab into the clip body and
+            // read as a move.
+            let press = ui
+                .input(|i| i.pointer.press_origin())
+                .or_else(|| resp.interact_pointer_pos());
+            if let Some(p) = press {
                 if let Some((ci, kind)) = hit_clip(p) {
                     let c = &clips[ci];
                     let len = if c.length > 0.0 { c.length } else { (song - c.start).max(0.0) };
                     self.arr_drag = Some((ci, kind, c.start, len));
+                    self.arr_grab = (time_at(p) - c.start).clamp(0.0, len);
                     if shift {
                         if let Some(k) = self.sel_clips.iter().position(|&x| x == ci) {
                             self.sel_clips.remove(k);
@@ -1876,7 +1888,9 @@ impl App {
                                 hi = hi.min(o.start - orig_len);
                             }
                         }
-                        let start = snap(time_at(p)).clamp(lo, hi.max(lo));
+                        // Keep the grabbed point under the cursor: offset the
+                        // start by where the clip was grabbed, then snap.
+                        let start = snap(time_at(p) - self.arr_grab).clamp(lo, hi.max(lo));
                         self.arr_drag = Some((ci, kind, start, orig_len));
                     }
                 }
