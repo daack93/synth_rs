@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::basic_wave::{BasicWave, Waveform};
 use crate::models::musical_string::MusicalString;
-use crate::models::{model_from_id, FtmModel};
+use crate::models::pure_string::PureString;
+use crate::models::{model_from_id, Excitation, FtmModel};
 use crate::instrument::EngineParams;
 use crate::project::ZoneData;
 
@@ -80,6 +81,45 @@ impl Preset {
 /// seeded into the presets folder on first run. Each synth plugin contributes
 /// its own presets here as it is added.
 pub fn factory() -> Vec<Preset> {
+    // Common firmware baselines; only the expressive fields vary per instrument.
+    fn string(
+        stiffness: f32,
+        damping: f32,
+        freq_dep_damping: f32,
+        string_length: f32,
+        depth: usize,
+        pluck_pos: f32,
+    ) -> PureString {
+        PureString {
+            stiffness,
+            prop_speed: 500.0,
+            damping,
+            freq_dep_damping,
+            string_length,
+            depth,
+            pluck_pos,
+            damp_period: 100.0,
+            time_scale: 10_000.0,
+            play_magnitude: 0.0,
+            max_magnitude: 2500.0,
+            key_tracks_pitch: true,
+            ..PureString::default()
+        }
+    }
+    // Same bore as `string`, but bowed (driven → sustains while played).
+    fn bowed(
+        stiffness: f32,
+        damping: f32,
+        freq_dep_damping: f32,
+        string_length: f32,
+        depth: usize,
+        pluck_pos: f32,
+    ) -> PureString {
+        PureString {
+            excitation: Excitation::Bowed,
+            ..string(stiffness, damping, freq_dep_damping, string_length, depth, pluck_pos)
+        }
+    }
     fn eng(gain: f32, attack_ms: f32, release_ms: f32) -> EngineParams {
         EngineParams {
             gain,
@@ -93,6 +133,21 @@ pub fn factory() -> Vec<Preset> {
     }
 
     vec![
+        // ---- Pure String (feedback: pluck toward saw, stronger HF damping) ----
+        make("Acoustic Bass", string(1.5, 5.0, -5.0, 6.0, 24, 0.15), eng(0.75, 4.0, 120.0)),
+        make("Electric Bass", string(2.0, 4.0, -3.0, 8.0, 22, 0.12), eng(0.75, 4.0, 140.0)),
+        make("Acoustic Guitar", string(1.0, 7.0, -4.5, 12.0, 28, 0.10), eng(0.6, 3.0, 120.0)),
+        make("Electric Guitar", string(1.2, 2.5, -2.5, 16.0, 32, 0.10), eng(0.6, 3.0, 200.0)),
+        // Less bass-heavy: brighter (more modes) with the highs allowed to sustain.
+        make("Piano", string(6.0, 3.0, -1.8, 12.0, 36, 0.12), eng(0.6, 2.0, 150.0)),
+        make("Banjo", string(3.0, 13.0, -6.0, 20.0, 36, 0.08), eng(0.6, 2.0, 80.0)),
+        // Rounder pluck + more HF damping to tame the "electric" low end.
+        make("Harp", string(0.8, 3.5, -4.0, 14.0, 28, 0.18), eng(0.6, 3.0, 180.0)),
+        // ---- Bowed strings (driven → sustain; bow near the bridge = bright/saw) ----
+        make("Violin", bowed(0.5, 2.5, -1.2, 4.0, 44, 0.12), eng(0.55, 60.0, 150.0)),
+        make("Viola", bowed(0.6, 2.5, -1.5, 5.0, 40, 0.14), eng(0.55, 65.0, 160.0)),
+        make("Cello", bowed(0.8, 2.2, -1.3, 7.0, 44, 0.13), eng(0.6, 70.0, 180.0)),
+        make("Bowed Bass", bowed(1.0, 2.0, -1.6, 10.0, 36, 0.12), eng(0.65, 80.0, 200.0)),
         // ---- Musical String (music-friendly controls) ----
         make(
             "Soft Nylon",
