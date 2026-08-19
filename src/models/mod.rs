@@ -17,6 +17,7 @@ pub mod cymbal;
 pub mod drum_membrane;
 pub mod metal_bell;
 pub mod musical_string;
+pub mod pure_plate;
 pub mod pure_string;
 pub mod snare;
 pub mod webster_horn;
@@ -192,6 +193,7 @@ pub fn model_from_id(id: &str, params: &serde_json::Value) -> Option<Box<dyn Ftm
         "metal_bell" => boxed::<metal_bell::MetalBell>(params),
         "snare" => boxed::<snare::Snare>(params),
         "cymbal" => boxed::<cymbal::Cymbal>(params),
+        "pure_plate" => boxed::<pure_plate::PurePlate>(params),
         _ => None,
     }
 }
@@ -212,6 +214,7 @@ pub fn registry() -> Vec<Box<dyn FtmModel>> {
         Box::new(metal_bell::MetalBell::default()),
         Box::new(snare::Snare::default()),
         Box::new(cymbal::Cymbal::default()),
+        Box::new(pure_plate::PurePlate::default()),
         Box::new(basic_wave::BasicWave::default()),
     ]
 }
