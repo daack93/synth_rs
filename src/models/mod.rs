@@ -14,6 +14,7 @@
 
 pub mod basic_wave;
 pub mod drum_membrane;
+pub mod metal_bell;
 pub mod musical_string;
 pub mod pure_string;
 pub mod webster_horn;
@@ -186,6 +187,7 @@ pub fn model_from_id(id: &str, params: &serde_json::Value) -> Option<Box<dyn Ftm
         "pure_string" => boxed::<pure_string::PureString>(params),
         "drum_membrane" => boxed::<drum_membrane::DrumMembrane>(params),
         "webster_horn" => boxed::<webster_horn::WebsterHorn>(params),
+        "metal_bell" => boxed::<metal_bell::MetalBell>(params),
         _ => None,
     }
 }
@@ -203,6 +205,7 @@ pub fn registry() -> Vec<Box<dyn FtmModel>> {
         Box::new(pure_string::PureString::default()),
         Box::new(drum_membrane::DrumMembrane::default()),
         Box::new(webster_horn::WebsterHorn::default()),
+        Box::new(metal_bell::MetalBell::default()),
         Box::new(basic_wave::BasicWave::default()),
     ]
 }
