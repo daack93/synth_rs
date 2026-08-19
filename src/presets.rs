@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::models::basic_wave::{BasicWave, Waveform};
+use crate::models::cymbal::Cymbal;
 use crate::models::drum_membrane::DrumMembrane;
 use crate::models::metal_bell::MetalBell;
 use crate::models::musical_string::MusicalString;
@@ -272,6 +273,16 @@ pub fn factory() -> Vec<Preset> {
             "Snare",
             Snare { tension: 750.0, damping: 14.0, strike_pos: 0.4, depth: 24, snares: 0.7, snare_decay: 16.0, tone: 0.65, key_tracks_pitch: true },
             eng(0.7, 1.0, 50.0),
+        ),
+        make(
+            "Crash Cymbal",
+            Cymbal { size: 17.0, stiffness: 9.0, damping: 1.0, brightness: -0.5, strike_pos: 0.8, modes: 160, shimmer: 0.4, key_tracks_pitch: true },
+            eng(0.5, 1.0, 300.0),
+        ),
+        make(
+            "Ride Cymbal",
+            Cymbal { size: 15.0, stiffness: 7.0, damping: 2.2, brightness: -0.25, strike_pos: 0.35, modes: 100, shimmer: 0.15, key_tracks_pitch: true },
+            eng(0.55, 1.0, 200.0),
         ),
         // ---- Basic Wave (reference oscillators) ----
         make("Triangle Lead", BasicWave { waveform: Waveform::Triangle, harmonics: 16, decay_time: 1.5 }, eng(0.5, 3.0, 120.0)),

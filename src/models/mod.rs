@@ -15,6 +15,7 @@
 //! decay rates of its partials and register it in [`registry`].
 
 pub mod basic_wave;
+pub mod cymbal;
 pub mod drum_membrane;
 pub mod metal_bell;
 pub mod musical_string;
@@ -149,6 +150,7 @@ pub fn model_from_id(id: &str, params: &serde_json::Value) -> Option<Box<dyn Ftm
         "webster_horn" => boxed::<webster_horn::WebsterHorn>(params),
         "metal_bell" => boxed::<metal_bell::MetalBell>(params),
         "snare" => boxed::<snare::Snare>(params),
+        "cymbal" => boxed::<cymbal::Cymbal>(params),
         _ => None,
     }
 }
@@ -168,6 +170,7 @@ pub fn registry() -> Vec<Box<dyn FtmModel>> {
         Box::new(webster_horn::WebsterHorn::default()),
         Box::new(metal_bell::MetalBell::default()),
         Box::new(snare::Snare::default()),
+        Box::new(cymbal::Cymbal::default()),
         Box::new(basic_wave::BasicWave::default()),
     ]
 }
