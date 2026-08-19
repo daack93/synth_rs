@@ -22,17 +22,27 @@ use crate::models::pure_string::PureString;
 use crate::models::webster_horn::{Boundary, Wavefront, WebsterHorn};
 use crate::models::{model_from_id, Excitation, FtmModel};
 use crate::instrument::EngineParams;
+use crate::project::ZoneData;
 
 /// A saved instrument: everything needed to reconstruct a playable sound.
+///
+/// A preset is either a **single instrument** (`zones` empty — `model_id` /
+/// `params` / `engine` describe it) or a **kit** (`zones` non-empty — each zone
+/// maps a key range to its own instrument). This mirrors how `LoopTrack` stores
+/// a track, so the two stay interchangeable. Presets saved before kits existed
+/// load as single instruments (`zones` defaults empty).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Preset {
     pub name: String,
-    /// The model's [`FtmModel::id`].
+    /// The model's [`FtmModel::id`] (a single-instrument preset).
     pub model_id: String,
     /// The model's serialized parameters ([`FtmModel::to_json`]).
     pub params: serde_json::Value,
     /// Engine-wide parameters (gain, envelope, retrigger).
     pub engine: EngineParams,
+    /// Kit zones. Empty ⇒ a single instrument; non-empty ⇒ a kit.
+    #[serde(default)]
+    pub zones: Vec<ZoneData>,
 }
 
 impl Preset {
@@ -43,12 +53,32 @@ impl Preset {
             model_id: model.id().to_string(),
             params: model.to_json(),
             engine: engine.clone(),
+            zones: Vec::new(),
         }
     }
 
-    /// Rebuild the model this preset describes. `None` if the plugin id is
-    /// unknown (e.g. a preset from a newer build) or the params don't fit it.
+    /// Capture a kit (a set of key-range → instrument zones) as a named preset.
+    pub fn capture_kit(name: &str, zones: Vec<ZoneData>) -> Self {
+        Preset {
+            name: name.trim().to_string(),
+            model_id: "kit".to_string(),
+            params: serde_json::Value::Null,
+            engine: EngineParams::default(),
+            zones,
+        }
+    }
+
+    /// True if this preset describes a kit (has zones) rather than one instrument.
+    pub fn is_kit(&self) -> bool {
+        !self.zones.is_empty()
+    }
+
+    /// Rebuild the model this preset describes. `None` for a kit (use [`zones`])
+    /// or if the plugin id is unknown / the params don't fit it.
     pub fn build_model(&self) -> Option<Box<dyn FtmModel>> {
+        if self.is_kit() {
+            return None;
+        }
         model_from_id(&self.model_id, &self.params)
     }
 }
@@ -412,6 +442,52 @@ mod tests {
         assert_eq!(model.id(), "musical_string");
         // The rebuilt model's json should match the original's.
         assert_eq!(model.to_json(), m.to_json());
+    }
+
+    #[test]
+    fn kit_preset_roundtrips_with_its_zones() {
+        let zones = vec![
+            ZoneData {
+                name: "Kick".into(),
+                lo: 36,
+                hi: 47,
+                fixed_note: Some(38),
+                transpose: 0,
+                model_id: "drum_membrane".into(),
+                params: serde_json::json!({}),
+                engine: EngineParams::default(),
+            },
+            ZoneData {
+                name: "Lead".into(),
+                lo: 48,
+                hi: 72,
+                fixed_note: None,
+                transpose: 0,
+                model_id: "pure_string".into(),
+                params: serde_json::json!({}),
+                engine: EngineParams::default(),
+            },
+        ];
+        let preset = Preset::capture_kit("My Kit", zones);
+        assert!(preset.is_kit());
+        assert!(preset.build_model().is_none(), "a kit has no single model");
+
+        let back: Preset = serde_json::from_str(&serde_json::to_string(&preset).unwrap()).unwrap();
+        assert_eq!(back.name, "My Kit");
+        assert!(back.is_kit());
+        assert_eq!(back.zones.len(), 2);
+        assert_eq!(back.zones[0].model_id, "drum_membrane");
+        assert_eq!(back.zones[0].fixed_note, Some(38));
+        assert_eq!(back.zones[1].lo, 48);
+    }
+
+    #[test]
+    fn single_preset_loads_as_non_kit() {
+        // A single-instrument preset (no `zones` field) must not read as a kit.
+        let json = r#"{"name":"Old","model_id":"musical_string","params":{},"engine":{"gain":1.0,"attack_ms":3.0,"release_ms":120.0,"retrigger_ms":0.0}}"#;
+        let p: Preset = serde_json::from_str(json).unwrap();
+        assert!(!p.is_kit());
+        assert!(p.build_model().is_some());
     }
 
     #[test]

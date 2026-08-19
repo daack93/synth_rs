@@ -265,6 +265,8 @@ impl App {
             return;
         }
         let preset = match self.edit_target {
+            // The live keyboard is a kit → save the whole kit (all its zones).
+            Target::Live if self.live_is_kit => Preset::capture_kit(&name, self.kit_zones.clone()),
             Target::Track(i) => match &self.track_edit {
                 Some(te) if te.idx == i => Preset::capture(&name, te.model.as_ref(), &te.engine),
                 _ => Preset::capture(&name, self.models[self.selected].as_ref(), &self.engine),
@@ -282,6 +284,19 @@ impl App {
 
     /// Load a preset onto the current target (the live instrument or a track).
     fn apply_preset(&mut self, preset: &Preset) {
+        // A kit preset always loads onto the live keyboard (kit mode). Kit tracks
+        // aren't editable in place yet — re-record from the live kit to place one.
+        if preset.is_kit() {
+            self.live_is_kit = true;
+            self.kit_zones = preset.zones.clone();
+            self.edit_target = Target::Live;
+            self.send_live_kit();
+            self.preset_name = preset.name.clone();
+            self.preset_status =
+                format!("Loaded kit “{}” ({} zones) onto the keyboard.", preset.name, preset.zones.len());
+            return;
+        }
+
         let Some(model) = preset.build_model() else {
             self.preset_status =
                 format!("Can't load “{}”: unknown model “{}”.", preset.name, preset.model_id);
@@ -728,7 +743,12 @@ impl App {
                     .desired_width(160.0),
             );
             let save_on_enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button("💾 Save").clicked() || save_on_enter {
+            let save_hint = if self.edit_target == Target::Live && self.live_is_kit {
+                "Save the live kit (all its zones) as a preset"
+            } else {
+                "Save the current instrument as a preset"
+            };
+            if ui.button("💾 Save").on_hover_text(save_hint).clicked() || save_on_enter {
                 self.save_preset();
             }
 
@@ -745,14 +765,18 @@ impl App {
                 .selected_text(load_label)
                 .show_ui(ui, |ui| {
                     for (i, p) in self.preset_list.iter().enumerate() {
-                        let model_name = self
-                            .models
-                            .iter()
-                            .find(|m| m.id() == p.model_id)
-                            .map(|m| m.display_name())
-                            .unwrap_or(p.model_id.as_str());
+                        let kind = if p.is_kit() {
+                            format!("🥁 Kit ({})", p.zones.len())
+                        } else {
+                            self.models
+                                .iter()
+                                .find(|m| m.id() == p.model_id)
+                                .map(|m| m.display_name())
+                                .unwrap_or(p.model_id.as_str())
+                                .to_string()
+                        };
                         if ui
-                            .selectable_label(false, format!("{}  ·  {}", p.name, model_name))
+                            .selectable_label(false, format!("{}  ·  {}", p.name, kind))
                             .clicked()
                         {
                             to_load = Some(i);
