@@ -1745,6 +1745,23 @@ impl App {
                 painter.rect_filled(rrect, 2.0, fill);
                 if selected {
                     painter.rect_stroke(rrect, 2.0, egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(210, 235, 210)));
+                    // Grab handles on the true edges (left edge in the first row,
+                    // right edge in the last row) so resizing is discoverable.
+                    let handle = egui::Color32::from_rgb(225, 245, 225);
+                    if r == r0 {
+                        painter.rect_filled(
+                            egui::Rect::from_min_max(egui::pos2(x0, y0 + 2.0), egui::pos2(x0 + 4.0, y0 + lane_h - 1.0)),
+                            1.0,
+                            handle,
+                        );
+                    }
+                    if r == r1.min(n_rows - 1) {
+                        painter.rect_filled(
+                            egui::Rect::from_min_max(egui::pos2(x1 - 4.0, y0 + 2.0), egui::pos2(x1, y0 + lane_h - 1.0)),
+                            1.0,
+                            handle,
+                        );
+                    }
                 }
             }
             // Notes, repeated across the clip's length.
@@ -1815,20 +1832,52 @@ impl App {
             if let (Some((ci, kind, _, _)), Some(p)) = (self.arr_drag, resp.interact_pointer_pos()) {
                 let c = &clips[ci];
                 let orig_len = if c.length > 0.0 { c.length } else { (song - c.start).max(0.0) };
+                // A sibling's occupied span on the same track (concrete length).
+                let sib_end = |o: &ClipView| o.start + if o.length > 0.0 { o.length } else { tracks[o.track].period.max(1e-4) };
                 match kind {
                     DragKind::ResizeR => {
-                        // Right edge: keep start, grow/shrink length (min one beat).
-                        let len = snap((time_at(p) - c.start).max(beat_secs));
+                        // Right edge: keep start, grow/shrink length. Can't cross
+                        // into the next clip on this track.
+                        let mut limit = f32::INFINITY;
+                        for (i, o) in clips.iter().enumerate() {
+                            if i != ci && o.track == c.track && o.start >= c.start {
+                                limit = limit.min(o.start);
+                            }
+                        }
+                        let max_len = (limit - c.start).max(beat_secs);
+                        let len = snap((time_at(p) - c.start).max(beat_secs)).min(max_len);
                         self.arr_drag = Some((ci, kind, c.start, len));
                     }
                     DragKind::ResizeL => {
-                        // Left edge: keep the end fixed, move start (min one beat).
+                        // Left edge: keep the end fixed, move start. Can't cross
+                        // into the previous clip on this track.
                         let end = c.start + orig_len;
-                        let start = snap(time_at(p)).clamp(0.0, end - beat_secs);
+                        let mut lo = 0.0_f32;
+                        for (i, o) in clips.iter().enumerate() {
+                            if i != ci && o.track == c.track && sib_end(o) <= end {
+                                lo = lo.max(sib_end(o));
+                            }
+                        }
+                        let start = snap(time_at(p)).clamp(lo, end - beat_secs);
                         self.arr_drag = Some((ci, kind, start, end - start));
                     }
                     DragKind::Move => {
-                        self.arr_drag = Some((ci, kind, snap(time_at(p)).max(0.0), orig_len));
+                        // Slide the clip, but not through its neighbours on the
+                        // same track (non-selected clips block it).
+                        let sel = if self.sel_clips.contains(&ci) { self.sel_clips.clone() } else { vec![ci] };
+                        let (mut lo, mut hi) = (0.0_f32, f32::INFINITY);
+                        for (i, o) in clips.iter().enumerate() {
+                            if o.track != c.track || sel.contains(&i) {
+                                continue;
+                            }
+                            if sib_end(o) <= c.start {
+                                lo = lo.max(sib_end(o));
+                            } else if o.start >= c.start + orig_len {
+                                hi = hi.min(o.start - orig_len);
+                            }
+                        }
+                        let start = snap(time_at(p)).clamp(lo, hi.max(lo));
+                        self.arr_drag = Some((ci, kind, start, orig_len));
                     }
                 }
             }
@@ -1896,7 +1945,12 @@ impl App {
                 }
             }
         }
-        let _ = time_at; // (seeking lives in the seek bar below)
+        // Show a horizontal-resize cursor when hovering a clip's grab edge.
+        if let Some(p) = resp.hover_pos() {
+            if matches!(hit_clip(p), Some((_, DragKind::ResizeL)) | Some((_, DragKind::ResizeR))) {
+                ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeHorizontal);
+            }
+        }
         ui.add_space(4.0);
     }
 
@@ -1992,6 +2046,25 @@ impl App {
                         let _ = self.tx.send(Command::RemoveClip { index: ci });
                         self.sel_clips.clear();
                     }
+                });
+                // Loop length of this clip, in whole loops of the track (the clip
+                // repeats the track's content for this many loops).
+                let period = tracks.get(c.track).map(|t| t.period).unwrap_or(0.0).max(1e-4);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Loops:").small());
+                    let mut loops = (c.length / period).round().max(1.0) as i32;
+                    if ui
+                        .add(egui::DragValue::new(&mut loops).range(1..=512))
+                        .on_hover_text("How many times the track loops within this clip — its play length")
+                        .changed()
+                    {
+                        let _ = self.tx.send(Command::SetClip {
+                            index: ci,
+                            start: c.start,
+                            length: loops as f32 * period,
+                        });
+                    }
+                    ui.label(egui::RichText::new(format!("= {:.2}s", c.length)).weak().small());
                 });
                 // Per-clip chop, using a range selected in the track editor (✎).
                 if let Some((st, sa, sb)) = self.sel {

@@ -633,11 +633,15 @@ impl Studio {
                 if track < self.tracks.len() {
                     self.push_undo();
                     let sr = self.sr;
-                    self.arrangement.push(Clip::at(
-                        track,
-                        (start.max(0.0) * sr).round() as u64,
-                        (length.max(0.0) * sr).round() as u64,
-                    ));
+                    let period = self.tracks[track].period.max(1);
+                    // A clip always has a concrete length (never fills the song).
+                    let len = {
+                        let l = (length.max(0.0) * sr).round() as u64;
+                        if l == 0 { period } else { l }
+                    };
+                    let want = (start.max(0.0) * sr).round() as u64;
+                    let at = self.free_slot(track, usize::MAX, want, len);
+                    self.arrangement.push(Clip::at(track, at, len));
                     self.after_arrangement_change();
                 }
             }
@@ -647,7 +651,7 @@ impl Studio {
                     let sr = self.sr;
                     let c = &mut self.arrangement[index];
                     c.start = (start.max(0.0) * sr).round() as u64;
-                    c.length = (length.max(0.0) * sr).round() as u64;
+                    c.length = ((length.max(0.0) * sr).round() as u64).max(1);
                     self.after_arrangement_change();
                 }
             }
@@ -656,7 +660,12 @@ impl Studio {
                     self.push_undo();
                     let sr = self.sr;
                     let mut c = self.arrangement[index].clone();
-                    c.start = (dest.max(0.0) * sr).round() as u64;
+                    let len = c.length.max(1);
+                    let want = (dest.max(0.0) * sr).round() as u64;
+                    // Drop the copy into the nearest free space so it never lands
+                    // on top of the original (or any other clip on this track).
+                    c.start = self.free_slot(c.track, usize::MAX, want, len);
+                    c.length = len;
                     c.was_active = false;
                     self.arrangement.push(c);
                     self.after_arrangement_change();
@@ -1185,6 +1194,14 @@ impl Studio {
                 })
                 .collect()
         };
+        // Normalize any legacy fill clips (length 0) to a concrete length equal
+        // to the song, preserving their old "loops for the whole song" playback
+        // while removing the auto-stretch behaviour going forward.
+        for c in &mut self.arrangement {
+            if c.length == 0 {
+                c.length = song.saturating_sub(c.start).max(1);
+            }
+        }
         self.rebuild_playlist();
         self.recompute_song_len();
         self.pos = 0;
@@ -1349,7 +1366,10 @@ impl Studio {
                 self.remove_track(idx);
             } else if !self.arrangement.iter().any(|c| c.track == idx) {
                 // Auto-place the new track — at the playhead (arrange punch-in) or 0.
-                self.arrangement.push(Clip::at(idx, origin, 0));
+                // Give it a concrete one-loop length so it never fills to the song
+                // end (which would grow/overlap as the arrangement changes).
+                let period = self.tracks.get(idx).map(|t| t.period.max(1)).unwrap_or(1);
+                self.arrangement.push(Clip::at(idx, origin, period));
             }
         }
         self.rec_origin = 0;
@@ -1415,6 +1435,35 @@ impl Studio {
             })
             .max()
             .unwrap_or(0)
+    }
+
+    /// Find a start (samples) at or after `desired` where a `len`-long clip on
+    /// `track` fits without overlapping any existing clip on that track (the
+    /// clip at `exclude` is ignored — pass `usize::MAX` for none). Overlaps are
+    /// resolved by pushing right to just past each clip in the way.
+    fn free_slot(&self, track: usize, exclude: usize, desired: u64, len: u64) -> u64 {
+        let mut sibs: Vec<(u64, u64)> = self
+            .arrangement
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| c.track == track && *i != exclude)
+            .map(|(_, c)| (c.start, c.start + c.length.max(1)))
+            .collect();
+        sibs.sort_by_key(|s| s.0);
+        let mut s = desired;
+        let mut changed = true;
+        let mut guard = 0;
+        while changed && guard <= sibs.len() {
+            changed = false;
+            for &(a, b) in &sibs {
+                if s < b && s + len > a {
+                    s = b; // shove past this clip
+                    changed = true;
+                }
+            }
+            guard += 1;
+        }
+        s
     }
 
     /// Set the transport wrap length to the current song length.
@@ -2562,6 +2611,38 @@ mod tests {
         assert_eq!(s.arrangement[2].start, (0.8 * 48_000.0) as u64);
         s.handle(Command::RemoveClip { index: 0 });
         assert_eq!(s.arrangement.len(), 2);
+    }
+
+    #[test]
+    fn duplicate_lands_in_free_space_and_never_resizes_the_original() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        // The auto-placed clip has a concrete length (no "fill to song" clip).
+        let orig = s.arrangement[0].clone();
+        assert!(orig.length > 0, "clip carries a concrete length");
+
+        // Duplicating onto the original's own spot must shove the copy clear.
+        s.handle(Command::DuplicateClip { index: 0, dest: 0.0 });
+        assert_eq!(s.arrangement.len(), 2);
+        assert_eq!(s.arrangement[0].length, orig.length, "original length untouched");
+        let copy = &s.arrangement[1];
+        assert!(
+            copy.start >= orig.start + orig.length,
+            "copy sits after the original with no overlap"
+        );
+        assert_eq!(copy.length, orig.length, "copy keeps the source length");
+    }
+
+    #[test]
+    fn added_clip_gets_a_concrete_length_and_avoids_overlap() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        let period = s.tracks[0].period;
+        // Ask for a fill (length 0) at bar 0, where the auto clip already sits.
+        s.handle(Command::AddClip { track: 0, start: 0.0, length: 0.0 });
+        let added = s.arrangement.last().unwrap();
+        assert_eq!(added.length, period, "fill request became one concrete loop");
+        assert!(added.start >= period, "pushed past the existing clip, no overlap");
     }
 
     #[test]
