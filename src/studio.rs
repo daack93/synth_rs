@@ -140,6 +140,9 @@ pub enum Command {
     AddClip { track: usize, start: f32, length: f32 },
     /// Move/resize the clip at `index`: new `start` and `length` (seconds).
     SetClip { index: usize, start: f32, length: f32 },
+    /// Trim the clip's front edge: set `start`/`length` and advance the loop
+    /// `offset` (seconds) so the content stays anchored (front trim, not move).
+    SetClipTrim { index: usize, start: f32, length: f32, offset: f32 },
     /// Copy the clip at `index` to start at `dest` (seconds).
     DuplicateClip { index: usize, dest: f32 },
     /// Remove the clip at `index`.
@@ -240,6 +243,10 @@ struct Clip {
     start: u64,
     /// `0` = fill: loop from `start` to the end of the song.
     length: u64,
+    /// Offset (samples, reduced mod period) into the track's loop where this
+    /// clip's playback begins. Trimming the front edge advances this so the
+    /// loop content stays anchored while the clip's left edge slides over it.
+    offset: u64,
     was_active: bool,
     /// Per-clip transpose (semitones) and velocity scale — linked to the base.
     transpose: i32,
@@ -250,7 +257,7 @@ struct Clip {
 
 impl Clip {
     fn at(track: usize, start: u64, length: u64) -> Clip {
-        Clip { track, start, length, was_active: false, transpose: 0, vel: 1.0, own_events: None }
+        Clip { track, start, length, offset: 0, was_active: false, transpose: 0, vel: 1.0, own_events: None }
     }
 }
 
@@ -329,6 +336,8 @@ pub struct ClipView {
     pub track: usize,
     pub start: f32,
     pub length: f32,
+    /// Loop-phase offset (seconds) where playback begins — front-trim amount.
+    pub offset: f32,
     pub transpose: i32,
     pub vel: f32,
     /// True if the clip's notes have been forked from the track (make-unique).
@@ -654,6 +663,21 @@ impl Studio {
                     let c = &mut self.arrangement[index];
                     c.start = (start.max(0.0) * sr).round() as u64;
                     c.length = ((length.max(0.0) * sr).round() as u64).max(1);
+                    self.after_arrangement_change();
+                }
+            }
+            Command::SetClipTrim { index, start, length, offset } => {
+                if index < self.arrangement.len() {
+                    self.push_undo();
+                    let sr = self.sr;
+                    let period = self.tracks.get(self.arrangement[index].track).map(|t| t.period.max(1)).unwrap_or(1);
+                    let c = &mut self.arrangement[index];
+                    c.start = (start.max(0.0) * sr).round() as u64;
+                    c.length = ((length.max(0.0) * sr).round() as u64).max(1);
+                    // Reduce the offset mod period (it may arrive negative when the
+                    // front edge is dragged left past the loop start).
+                    let off = (offset * sr).round() as i64;
+                    c.offset = off.rem_euclid(period as i64) as u64;
                     self.after_arrangement_change();
                 }
             }
@@ -1188,6 +1212,7 @@ impl Studio {
                     track: c.track,
                     start: (c.start * sr).round() as u64,
                     length: (c.length * sr).round() as u64,
+                    offset: (c.offset * sr).round() as u64,
                     was_active: false,
                     transpose: c.transpose,
                     vel: c.vel,
@@ -1275,6 +1300,7 @@ impl Studio {
                 track: c.track,
                 start: c.start as f32 / sr,
                 length: c.length as f32 / sr,
+                offset: c.offset as f32 / sr,
                 transpose: c.transpose,
                 vel: c.vel,
                 own_events: c.own_events.as_ref().map(|evs| {
@@ -1654,9 +1680,9 @@ impl Studio {
         let recording = self.recording;
         let song = self.loop_len.unwrap_or(0);
         for k in 0..self.playlist.len() {
-            let (ti, start, length, transpose, velscale) = {
+            let (ti, start, length, offset, transpose, velscale) = {
                 let c = &self.playlist[k];
-                (c.track, c.start, c.length, c.transpose, c.vel)
+                (c.track, c.start, c.length, c.offset, c.transpose, c.vel)
             };
             if ti >= self.tracks.len() {
                 continue;
@@ -1676,7 +1702,9 @@ impl Studio {
                 }
                 continue;
             }
-            let local = (pos - start) % period;
+            // Offset advances the loop phase so the front edge trims content
+            // instead of moving it (offset is already reduced mod period).
+            let local = ((pos - start) + offset % period) % period;
             // At the top of each period (and at the clip's start) rewind automation.
             if local == 0 {
                 reset_track_automation(&mut self.tracks[ti]);
@@ -1800,6 +1828,7 @@ impl Studio {
                 track: c.track,
                 start: c.start as f32 / self.sr,
                 length: c.length as f32 / self.sr,
+                offset: c.offset as f32 / self.sr,
                 transpose: c.transpose,
                 vel: c.vel,
                 unique: c.own_events.is_some(),
@@ -2626,6 +2655,26 @@ mod tests {
     }
 
     #[test]
+    fn front_trim_offsets_the_loop_phase_without_moving_content() {
+        let mut s = Studio::new(48_000.0);
+        // Period 0.1s, a note struck at loop-local 0 (held, retriggers each pass).
+        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        assert_eq!(s.tracks[0].period, (0.1 * 48_000.0) as u64);
+
+        // Trim the front by half a period: same window start/len, offset 0.05s.
+        s.handle(Command::SetClipTrim { index: 0, start: 0.0, length: 0.1, offset: 0.05 });
+        assert_eq!(s.arrangement[0].offset, (0.05 * 48_000.0) as u64);
+
+        // Play from 0: the note no longer fires at the clip start — it waits for
+        // the loop phase (period − offset = 0.05s) to come around.
+        s.handle(Command::Seek(0.0));
+        drain(&mut s, 100);
+        assert_eq!(s.tracks[0].inst.active_voices(), 0, "front trim delayed the note");
+        drain(&mut s, 2_600); // cross 0.05s (2400 samples)
+        assert!(s.tracks[0].inst.active_voices() > 0, "note fires once the offset elapses");
+    }
+
+    #[test]
     fn set_track_period_changes_the_loop_length_nondestructively() {
         let mut s = Studio::new(48_000.0);
         s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
@@ -2753,7 +2802,7 @@ mod tests {
         // A single track, placed by a clip starting at 0.2s.
         let data = LoopData {
             length: 0.4,
-            arrangement: vec![ClipData { track: 0, start: 0.2, length: 0.0, transpose: 0, vel: 1.0, own_events: None }],
+            arrangement: vec![ClipData { track: 0, start: 0.2, length: 0.0, offset: 0.0, transpose: 0, vel: 1.0, own_events: None }],
             tracks: vec![trk],
         };
 

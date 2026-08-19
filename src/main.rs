@@ -1548,7 +1548,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.strong("Arrangement");
             let hint = if arrange_mode {
-                "click to select · drag a clip to move · drag an edge to grow/shrink the loop · click the strip under a row to seek · dbl-click empty lane to place (snaps to 1/4 note)"
+                "click to select · drag a clip to move · right edge grows/shrinks the loop · left edge trims the start · click the strip under a row to seek · dbl-click empty lane to place (snaps to 1/4 note)"
             } else {
                 "(Loop mode — playback ignores placement; switch to 🎬 Arrange to hear it)"
             };
@@ -1726,6 +1726,12 @@ impl App {
                 _ => (c.start, default_len),
             };
             let end = start + len;
+            // Effective loop offset for drawing: a front-trim (left-edge) drag
+            // advances the offset by how far the edge moved, so content stays put.
+            let eff_offset = match self.arr_drag {
+                Some((di, DragKind::ResizeL, ps, _)) if di == ci => c.offset + (ps - c.start),
+                _ => c.offset,
+            };
             let selected = self.sel_clips.contains(&ci);
             let fill = if t.muted {
                 egui::Color32::from_gray(70)
@@ -1768,14 +1774,17 @@ impl App {
                     }
                 }
             }
-            // Notes, repeated across the clip's length.
+            // Notes, repeated across the clip's length. The content grid is
+            // anchored at `start - offset`, so a front trim slides the window
+            // over stationary notes rather than moving them.
             let period = t.period.max(1e-6);
-            let reps = ((len / period).ceil() as i32).clamp(1, 512);
+            let anchor = start - eff_offset;
+            let reps = (((end - anchor) / period).ceil() as i32 + 1).clamp(1, 512);
             for rep in 0..reps {
-                let base = start + rep as f32 * period;
+                let base = anchor + rep as f32 * period;
                 for nsp in &t.notes {
                     let ns = base + nsp.start * period;
-                    if ns >= end {
+                    if ns < start || ns >= end {
                         continue;
                     }
                     let r = ((ns / row_secs) as usize).min(n_rows - 1);
@@ -1904,7 +1913,11 @@ impl App {
                         let _ = self.tx.send(Command::SetClip { index: ci, start, length: len });
                     }
                     DragKind::ResizeL => {
-                        let _ = self.tx.send(Command::SetClip { index: ci, start, length: len });
+                        // Front trim: advance the loop offset by how far the left
+                        // edge moved so the content stays anchored in place.
+                        let c = &clips[ci];
+                        let offset = c.offset + (start - c.start);
+                        let _ = self.tx.send(Command::SetClipTrim { index: ci, start, length: len, offset });
                     }
                     DragKind::Move => {
                         let delta = start - clips[ci].start;

@@ -118,6 +118,9 @@ pub struct ClipData {
     pub transpose: i32,
     #[serde(default = "one")]
     pub vel: f32,
+    /// Loop-phase offset (seconds) where playback begins — front-trim amount.
+    #[serde(default)]
+    pub offset: f32,
     /// Forked notes ("make unique"); absent means the clip uses its track's.
     #[serde(default)]
     pub own_events: Option<Vec<LoopEvent>>,
