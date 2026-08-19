@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::models::basic_wave::{BasicWave, Waveform};
+use crate::models::musical_string::MusicalString;
 use crate::models::{model_from_id, FtmModel};
 use crate::instrument::EngineParams;
 use crate::project::ZoneData;
@@ -92,6 +93,17 @@ pub fn factory() -> Vec<Preset> {
     }
 
     vec![
+        // ---- Musical String (music-friendly controls) ----
+        make(
+            "Soft Nylon",
+            MusicalString { pluck_pos: 0.14, inharmonicity: 0.0004, decay_time: 1.6, hf_damping: 1.4, num_modes: 32 },
+            eng(0.6, 3.0, 130.0),
+        ),
+        make(
+            "Glass Pluck",
+            MusicalString { pluck_pos: 0.10, inharmonicity: 0.0018, decay_time: 2.4, hf_damping: 0.7, num_modes: 44 },
+            eng(0.6, 3.0, 160.0),
+        ),
         // ---- Basic Wave (reference oscillators) ----
         make("Triangle Lead", BasicWave { waveform: Waveform::Triangle, harmonics: 16, decay_time: 1.5 }, eng(0.5, 3.0, 120.0)),
         make("Saw Lead", BasicWave { waveform: Waveform::Saw, harmonics: 40, decay_time: 1.2 }, eng(0.45, 3.0, 120.0)),
