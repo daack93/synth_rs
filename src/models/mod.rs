@@ -13,6 +13,7 @@
 //! amplitudes and decay rates of its modes and register it in [`registry`].
 
 pub mod basic_wave;
+pub mod musical_string;
 
 /// Maximum partials a single voice can hold (hard array bound).
 pub const MAX_MODES: usize = 512;
@@ -178,6 +179,7 @@ pub fn model_from_id(id: &str, params: &serde_json::Value) -> Option<Box<dyn Ftm
     }
     match id {
         "basic_wave" => boxed::<basic_wave::BasicWave>(params),
+        "musical_string" => boxed::<musical_string::MusicalString>(params),
         _ => None,
     }
 }
@@ -191,6 +193,7 @@ impl Clone for Box<dyn FtmModel> {
 /// All available models, in picker order. Add new plugins here.
 pub fn registry() -> Vec<Box<dyn FtmModel>> {
     vec![
+        Box::new(musical_string::MusicalString::default()),
         Box::new(basic_wave::BasicWave::default()),
     ]
 }

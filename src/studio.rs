@@ -2344,6 +2344,25 @@ mod tests {
     }
 
     #[test]
+    fn set_track_model_swaps_instrument_live() {
+        use crate::models::basic_wave::BasicWave;
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::Tap);
+        s.handle(Command::NoteOn { note: 60, vel: 1.0 });
+        drain(&mut s, 2400);
+        s.handle(Command::NoteOff { note: 60 });
+        s.handle(Command::Tap); // close loop
+        assert_eq!(s.tracks.len(), 1);
+        let before = s.tracks[0].inst.model_id();
+        assert_ne!(before, "basic_wave", "default is the first registered model");
+
+        // Swap the track's instrument to a different model while it loops.
+        s.handle(Command::SetTrackModel(0, Box::new(BasicWave::default())));
+        assert_eq!(s.tracks[0].inst.model_id(), "basic_wave");
+        drain(&mut s, 4800); // must keep rendering finite / in range
+    }
+
+    #[test]
     fn kit_records_and_roundtrips() {
         use crate::project::ZoneData;
         let zone = |name: &str, lo, hi, id: &str| ZoneData {
