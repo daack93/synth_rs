@@ -15,6 +15,7 @@ use crate::models::basic_wave::{BasicWave, Waveform};
 use crate::models::drum_membrane::DrumMembrane;
 use crate::models::musical_string::MusicalString;
 use crate::models::pure_string::PureString;
+use crate::models::webster_horn::{Boundary, Wavefront, WebsterHorn};
 use crate::models::{model_from_id, Excitation, FtmModel};
 use crate::instrument::EngineParams;
 use crate::project::ZoneData;
@@ -175,6 +176,89 @@ pub fn factory() -> Vec<Preset> {
             "Timpani",
             DrumMembrane { strike_pos: 0.7, damping: 2.5, freq_dep_damping: -1.5, radius: 9.0, depth: 48, stiffness: 1.0, ..DrumMembrane::default() },
             eng(0.6, 2.0, 200.0),
+        ),
+        // ---- Webster Horn ----
+        // Trumpet: physical bore (contracting throat + flare) from Dave's config.
+        // Their freq_dependent_damping = +0.08 maps to our −0.08 sign convention.
+        make(
+            "Trumpet",
+            WebsterHorn {
+                boundary: Boundary::Brass,
+                r1: 0.0045,
+                r2: -0.0030,
+                r3: 0.0320,
+                length: 1.4,
+                wave_speed: 343.0,
+                blow_pos: 0.0,
+                depth: 32,
+                resolution: 512,
+                damping: 10.0,
+                freq_dep_damping: -0.08,
+                visco_loss: 1.5,             // narrow leadpipe = warm boundary-layer loss
+                radiation: 1.6,              // bright, open bell
+                wavefront: Wavefront::Spherical, // real bore: curved wavefronts at the bell
+                ..WebsterHorn::default()
+            },
+            eng(0.6, 30.0, 45.0),
+        ),
+        // French Horn: same bore idea, longer + darker (more HF damping).
+        make(
+            "French Horn",
+            WebsterHorn {
+                boundary: Boundary::Brass,
+                r1: 0.0045,
+                r2: -0.0020,
+                r3: 0.0250,
+                length: 2.4,
+                blow_pos: 0.0,
+                depth: 30,
+                resolution: 400,
+                damping: 8.0,
+                freq_dep_damping: -0.10,
+                visco_loss: 2.5,             // long narrow tubing = mellow, stuffed
+                radiation: 0.5,              // dark, backward-facing bell
+                wavefront: Wavefront::Spherical,
+                ..WebsterHorn::default()
+            },
+            eng(0.55, 30.0, 150.0),
+        ),
+        // Didgeridoo: near-lossless drone — barely damps, rings on and on. A
+        // touch of wall loss for wooden warmth; almost no bell radiation.
+        make(
+            "Didgeridoo",
+            WebsterHorn { boundary: Boundary::Open, blow_pos: 0.10, r2: 0.5, r3: 0.5, length: 3.0, damping: 0.25, freq_dep_damping: -0.03, visco_loss: 0.6, radiation: 0.15, depth: 20, ..WebsterHorn::default() },
+            eng(0.6, 20.0, 400.0),
+        ),
+        // Trombone: long cylindrical brass with a bell flare.
+        make(
+            "Trombone",
+            WebsterHorn { boundary: Boundary::Brass, r1: 0.0068, r2: -0.001, r3: 0.030, length: 2.7, blow_pos: 0.0, depth: 30, resolution: 400, damping: 8.0, freq_dep_damping: -0.08, visco_loss: 1.8, radiation: 1.4, wavefront: Wavefront::Spherical, ..WebsterHorn::default() },
+            eng(0.6, 25.0, 60.0),
+        ),
+        // ---- Woodwinds (bore shape + end condition set the character) ----
+        // Flute: open cylinder (all harmonics), pure and airy — few modes.
+        make(
+            "Flute",
+            WebsterHorn { boundary: Boundary::Open, r1: 0.0095, r2: 0.0, r3: 0.001, length: 0.6, blow_pos: 0.15, depth: 12, resolution: 300, damping: 3.0, freq_dep_damping: -0.10, visco_loss: 0.3, radiation: 0.5, ..WebsterHorn::default() },
+            eng(0.55, 40.0, 80.0),
+        ),
+        // Clarinet: closed cylinder → odd harmonics only → the hollow tone.
+        make(
+            "Clarinet",
+            WebsterHorn { boundary: Boundary::Brass, r1: 0.0073, r2: 0.0, r3: 0.002, length: 0.66, blow_pos: 0.0, depth: 18, resolution: 300, damping: 4.0, freq_dep_damping: -0.08, visco_loss: 0.8, radiation: 0.6, ..WebsterHorn::default() },
+            eng(0.6, 30.0, 70.0),
+        ),
+        // Bassoon: long narrow closed cone → full harmonics, dark and reedy.
+        make(
+            "Bassoon",
+            WebsterHorn { boundary: Boundary::Brass, r1: 0.004, r2: 0.008, r3: 0.001, length: 2.5, blow_pos: 0.0, depth: 28, resolution: 400, damping: 6.0, freq_dep_damping: -0.10, visco_loss: 2.0, radiation: 0.5, ..WebsterHorn::default() },
+            eng(0.6, 30.0, 100.0),
+        ),
+        // Alto Sax: wide closed cone → full harmonics, bright and reedy.
+        make(
+            "Alto Sax",
+            WebsterHorn { boundary: Boundary::Brass, r1: 0.005, r2: 0.030, r3: 0.002, length: 1.0, blow_pos: 0.0, depth: 28, resolution: 400, damping: 5.0, freq_dep_damping: -0.08, visco_loss: 1.0, radiation: 1.2, wavefront: Wavefront::Spherical, ..WebsterHorn::default() },
+            eng(0.6, 25.0, 80.0),
         ),
         // ---- Basic Wave (reference oscillators) ----
         make("Triangle Lead", BasicWave { waveform: Waveform::Triangle, harmonics: 16, decay_time: 1.5 }, eng(0.5, 3.0, 120.0)),
