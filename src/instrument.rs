@@ -476,6 +476,29 @@ mod tests {
     }
 
     #[test]
+    fn wind_sustains_while_string_decays() {
+        use crate::models::pure_string::PureString;
+        use crate::models::webster_horn::WebsterHorn;
+        let hold = |model: Box<dyn FtmModel>| {
+            let mut inst = Instrument::with_config(
+                48_000.0,
+                make_sine_table(),
+                model,
+                EngineParams::default(),
+            );
+            inst.note_on(60, 1.0);
+            let start = render_rms(&mut inst, 0.05);
+            let _ = render_rms(&mut inst, 2.0); // hold, no note-off
+            let end = render_rms(&mut inst, 0.05);
+            (start, end)
+        };
+        let (s0, s1) = hold(Box::new(PureString::default()));
+        assert!(s1 < s0 * 0.5, "plucked string decays while held ({s0} -> {s1})");
+        let (h0, h1) = hold(Box::new(WebsterHorn::default()));
+        assert!(h1 > h0 * 0.7, "blown horn sustains while held ({h0} -> {h1})");
+    }
+
+    #[test]
     fn switching_models_live_is_stable() {
         let mut inst = instrument();
         inst.note_on(60, 0.9);
