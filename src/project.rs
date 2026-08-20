@@ -113,11 +113,6 @@ pub struct ClipData {
     pub start: f32,
     #[serde(default)]
     pub length: f32,
-    /// Per-clip edit layer: transpose (semitones) + velocity scale (default 1).
-    #[serde(default)]
-    pub transpose: i32,
-    #[serde(default = "one")]
-    pub vel: f32,
     /// Loop-phase offset (seconds) where playback begins — front-trim amount.
     #[serde(default)]
     pub offset: f32,
@@ -137,10 +132,6 @@ pub struct ClipData {
 
 fn yes() -> bool {
     true
-}
-
-fn one() -> f32 {
-    1.0
 }
 
 /// A complete loop: its tracks (content) plus an arrangement of clips placing

@@ -121,6 +121,8 @@ pub enum Command {
     Record,
     /// Stop playback, keep loops.
     Stop,
+    /// Whether the song repeats at the end (off = play once, then stop).
+    SetRepeat(bool),
     /// Clear all loops.
     Reset,
     /// Pedal mode: record one extra pass into a new track (legacy; kept for tests).
@@ -139,8 +141,6 @@ pub enum Command {
     /// Undo / redo the last destructive edit.
     Undo,
     Redo,
-    /// Stretch the whole loop in time by `factor` (>1 = longer/slower).
-    TimeStretch(f32),
     /// Add a clip placing `track` at `start` for `length` seconds (0 = one loop).
     AddClip { track: usize, start: f32, length: f32 },
     /// Move/resize the clip at `index`: new `start` and `length` (seconds).
@@ -155,8 +155,6 @@ pub enum Command {
     RemoveClip { index: usize },
     /// Set the playhead position (seconds).
     Seek(f32),
-    /// Set a clip's transpose (semitones) + velocity scale.
-    SetClipLayer { index: usize, transpose: i32, vel: f32 },
     // ---- in-clip selection edits (all fork into independent clips) ----
     /// Crop the clip to the timeline range `[a, b)` (seconds).
     CropClip { index: usize, a: f32, b: f32 },
@@ -245,9 +243,6 @@ struct Clip {
     /// Whether the content repeats. Off ⇒ play once, then silence.
     looping: bool,
     was_active: bool,
-    /// Per-clip transpose (semitones) and velocity scale.
-    transpose: i32,
-    vel: f32,
     /// The clip's own notes once forked; `None` ⇒ use the track's recording.
     own_events: Option<Vec<Event>>,
 }
@@ -263,8 +258,6 @@ impl Clip {
             loop_len: 0,
             looping: true,
             was_active: false,
-            transpose: 0,
-            vel: 1.0,
             own_events: None,
         }
     }
@@ -354,8 +347,6 @@ pub struct ClipView {
     pub loop_len: f32,
     /// Whether the clip repeats.
     pub looping: bool,
-    pub transpose: i32,
-    pub vel: f32,
     /// True if the clip owns its own (forked) notes.
     pub unique: bool,
 }
@@ -438,6 +429,8 @@ pub struct Studio {
     mode: LooperMode,
 
     playing: bool,
+    /// Whether playback repeats at the song end (default off = play once).
+    repeat: bool,
     loop_len: Option<u64>,
     pos: u64,
     /// Track index currently capturing live input, if any.
@@ -500,6 +493,7 @@ impl Studio {
             playlist: Vec::new(),
             mode: LooperMode::Pedal,
             playing: false,
+            repeat: false,
             loop_len: None,
             pos: 0,
             recording: None,
@@ -582,6 +576,7 @@ impl Studio {
             Command::Play => self.play(),
             Command::Record => self.record(),
             Command::Stop => self.stop(),
+            Command::SetRepeat(on) => self.repeat = on,
             Command::Reset => self.reset(),
             Command::ArmOverdub => self.request_overdub_one_pass(),
             Command::ToggleMute(i) => {
@@ -636,7 +631,6 @@ impl Studio {
             Command::SetMasterVolume(v) => self.master = v.max(0.0),
             Command::Undo => self.undo(),
             Command::Redo => self.redo(),
-            Command::TimeStretch(factor) => self.time_stretch(factor),
             Command::AddClip { track, start, length } => {
                 if track < self.tracks.len() {
                     self.push_undo();
@@ -702,15 +696,6 @@ impl Studio {
                     self.push_undo();
                     self.arrangement.remove(index);
                     self.after_arrangement_change();
-                }
-            }
-            Command::SetClipLayer { index, transpose, vel } => {
-                if index < self.arrangement.len() {
-                    self.push_undo();
-                    let c = &mut self.arrangement[index];
-                    c.transpose = transpose.clamp(-48, 48);
-                    c.vel = vel.clamp(0.0, 2.0);
-                    self.mark_structure_dirty();
                 }
             }
             Command::CropClip { index, a, b } => self.crop_clip(index, a, b),
@@ -1135,41 +1120,6 @@ impl Studio {
         self.redo_stack.clear();
     }
 
-    /// Stretch the whole loop in time: scale every event + automation position
-    /// and the loop length by `factor` (>1 = longer/slower).
-    fn time_stretch(&mut self, factor: f32) {
-        let Some(len) = self.loop_len else { return };
-        if !(factor > 0.0) || (factor - 1.0).abs() < 1e-4 {
-            return;
-        }
-        let _ = len;
-        self.push_undo();
-        let f = factor as f64;
-        // Scale every track's period and its (period-relative) events/automation.
-        for t in &mut self.tracks {
-            let new_period = ((t.period as f64 * f).round() as u64).max(1);
-            let scale = |pos: u64| ((pos as f64 * f).round() as u64).min(new_period - 1);
-            for e in &mut t.events {
-                e.pos = scale(e.pos);
-            }
-            for a in &mut t.auto {
-                a.pos = scale(a.pos);
-            }
-            t.period = new_period;
-            t.events.sort_by_key(|e| e.pos);
-            t.auto.sort_by_key(|a| a.pos);
-        }
-        // Scale clip placements to match.
-        for c in &mut self.arrangement {
-            c.start = (c.start as f64 * f).round() as u64;
-            c.length = (c.length as f64 * f).round() as u64;
-        }
-        self.rebuild_playlist();
-        self.recompute_song_len();
-        self.pos = 0;
-        self.reset_cursors();
-        self.mark_structure_dirty();
-    }
 
     /// Build the live [`Playable`] from a UI config (single instrument or kit).
     fn build_live(&self, cfg: LiveConfig) -> Playable {
@@ -1300,8 +1250,6 @@ impl Studio {
                     loop_len: (c.loop_len * sr).round() as u64,
                     looping: c.looping,
                     was_active: false,
-                    transpose: c.transpose,
-                    vel: c.vel,
                     own_events: c.own_events.as_ref().map(|evs| {
                         evs.iter()
                             .map(|e| Event {
@@ -1390,8 +1338,6 @@ impl Studio {
                 content_len: c.content_len as f32 / sr,
                 loop_len: c.loop_len as f32 / sr,
                 looping: c.looping,
-                transpose: c.transpose,
-                vel: c.vel,
                 own_events: c.own_events.as_ref().map(|evs| {
                     evs.iter()
                         .map(|e| {
@@ -1924,9 +1870,9 @@ impl Studio {
         let recording = self.recording;
         let song = self.loop_len.unwrap_or(0);
         for k in 0..self.playlist.len() {
-            let (ti, start, length, offset, content_len, loop_len, looping, transpose, velscale) = {
+            let (ti, start, length, offset, content_len, loop_len, looping) = {
                 let c = &self.playlist[k];
-                (c.track, c.start, c.length, c.offset, c.content_len, c.loop_len, c.looping, c.transpose, c.vel)
+                (c.track, c.start, c.length, c.offset, c.content_len, c.loop_len, c.looping)
             };
             if ti >= self.tracks.len() {
                 continue;
@@ -1984,10 +1930,8 @@ impl Studio {
                     .iter()
                     .take_while(|e| e.pos == local)
                     .map(|e| match e.msg {
-                        EvMsg::On { note, vel } => {
-                            (true, (note as i32 + transpose).clamp(0, 127) as u8, (vel * velscale).clamp(0.0, 4.0))
-                        }
-                        EvMsg::Off { note } => (false, (note as i32 + transpose).clamp(0, 127) as u8, 0.0),
+                        EvMsg::On { note, vel } => (true, note, vel),
+                        EvMsg::Off { note } => (false, note, 0.0),
                     })
                     .collect()
             };
@@ -2017,11 +1961,21 @@ impl Studio {
         }
         if let Some(len) = self.loop_len {
             if self.pos >= len {
-                self.pos = 0;
-                self.reset_cursors();
-                if self.defining {
-                    // A fixed-length first take just completed one bar-count pass.
-                    self.close_defining();
+                // Recording always wraps (overdub passes / fixed takes need it);
+                // plain playback wraps only when repeat is on, else it stops.
+                let recording = self.defining || self.armed || self.recording.is_some();
+                if self.repeat || recording {
+                    self.pos = 0;
+                    self.reset_cursors();
+                    if self.defining {
+                        // A fixed-length first take just completed one bar pass.
+                        self.close_defining();
+                    }
+                } else {
+                    // Play once: stop at the end and rewind (voices ring out).
+                    self.playing = false;
+                    self.pos = 0;
+                    self.reset_cursors();
                 }
             }
         }
@@ -2095,8 +2049,6 @@ impl Studio {
                     content_len: s as f32 / sr,
                     loop_len: l as f32 / sr,
                     looping: c.looping,
-                    transpose: c.transpose,
-                    vel: c.vel,
                     unique: c.own_events.is_some(),
                 }
             })
@@ -2608,36 +2560,6 @@ mod tests {
         assert_eq!(after, Some(120.0), "the recorded delta rides on the edited base");
     }
 
-    fn two_note_loop() -> crate::project::LoopData {
-        use crate::project::{LoopData, LoopEvent, LoopTrack};
-        LoopData {
-            length: 1.0,
-            arrangement: Vec::new(),
-            tracks: vec![LoopTrack {
-                name: "T".into(),
-                model_id: "musical_string".into(),
-                params: serde_json::json!({}),
-                engine: EngineParams::default(),
-                muted: false,
-                volume: 1.0,
-                pan: 0.0,
-                fade_in: 0.0,
-                fade_out: 0.0,
-                period: None,
-                start: None,
-                span: None,
-                zones: Vec::new(),
-                automation: Vec::new(),
-                events: vec![
-                    LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 },
-                    LoopEvent { t: 0.1, on: false, note: 60, vel: 0.0 },
-                    LoopEvent { t: 0.5, on: true, note: 62, vel: 1.0 },
-                    LoopEvent { t: 0.6, on: false, note: 62, vel: 0.0 },
-                ],
-            }],
-        }
-    }
-
     #[test]
     fn shorter_track_loops_within_a_longer_song() {
         use crate::project::{LoopData, LoopEvent, LoopTrack};
@@ -2810,38 +2732,17 @@ mod tests {
     }
 
     #[test]
-    fn clip_transpose_stays_linked_but_content_edits_fork() {
+    fn content_edits_fork_the_clip() {
         let mut s = Studio::new(48_000.0);
         s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
         assert_eq!(s.arrangement.len(), 1);
-
-        // Transpose + velocity are non-destructive and stay linked to the track.
-        s.handle(Command::SetClipLayer { index: 0, transpose: 5, vel: 0.5 });
-        assert_eq!(s.arrangement[0].transpose, 5);
-        assert!((s.arrangement[0].vel - 0.5).abs() < 1e-6);
-        assert!(s.arrangement[0].own_events.is_none(), "transpose stays linked");
+        assert!(s.arrangement[0].own_events.is_none(), "a fresh clip is linked to its track");
 
         // A content edit (crop) forks the clip into its own independent notes.
         let orig_len = s.arrangement[0].length;
         s.handle(Command::CropClip { index: 0, a: 0.0, b: 0.05 });
         assert!(s.arrangement[0].own_events.is_some(), "crop forks the clip");
         assert!(s.arrangement[0].length < orig_len, "crop shortens the clip");
-    }
-
-    #[test]
-    fn time_stretch_scales_positions_and_length() {
-        let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(two_note_loop())); // length 1.0s
-        s.handle(Command::TimeStretch(2.0));
-        let snap = s.snapshot_loop();
-        assert!((snap.length - 2.0).abs() < 0.01, "length doubled: {}", snap.length);
-        let t62 = snap.tracks[0]
-            .events
-            .iter()
-            .find(|e| e.on && e.note == 62)
-            .map(|e| e.t)
-            .unwrap();
-        assert!((t62 - 1.0).abs() < 0.01, "note 62 (0.5s) pushed to 1.0s: {t62}");
     }
 
     #[test]
@@ -2907,6 +2808,23 @@ mod tests {
         s.handle(Command::DuplicateClip { index: 0, dest: 0.5 });
         assert_eq!(s.arrangement.len(), 2);
         assert!(s.arrangement[1].own_events.is_some(), "the copy owns its notes");
+    }
+
+    #[test]
+    fn play_once_stops_at_end_unless_repeat() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0))); // 0.1s song, playing
+        assert!(s.playing);
+        // Default (no repeat): running past the end stops playback.
+        drain(&mut s, 5_000); // 0.1s = 4800 samples
+        assert!(!s.playing, "stops at the song end when repeat is off");
+
+        // With repeat on, it keeps looping.
+        s.handle(Command::SetRepeat(true));
+        s.handle(Command::Play); // resume
+        assert!(s.playing);
+        drain(&mut s, 5_000);
+        assert!(s.playing, "keeps playing when repeat is on");
     }
 
     fn held_note_loop(pan: f32, volume: f32) -> crate::project::LoopData {

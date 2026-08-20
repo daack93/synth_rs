@@ -116,6 +116,8 @@ struct App {
 
     /// Master output level (linear).
     master_volume: f32,
+    /// Whether the song repeats at the end (default off = play once).
+    repeat: bool,
 
     // Whammy (pitch-bend lever), semitones + configurable range.
     whammy: f32,
@@ -207,6 +209,7 @@ impl App {
             project_status: String::new(),
             confirm_clear: false,
             master_volume: 1.0,
+            repeat: false,
             whammy: 0.0,
             whammy_down: 12.0,
             whammy_up: 2.0,
@@ -1308,6 +1311,15 @@ impl App {
             }
 
             ui.separator();
+            // Repeat toggle (left of Play) — default off = play once, then stop.
+            if ui
+                .add(egui::Button::new("🔁").selected(self.repeat))
+                .on_hover_text("Repeat: loop the song at the end. Off = play once and stop.")
+                .clicked()
+            {
+                self.repeat = !self.repeat;
+                let _ = self.tx.send(Command::SetRepeat(self.repeat));
+            }
             // Play / pause — never records.
             let playing = matches!(state, TransportState::Playing | TransportState::Recording);
             let play_label = if playing { "⏸ Pause" } else { "▶ Play" };
@@ -1360,7 +1372,7 @@ impl App {
                 .changed();
             ui.separator();
 
-            ui.label("Loop");
+            ui.label("Recording Duration");
             changed |= ui
                 .add(
                     egui::DragValue::new(&mut t.bars)
@@ -1373,7 +1385,7 @@ impl App {
                             }
                         }),
                 )
-                .on_hover_text("Fixed loop length in bars (Free = the take sets the length).")
+                .on_hover_text("How long a recording runs: a fixed number of bars auto-stops the take at that length; Free = you stop it with ⏺ Record.")
                 .changed();
             ui.separator();
 
@@ -1451,16 +1463,6 @@ impl App {
                 .clicked()
             {
                 let _ = self.tx.send(Command::Redo);
-            }
-            if !tracks.is_empty() {
-                ui.separator();
-                ui.label("Stretch");
-                if ui.button("½×").on_hover_text("Halve the loop time (faster)").clicked() {
-                    let _ = self.tx.send(Command::TimeStretch(0.5));
-                }
-                if ui.button("2×").on_hover_text("Double the loop time (slower)").clicked() {
-                    let _ = self.tx.send(Command::TimeStretch(2.0));
-                }
             }
         });
         if tracks.is_empty() {
@@ -2090,17 +2092,9 @@ impl App {
             if let Some(c) = clips.get(self.sel_clips[0]).cloned() {
                 let ci = self.sel_clips[0];
                 let beat = (60.0 / self.project.tempo.bpm.max(1.0)).max(1e-4);
-                // Transpose / velocity / duplicate / delete.
+                // Duplicate / delete.
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Clip:").small());
-                    let mut tr = c.transpose;
-                    let mut vl = c.vel;
-                    let ca = ui.add(egui::DragValue::new(&mut tr).range(-24..=24).suffix(" st")).on_hover_text("Transpose").changed();
-                    let cb = ui.add(egui::DragValue::new(&mut vl).range(0.0..=2.0).speed(0.02).prefix("×")).on_hover_text("Velocity").changed();
-                    if ca || cb {
-                        let _ = self.tx.send(Command::SetClipLayer { index: ci, transpose: tr, vel: vl });
-                    }
-                    ui.separator();
                     if ui.button("Duplicate →").on_hover_text("Independent copy at the playhead").clicked() {
                         let _ = self.tx.send(Command::DuplicateClip { index: ci, dest: play * song_secs.max(0.001) });
                     }
