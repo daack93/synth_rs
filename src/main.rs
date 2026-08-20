@@ -1,6 +1,6 @@
-//! FTM Synth — a desktop re-implementation of a 2014 embedded "electric air
-//! guitar". Physical string parameters shape the timbre; an on-screen piano,
-//! the computer keyboard, and a MIDI controller all play it.
+//! Synth.RS Studio — a MIDI synth / production-studio framework. Pluggable FTM
+//! (physical-model) instruments, played from an on-screen piano, the computer
+//! keyboard, or a MIDI controller, recorded and arranged into songs.
 
 mod audio;
 mod export;
@@ -33,12 +33,12 @@ use studio::{
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([880.0, 620.0])
-            .with_title("FTM Synth — physical-model string"),
+            .with_inner_size([980.0, 720.0])
+            .with_title("Synth.RS Studio"),
         ..Default::default()
     };
     eframe::run_native(
-        "FTM Synth",
+        "Synth.RS Studio",
         options,
         Box::new(|_cc| Ok(Box::new(App::new()))),
     )
@@ -510,65 +510,44 @@ impl eframe::App for App {
 
         self.handle_computer_keyboard(ctx);
 
-        egui::TopBottomPanel::top("presets").show(ctx, |ui| {
-            self.presets_bar(ui);
+        // Very top: project management (save / load / clear), above everything.
+        egui::TopBottomPanel::top("project").show(ctx, |ui| {
+            self.project_bar(ui);
         });
 
-        egui::TopBottomPanel::bottom("project").show(ctx, |ui| {
-            self.project_panel(ui);
-        });
-
-        egui::SidePanel::right("params")
+        // Right: instrument configuration — presets on top, then the plugin.
+        egui::SidePanel::right("instrument")
             .resizable(false)
-            .min_width(300.0)
+            .min_width(340.0)
             .show(ctx, |ui| {
+                self.presets_bar(ui);
+                ui.separator();
                 self.params_panel(ui);
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            ui.heading("FTM Synth");
-            ui.label(
-                "A modal physical-modeling synth (Function Transformation Method). \
-                 Pick a synthesis model on the right and tweak its parameters; \
-                 the keyboard plays it.",
-            );
-            ui.add_space(6.0);
-
-            if let Some(err) = &self.audio_err {
-                ui.colored_label(
-                    egui::Color32::from_rgb(220, 90, 90),
-                    format!("Audio unavailable: {err}"),
-                );
-            }
-
-            ui.horizontal(|ui| {
-                ui.label("Octave:");
-                if ui.button("–").clicked() {
-                    self.base_midi = (self.base_midi - 12).max(0);
+                if let Some(err) = &self.audio_err {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 90, 90),
+                        format!("Audio unavailable: {err}"),
+                    );
                 }
-                ui.label(format!("C{}", self.base_midi / 12 - 1));
-                if ui.button("+").clicked() {
-                    self.base_midi = (self.base_midi + 12).min(108);
-                }
-                ui.separator();
-                ui.label("Type on the keyboard (A W S E D F T G Y H U J K), Z/X shift octave.");
-            });
 
-            ui.add_space(10.0);
-            self.transport_bar(ui);
+                // Top: MIDI inputs — the virtual keyboard + its controls (and,
+                // later, attached MIDI controllers).
+                self.midi_inputs(ui);
 
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                self.whammy_bar(ui);
-                self.piano(ui);
-            });
+                ui.add_space(10.0);
 
-            ui.add_space(8.0);
-            self.tracks_panel(ui);
+                // Below: recording + editing — transport & tempo, then the
+                // arrangement / track / clip editor.
+                self.transport_bar(ui); // includes the tempo/grid row
+                ui.add_space(8.0);
+                self.tracks_panel(ui);
 
-            ui.add_space(10.0);
-            self.midi_panel(ui);
+                ui.add_space(10.0);
+                self.export_ui(ui);
             });
         });
 
@@ -579,10 +558,12 @@ impl eframe::App for App {
 impl App {
     /// The project bar: save/load a project, add the current loop, and the loop
     /// list (load a saved loop back into the studio).
-    fn project_panel(&mut self, ui: &mut egui::Ui) {
+    fn project_bar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.strong("Project");
+            ui.strong("🎹 Synth.RS Studio");
+            ui.separator();
+            ui.label("Project");
             ui.add(
                 egui::TextEdit::singleline(&mut self.project_name)
                     .hint_text("project name")
@@ -617,8 +598,6 @@ impl App {
                 self.confirm_clear = true;
             }
         });
-
-        self.export_ui(ui);
 
         if !self.project_status.is_empty() {
             ui.label(egui::RichText::new(&self.project_status).weak().small());
@@ -691,15 +670,13 @@ impl App {
     /// The instrument-library bar: name + save, and load/delete of saved presets.
     fn presets_bar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
+        ui.strong("Presets");
+        // Row 1: name + save + delete.
         ui.horizontal(|ui| {
-            ui.strong("Presets");
-            ui.separator();
-
-            ui.label("Name:");
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.preset_name)
-                    .hint_text("instrument name")
-                    .desired_width(160.0),
+                    .hint_text("preset name")
+                    .desired_width(150.0),
             );
             let save_on_enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             let save_hint = if self.edit_target == Target::Live && self.live_is_kit {
@@ -710,10 +687,21 @@ impl App {
             if ui.button("💾 Save").on_hover_text(save_hint).clicked() || save_on_enter {
                 self.save_preset();
             }
-
-            ui.separator();
-
-            // Load: pick from the saved presets.
+            let can_delete = self
+                .preset_list
+                .iter()
+                .any(|p| p.name.eq_ignore_ascii_case(self.preset_name.trim()));
+            if ui
+                .add_enabled(can_delete, egui::Button::new("🗑"))
+                .on_hover_text("Delete the saved preset with this name")
+                .clicked()
+            {
+                let name = self.preset_name.trim().to_string();
+                self.delete_preset(&name);
+            }
+        });
+        // Row 2: load + rescan + factory.
+        ui.horizontal(|ui| {
             let mut to_load: Option<usize> = None;
             let load_label = if self.preset_list.is_empty() {
                 "— no presets —".to_string()
@@ -746,27 +734,12 @@ impl App {
                 let preset = self.preset_list[i].clone();
                 self.apply_preset(&preset);
             }
-
-            // Delete the preset matching the current name field.
-            let can_delete = self
-                .preset_list
-                .iter()
-                .any(|p| p.name.eq_ignore_ascii_case(self.preset_name.trim()));
-            if ui
-                .add_enabled(can_delete, egui::Button::new("🗑 Delete"))
-                .on_hover_text("Delete the saved preset with this name")
-                .clicked()
-            {
-                let name = self.preset_name.trim().to_string();
-                self.delete_preset(&name);
-            }
-
             if ui.button("⟳").on_hover_text("Rescan preset folder").clicked() {
                 self.preset_list = presets::list();
             }
             if ui
                 .button("★ Factory")
-                .on_hover_text("Restore the built-in instrument kit (overwrites same-named presets)")
+                .on_hover_text("Restore the built-in instrument presets (overwrites same-named)")
                 .clicked()
             {
                 self.preset_list = presets::restore_factory();
@@ -776,7 +749,6 @@ impl App {
         if !self.preset_status.is_empty() {
             ui.label(egui::RichText::new(&self.preset_status).weak().small());
         }
-        ui.add_space(2.0);
     }
 
     /// Point the parameter panel at the live instrument or a specific track,
@@ -1234,6 +1206,48 @@ impl App {
         });
 
         self.track_edit = Some(te);
+    }
+
+    /// The MIDI inputs section: the virtual keyboard with its play controls, and
+    /// the hardware MIDI-device selector. Future controllers attach here too.
+    fn midi_inputs(&mut self, ui: &mut egui::Ui) {
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.strong("🎛 MIDI Inputs");
+                ui.label(
+                    egui::RichText::new("virtual keyboard · attach controllers here later")
+                        .weak()
+                        .small(),
+                );
+            });
+            self.midi_panel(ui); // hardware device selector
+            ui.separator();
+            ui.horizontal(|ui| {
+                // The keyboard on the left …
+                self.piano(ui);
+                ui.separator();
+                // … its output / voice controls on the right.
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Octave");
+                        if ui.button("–").clicked() {
+                            self.base_midi = (self.base_midi - 12).max(0);
+                        }
+                        ui.label(format!("C{}", self.base_midi / 12 - 1));
+                        if ui.button("+").clicked() {
+                            self.base_midi = (self.base_midi + 12).min(108);
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new("keys A W S E D F T G Y H U J K · Z/X shift octave")
+                            .weak()
+                            .small(),
+                    );
+                    ui.add_space(4.0);
+                    self.whammy_bar(ui);
+                });
+            });
+        });
     }
 
     fn midi_panel(&mut self, ui: &mut egui::Ui) {
