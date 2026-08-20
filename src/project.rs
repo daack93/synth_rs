@@ -121,9 +121,22 @@ pub struct ClipData {
     /// Loop-phase offset (seconds) where playback begins — front-trim amount.
     #[serde(default)]
     pub offset: f32,
-    /// Forked notes ("make unique"); absent means the clip uses its track's.
+    /// Natural content length (seconds); 0 ⇒ the track period.
+    #[serde(default)]
+    pub content_len: f32,
+    /// Loop unit (seconds); 0 ⇒ the content length.
+    #[serde(default)]
+    pub loop_len: f32,
+    /// Whether the clip repeats (default true — matches older projects).
+    #[serde(default = "yes")]
+    pub looping: bool,
+    /// The clip's own (forked) notes; absent ⇒ the clip uses its track's.
     #[serde(default)]
     pub own_events: Option<Vec<LoopEvent>>,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn one() -> f32 {

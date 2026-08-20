@@ -128,8 +128,6 @@ pub enum Command {
     DeleteTrack(usize),
     /// Erase a track's recorded parameter automation.
     ClearTrackAutomation(usize),
-    /// Chop / crop / rearrange a track's timeline.
-    RegionEdit { track: usize, op: RegionOp },
     /// Set a track's mixer level (linear) and pan (-1..=1).
     SetTrackMix { track: usize, volume: f32, pan: f32 },
     /// Toggle a track's solo.
@@ -143,27 +141,35 @@ pub enum Command {
     TimeStretch(f32),
     /// Switch the transport between Loop (all tracks from 0) and Arrange (clips).
     SetPlayMode(PlayMode),
-    /// Add a clip placing `track` at `start` for `length` seconds (0 = fill).
+    /// Add a clip placing `track` at `start` for `length` seconds (0 = one loop).
     AddClip { track: usize, start: f32, length: f32 },
     /// Move/resize the clip at `index`: new `start` and `length` (seconds).
     SetClip { index: usize, start: f32, length: f32 },
     /// Trim the clip's front edge: set `start`/`length` and advance the loop
     /// `offset` (seconds) so the content stays anchored (front trim, not move).
     SetClipTrim { index: usize, start: f32, length: f32, offset: f32 },
-    /// Copy the clip at `index` to start at `dest` (seconds).
+    /// Copy the clip at `index` to start at `dest` (seconds) as an independent
+    /// (forked) clip.
     DuplicateClip { index: usize, dest: f32 },
     /// Remove the clip at `index`.
     RemoveClip { index: usize },
     /// Set the playhead position (seconds).
     Seek(f32),
-    /// Set a clip's linked edit layer: transpose (semitones) + velocity scale.
+    /// Set a clip's transpose (semitones) + velocity scale.
     SetClipLayer { index: usize, transpose: i32, vel: f32 },
-    /// Fork a clip's notes so edits to it stop tracking the base track.
-    MakeClipUnique { index: usize },
-    /// Chop/edit a clip's own notes (auto-forks first) with a region op.
-    ClipRegionEdit { index: usize, op: RegionOp },
-    /// Set a track's loop length (period) in seconds — how often it repeats.
-    SetTrackPeriod { track: usize, secs: f32 },
+    // ---- in-clip selection edits (all fork into independent clips) ----
+    /// Crop the clip to the timeline range `[a, b)` (seconds).
+    CropClip { index: usize, a: f32, b: f32 },
+    /// Delete `[a, b)` — trims an edge, or splits into two clips with a gap.
+    SplitDeleteClip { index: usize, a: f32, b: f32 },
+    /// Reverse the clip's notes within `[a, b)` (seconds).
+    ReverseClipRange { index: usize, a: f32, b: f32 },
+    /// Make `[a, b)` the clip's loop unit (turns looping on).
+    LoopClipRange { index: usize, a: f32, b: f32 },
+    /// Toggle a clip's looping; `loop_len` (secs, 0 = whole extent) sets the unit.
+    SetClipLoop { index: usize, looping: bool, loop_len: f32 },
+    /// Bake a looping clip's playback into a single un-looped raw clip.
+    FlattenClip { index: usize },
     /// Set a track's fade-in / fade-out length in seconds.
     SetTrackFades { track: usize, fade_in: f32, fade_out: f32 },
     /// Swap a track's instrument model live (rebuilds its sounding voices).
@@ -174,32 +180,6 @@ pub enum Command {
     LoadLoop(LoopData),
     /// Update tempo / grid / metronome settings.
     SetTempo(TempoGrid),
-}
-
-/// A non-destructive edit to a track's timeline, over a time range in seconds.
-/// Positions and the loop length are preserved; only the selected notes /
-/// automation move. `dest` is the target start time for copies/moves.
-pub enum RegionOp {
-    /// Delete notes starting in `[a, b)` (and automation in range).
-    Delete { a: f32, b: f32 },
-    /// Keep only what starts in `[a, b)`; delete the rest (crop).
-    Keep { a: f32, b: f32 },
-    /// Copy the `[a, b)` content to start at `dest`.
-    Duplicate { a: f32, b: f32, dest: f32 },
-    /// Copy `[a, b)` to `dest`, then delete the original range.
-    Move { a: f32, b: f32, dest: f32 },
-    /// Slide the whole track by `delta` seconds (wraps within the loop).
-    Shift { delta: f32 },
-    /// Transpose notes starting in `[a, b)` by `semitones`.
-    Transpose { a: f32, b: f32, semitones: i32 },
-    /// Scale the velocity of notes starting in `[a, b)` by `factor`.
-    VelScale { a: f32, b: f32, factor: f32 },
-    /// Ramp velocities of notes in `[a, b)` linearly from `from` to `to`.
-    VelRamp { a: f32, b: f32, from: f32, to: f32 },
-    /// Snap notes starting in `[a, b)` to the tempo grid.
-    Quantize { a: f32, b: f32 },
-    /// Reverse the notes in `[a, b)` in time (mirror within the window).
-    Reverse { a: f32, b: f32 },
 }
 
 /// How the live slot should be configured: a single instrument or a kit.
@@ -247,33 +227,55 @@ enum Pending {
 }
 
 /// One placement of a track on the arrangement timeline. Several clips may
-/// reference the same track (shared content). `was_active` is runtime only.
+/// A self-contained placement on the arrangement. A clip owns *what plays and
+/// when*: its notes, its loop config, and its window on the timeline. Clips
+/// never share content — every content edit (crop/delete/reverse/duplicate)
+/// forks into an independent clip. The track only provides the *sound*
+/// (instrument + mix). `was_active` is runtime only.
 ///
-/// A clip carries a per-reference **edit layer**: `transpose` and `vel` are
-/// non-destructive transforms that stay linked to the base track; `own_events`,
-/// once set ("make unique"), forks the clip's notes so edits to the base no
-/// longer reach it. The sound (instrument/mix) is always shared from the track.
+/// **Content**: the note list is `own_events` if forked, else the track's
+/// recording; its natural length is `content_len` (0 ⇒ the track's `period`).
+/// **Loop**: when `looping`, the content repeats every `loop_len` samples
+/// (0 ⇒ the content length); if `loop_len` exceeds the content the remainder is
+/// silence each cycle. When not looping the content plays once, then silence.
+/// **Window**: `offset` is the entry point into the content (front-trim /
+/// loop phase); `length` is how much timeline the clip occupies.
 #[derive(Clone)]
 struct Clip {
     track: usize,
     start: u64,
-    /// `0` = fill: loop from `start` to the end of the song.
     length: u64,
-    /// Offset (samples, reduced mod period) into the track's loop where this
-    /// clip's playback begins. Trimming the front edge advances this so the
-    /// loop content stays anchored while the clip's left edge slides over it.
+    /// Entry offset (samples) into the content — front-trim / loop phase.
     offset: u64,
+    /// Natural content length (samples); 0 ⇒ use the track `period`.
+    content_len: u64,
+    /// Loop unit (samples); 0 ⇒ use the resolved content length (seamless).
+    loop_len: u64,
+    /// Whether the content repeats. Off ⇒ play once, then silence.
+    looping: bool,
     was_active: bool,
-    /// Per-clip transpose (semitones) and velocity scale — linked to the base.
+    /// Per-clip transpose (semitones) and velocity scale.
     transpose: i32,
     vel: f32,
-    /// Forked notes for this clip only (make-unique). `None` = use the track's.
+    /// The clip's own notes once forked; `None` ⇒ use the track's recording.
     own_events: Option<Vec<Event>>,
 }
 
 impl Clip {
     fn at(track: usize, start: u64, length: u64) -> Clip {
-        Clip { track, start, length, offset: 0, was_active: false, transpose: 0, vel: 1.0, own_events: None }
+        Clip {
+            track,
+            start,
+            length,
+            offset: 0,
+            content_len: 0,
+            loop_len: 0,
+            looping: true,
+            was_active: false,
+            transpose: 0,
+            vel: 1.0,
+            own_events: None,
+        }
     }
 }
 
@@ -318,6 +320,7 @@ struct Track {
 pub struct NoteSpan {
     pub start: f32,
     pub end: f32,
+    #[allow(dead_code)] // available for pitch-aware note rendering
     pub note: u8,
 }
 
@@ -354,9 +357,15 @@ pub struct ClipView {
     pub length: f32,
     /// Loop-phase offset (seconds) where playback begins — front-trim amount.
     pub offset: f32,
+    /// Natural content length (seconds); the loop's played window.
+    pub content_len: f32,
+    /// Loop unit (seconds) when looping.
+    pub loop_len: f32,
+    /// Whether the clip repeats.
+    pub looping: bool,
     pub transpose: i32,
     pub vel: f32,
-    /// True if the clip's notes have been forked from the track (make-unique).
+    /// True if the clip owns its own (forked) notes.
     pub unique: bool,
 }
 
@@ -629,7 +638,6 @@ impl Studio {
             }
             Command::LoadLoop(data) => self.load_loop(data),
             Command::SetTempo(t) => self.tempo = t,
-            Command::RegionEdit { track, op } => self.region_edit(track, op),
             Command::SetTrackMix { track, volume, pan } => {
                 if let Some(t) = self.tracks.get_mut(track) {
                     t.volume = volume;
@@ -670,7 +678,9 @@ impl Studio {
                     };
                     let want = (start.max(0.0) * sr).round() as u64;
                     let at = self.free_slot(track, usize::MAX, want, len);
-                    self.arrangement.push(Clip::at(track, at, len));
+                    let mut c = Clip::at(track, at, len);
+                    self.fork_content(&mut c); // independent — never a shared ref
+                    self.arrangement.push(c);
                     self.after_arrangement_change();
                 }
             }
@@ -704,6 +714,7 @@ impl Studio {
                     self.push_undo();
                     let sr = self.sr;
                     let mut c = self.arrangement[index].clone();
+                    self.fork_content(&mut c); // an independent copy, never a shared ref
                     let len = c.length.max(1);
                     let want = (dest.max(0.0) * sr).round() as u64;
                     // Drop the copy into the nearest free space so it never lands
@@ -731,14 +742,25 @@ impl Studio {
                     self.mark_structure_dirty();
                 }
             }
-            Command::MakeClipUnique { index } => {
-                if index < self.arrangement.len() && self.arrangement[index].own_events.is_none() {
+            Command::CropClip { index, a, b } => self.crop_clip(index, a, b),
+            Command::SplitDeleteClip { index, a, b } => self.split_delete_clip(index, a, b),
+            Command::ReverseClipRange { index, a, b } => self.reverse_clip_range(index, a, b),
+            Command::LoopClipRange { index, a, b } => self.loop_clip_range(index, a, b),
+            Command::SetClipLoop { index, looping, loop_len } => {
+                if index < self.arrangement.len() {
                     self.push_undo();
-                    self.ensure_clip_unique(index);
-                    self.mark_structure_dirty();
+                    let sr = self.sr;
+                    let c = &mut self.arrangement[index];
+                    c.looping = looping;
+                    if looping {
+                        // 0 ⇒ snapshot the current extent as the loop unit.
+                        let unit = (loop_len.max(0.0) * sr).round() as u64;
+                        c.loop_len = if unit > 0 { unit } else { c.length.max(1) };
+                    }
+                    self.after_arrangement_change();
                 }
             }
-            Command::ClipRegionEdit { index, op } => self.clip_region_edit(index, op),
+            Command::FlattenClip { index } => self.flatten_clip(index),
             Command::Seek(secs) => {
                 let p = (secs.max(0.0) * self.sr).round() as u64;
                 self.pos = self.loop_len.map(|l| p.min(l.saturating_sub(1))).unwrap_or(0);
@@ -747,16 +769,6 @@ impl Studio {
                 }
                 self.reset_cursors();
                 self.publish_scalars();
-            }
-            Command::SetTrackPeriod { track, secs } => {
-                if track < self.tracks.len() {
-                    self.push_undo();
-                    let period = ((secs.max(0.0) * self.sr).round() as u64).max(1);
-                    self.tracks[track].period = period;
-                    // Notes are stored relative to the take, so shrinking the
-                    // period just changes which fire — nothing is destroyed.
-                    self.after_arrangement_change();
-                }
             }
             Command::SetTrackFades { track, fade_in, fade_out } => {
                 if let Some(t) = self.tracks.get_mut(track) {
@@ -1313,6 +1325,9 @@ impl Studio {
                     start: (c.start * sr).round() as u64,
                     length: (c.length * sr).round() as u64,
                     offset: (c.offset * sr).round() as u64,
+                    content_len: (c.content_len * sr).round() as u64,
+                    loop_len: (c.loop_len * sr).round() as u64,
+                    looping: c.looping,
                     was_active: false,
                     transpose: c.transpose,
                     vel: c.vel,
@@ -1401,6 +1416,9 @@ impl Studio {
                 start: c.start as f32 / sr,
                 length: c.length as f32 / sr,
                 offset: c.offset as f32 / sr,
+                content_len: c.content_len as f32 / sr,
+                loop_len: c.loop_len as f32 / sr,
+                looping: c.looping,
                 transpose: c.transpose,
                 vel: c.vel,
                 own_events: c.own_events.as_ref().map(|evs| {
@@ -1682,50 +1700,183 @@ impl Studio {
         }
     }
 
-    /// Chop / crop / rearrange a track's timeline. Positions and loop length are
-    /// preserved; only the selected notes + automation move.
-    /// Grid spacing (samples) for Quantize — the current grid, or 1/16 if off.
-    fn quant_grid(&self) -> f64 {
-        let steps = if self.tempo.quantize > 0 { self.tempo.quantize } else { 4 };
-        (self.spb() / steps as f64).max(1.0)
+    /// Resolve a clip's dimensions (samples): `(period, note_span, content, loop)`.
+    /// `note_span` is the modulo base for note positions (the forked span, or the
+    /// track period); `content` is the played window; `loop` is the repeat unit.
+    fn clip_dims(&self, c: &Clip) -> (u64, u64, u64, u64) {
+        let period = self.tracks.get(c.track).map(|t| t.period.max(1)).unwrap_or(1);
+        let span = if c.own_events.is_some() { c.content_len.max(1) } else { period };
+        let s = if c.content_len > 0 { c.content_len } else { period };
+        let l = if c.loop_len > 0 { c.loop_len } else { s };
+        (period, span, s, l)
     }
 
-    fn region_edit(&mut self, i: usize, op: RegionOp) {
-        self.push_undo();
-        let (sr, grid) = (self.sr, self.quant_grid());
-        if let Some(t) = self.tracks.get_mut(i) {
-            let len = t.period.max(1); // edits are relative to the track's period
-            apply_region_events(&mut t.events, len, &op, sr, grid);
-            apply_region_auto(&mut t.auto, len, &op, sr);
+    /// Give a clip its own copy of the notes so it is independent of the track
+    /// (no-op if already forked). Operates on a detached clip clone.
+    fn fork_content(&self, c: &mut Clip) {
+        if c.own_events.is_none() {
+            if let Some(t) = self.tracks.get(c.track) {
+                c.own_events = Some(t.events.clone());
+                if c.content_len == 0 {
+                    c.content_len = t.period.max(1);
+                }
+            }
         }
-        self.mark_structure_dirty();
     }
 
-    /// Fork a clip's notes from its track (no-op if already unique). No undo.
-    fn ensure_clip_unique(&mut self, index: usize) {
-        let Some(c) = self.arrangement.get(index) else { return };
-        if c.own_events.is_some() {
-            return;
-        }
-        let track = c.track;
-        let events = self.tracks.get(track).map(|t| t.events.clone()).unwrap_or_default();
-        self.arrangement[index].own_events = Some(events);
+    /// Clamp a seconds pair to the clip's timeline window, in samples.
+    fn clip_range(&self, c: &Clip, a: f32, b: f32) -> (u64, u64) {
+        let sr = self.sr;
+        let lo = c.start;
+        let hi = c.start + c.length;
+        let a = ((a.max(0.0) * sr).round() as u64).clamp(lo, hi);
+        let b = ((b.max(0.0) * sr).round() as u64).clamp(lo, hi);
+        (a.min(b), a.max(b))
     }
 
-    /// Chop/edit a clip's own notes (auto-forks first) with a region op.
-    fn clip_region_edit(&mut self, index: usize, op: RegionOp) {
+    /// The content-note position playing at timeline sample `t` in this clip.
+    fn content_pos_at(&self, c: &Clip, t: u64) -> u64 {
+        let (_, span, _, l) = self.clip_dims(c);
+        let rel = t.saturating_sub(c.start);
+        let phase = if c.looping { rel % l.max(1) } else { rel };
+        (c.offset + phase) % span.max(1)
+    }
+
+    /// Crop the clip to `[a, b)` — one independent clip = that window.
+    fn crop_clip(&mut self, index: usize, a: f32, b: f32) {
         if index >= self.arrangement.len() {
             return;
         }
         self.push_undo();
-        self.ensure_clip_unique(index);
-        let (sr, grid) = (self.sr, self.quant_grid());
-        let track = self.arrangement[index].track;
-        let len = self.tracks.get(track).map(|t| t.period.max(1)).unwrap_or(1);
-        if let Some(ev) = self.arrangement[index].own_events.as_mut() {
-            apply_region_events(ev, len, &op, sr, grid);
+        let c = self.arrangement[index].clone();
+        let (a, b) = self.clip_range(&c, a, b);
+        if b <= a {
+            return;
         }
-        self.mark_structure_dirty();
+        let off = self.content_pos_at(&c, a);
+        let mut nc = c.clone();
+        self.fork_content(&mut nc);
+        nc.start = a;
+        nc.length = b - a;
+        nc.offset = off % nc.content_len.max(1);
+        nc.was_active = false;
+        self.arrangement[index] = nc;
+        self.after_arrangement_change();
+    }
+
+    /// Delete `[a, b)`: trims an edge, or splits into two clips with a gap. A
+    /// selection covering the whole clip removes it.
+    fn split_delete_clip(&mut self, index: usize, a: f32, b: f32) {
+        if index >= self.arrangement.len() {
+            return;
+        }
+        self.push_undo();
+        let c = self.arrangement[index].clone();
+        let (a, b) = self.clip_range(&c, a, b);
+        let end = c.start + c.length;
+        let mut pieces: Vec<Clip> = Vec::new();
+        if a > c.start {
+            let mut left = c.clone();
+            self.fork_content(&mut left);
+            left.length = a - c.start; // start / offset unchanged
+            left.was_active = false;
+            pieces.push(left);
+        }
+        if b < end {
+            let off = self.content_pos_at(&c, b);
+            let mut right = c.clone();
+            self.fork_content(&mut right);
+            right.start = b;
+            right.length = end - b;
+            right.offset = off % right.content_len.max(1);
+            right.was_active = false;
+            pieces.push(right);
+        }
+        self.arrangement.remove(index);
+        self.arrangement.extend(pieces);
+        self.after_arrangement_change();
+    }
+
+    /// Reverse the clip's notes within `[a, b)` (forks first).
+    fn reverse_clip_range(&mut self, index: usize, a: f32, b: f32) {
+        if index >= self.arrangement.len() {
+            return;
+        }
+        self.push_undo();
+        let c = self.arrangement[index].clone();
+        let (a, b) = self.clip_range(&c, a, b);
+        let lo = self.content_pos_at(&c, a);
+        let hi = self.content_pos_at(&c, b.saturating_sub(1)) + 1;
+        let mut nc = c.clone();
+        self.fork_content(&mut nc);
+        if let Some(ev) = nc.own_events.as_mut() {
+            reverse_events_in(ev, lo.min(hi), lo.max(hi));
+            ev.sort_by_key(|e| e.pos);
+        }
+        self.arrangement[index] = nc;
+        self.after_arrangement_change();
+    }
+
+    /// Make `[a, b)` the clip's loop unit (turns looping on). Non-destructive.
+    fn loop_clip_range(&mut self, index: usize, a: f32, b: f32) {
+        if index >= self.arrangement.len() {
+            return;
+        }
+        self.push_undo();
+        let c = self.arrangement[index].clone();
+        let (a, b) = self.clip_range(&c, a, b);
+        if b <= a {
+            return;
+        }
+        let off = self.content_pos_at(&c, a);
+        let (_, span, _, _) = self.clip_dims(&c);
+        let cc = &mut self.arrangement[index];
+        cc.offset = off % span.max(1);
+        cc.loop_len = b - a;
+        cc.looping = true;
+        self.after_arrangement_change();
+    }
+
+    /// Bake a looping clip's playback across its extent into one raw, un-looped
+    /// clip (repeats become concrete notes; looping turns off).
+    fn flatten_clip(&mut self, index: usize) {
+        if index >= self.arrangement.len() {
+            return;
+        }
+        self.push_undo();
+        let c = self.arrangement[index].clone();
+        let (_, span, s, l) = self.clip_dims(&c);
+        let src: Vec<Event> = match &c.own_events {
+            Some(ev) => ev.clone(),
+            None => self.tracks.get(c.track).map(|t| t.events.clone()).unwrap_or_default(),
+        };
+        let length = c.length.max(1);
+        let bound = s.min(l);
+        let mut flat: Vec<Event> = Vec::new();
+        for e in &src {
+            // Timeline phase where this content position first plays.
+            let phase0 = (e.pos + span - (c.offset % span.max(1))) % span.max(1);
+            if phase0 >= bound {
+                continue; // in the silent part of the cycle / outside the window
+            }
+            if c.looping {
+                let mut u = phase0;
+                while u < length {
+                    flat.push(Event { pos: u, msg: e.msg });
+                    u += l.max(1);
+                }
+            } else if phase0 < length {
+                flat.push(Event { pos: phase0, msg: e.msg });
+            }
+        }
+        flat.sort_by_key(|e| e.pos);
+        let cc = &mut self.arrangement[index];
+        cc.own_events = Some(flat);
+        cc.content_len = length;
+        cc.loop_len = 0;
+        cc.looping = false;
+        cc.offset = 0;
+        self.after_arrangement_change();
     }
 
     // ---- offline export ----
@@ -1809,14 +1960,23 @@ impl Studio {
         let recording = self.recording;
         let song = self.loop_len.unwrap_or(0);
         for k in 0..self.playlist.len() {
-            let (ti, start, length, offset, transpose, velscale) = {
+            let (ti, start, length, offset, content_len, loop_len, looping, transpose, velscale) = {
                 let c = &self.playlist[k];
-                (c.track, c.start, c.length, c.offset, c.transpose, c.vel)
+                (c.track, c.start, c.length, c.offset, c.content_len, c.loop_len, c.looping, c.transpose, c.vel)
             };
             if ti >= self.tracks.len() {
                 continue;
             }
             let period = self.tracks[ti].period.max(1);
+            // Note-space span: forked clips index their own events over
+            // `content_len`; linked clips index the track's recording over `period`.
+            let span = if self.playlist[k].own_events.is_some() {
+                content_len.max(1)
+            } else {
+                period
+            };
+            let s = if content_len > 0 { content_len } else { period }; // content window
+            let l = if loop_len > 0 { loop_len } else { s }; // loop unit
             let end = start + if length > 0 { length } else { song.saturating_sub(start) };
             let active = pos >= start && pos < end;
             if Some(ti) == recording {
@@ -1831,15 +1991,25 @@ impl Studio {
                 }
                 continue;
             }
-            // Offset advances the loop phase so the front edge trims content
-            // instead of moving it (offset is already reduced mod period).
-            let local = ((pos - start) + offset % period) % period;
-            // At the top of each period (and at the clip's start) rewind automation.
-            if local == 0 {
+            let u = pos - start;
+            let phase = if looping { u % l } else { u };
+            // Silence portion of a cycle (loop unit longer than the content, or a
+            // one-shot that has finished): fire nothing; release at the boundary.
+            if phase >= s {
+                let prev = u.wrapping_sub(1);
+                let prev_phase = if looping { prev % l } else { prev };
+                if u > 0 && prev_phase < s {
+                    self.tracks[ti].inst.all_notes_off(); // clean edge into silence
+                }
+                self.playlist[k].was_active = true;
+                continue;
+            }
+            // Position within the content (front-trim / loop phase applied).
+            let local = (offset + phase) % span;
+            // At the top of each cycle rewind automation.
+            if phase == 0 {
                 reset_track_automation(&mut self.tracks[ti]);
             }
-            // Collect the notes on this frame (from the clip's own events if it was
-            // made unique, else the track's), applying the clip's transpose/vel.
             let to_fire: Vec<(bool, u8, f32)> = {
                 let events: &[Event] = match &self.playlist[k].own_events {
                     Some(ev) => ev,
@@ -1950,17 +2120,24 @@ impl Studio {
             })
             .collect();
         let snap = self.snapshot_loop();
+        let sr = self.sr;
         let arr: Vec<ClipView> = self
             .arrangement
             .iter()
-            .map(|c| ClipView {
-                track: c.track,
-                start: c.start as f32 / self.sr,
-                length: c.length as f32 / self.sr,
-                offset: c.offset as f32 / self.sr,
-                transpose: c.transpose,
-                vel: c.vel,
-                unique: c.own_events.is_some(),
+            .map(|c| {
+                let (_, _, s, l) = self.clip_dims(c);
+                ClipView {
+                    track: c.track,
+                    start: c.start as f32 / sr,
+                    length: c.length as f32 / sr,
+                    offset: c.offset as f32 / sr,
+                    content_len: s as f32 / sr,
+                    loop_len: l as f32 / sr,
+                    looping: c.looping,
+                    transpose: c.transpose,
+                    vel: c.vel,
+                    unique: c.own_events.is_some(),
+                }
             })
             .collect();
         self.pending_structure = Some(views);
@@ -2035,201 +2212,20 @@ fn fire_track_auto(t: &mut Track, local: u64) {
     }
 }
 
-/// A paired note: on at `start`, off at `end`.
-#[derive(Clone)]
-struct Span {
-    start: u64,
-    end: u64,
-    note: u8,
-    vel: f32,
-}
-
-/// Pair note-on/off events into spans. A note still held at the loop end is
-/// closed at `loop_len`.
-fn events_to_spans(events: &[Event], loop_len: u64) -> Vec<Span> {
-    let mut sorted: Vec<&Event> = events.iter().collect();
-    sorted.sort_by_key(|e| e.pos);
-    let mut open: Vec<(u8, u64, f32)> = Vec::new();
-    let mut spans = Vec::new();
-    for e in sorted {
-        match e.msg {
-            EvMsg::On { note, vel } => open.push((note, e.pos, vel)),
-            EvMsg::Off { note } => {
-                if let Some(idx) = open.iter().rposition(|(n, _, _)| *n == note) {
-                    let (n, start, vel) = open.remove(idx);
-                    spans.push(Span { start, end: e.pos.max(start), note: n, vel });
-                }
-            }
+/// Reverse the rhythm of note events whose position lies in `[lo, hi)` by
+/// mirroring each about the window (kept simple: positions mirror, types stay,
+/// which reverses strike timing faithfully for the struck/plucked models).
+fn reverse_events_in(events: &mut Vec<Event>, lo: u64, hi: u64) {
+    if hi <= lo {
+        return;
+    }
+    for e in events.iter_mut() {
+        if e.pos >= lo && e.pos < hi {
+            e.pos = lo + (hi - 1 - e.pos);
         }
     }
-    for (note, start, vel) in open {
-        spans.push(Span { start, end: loop_len, note, vel });
-    }
-    spans
 }
 
-/// Rebuild sorted on/off events from spans.
-fn spans_to_events(spans: &[Span]) -> Vec<Event> {
-    let mut ev = Vec::with_capacity(spans.len() * 2);
-    for s in spans {
-        ev.push(Event { pos: s.start, msg: EvMsg::On { note: s.note, vel: s.vel } });
-        ev.push(Event { pos: s.end, msg: EvMsg::Off { note: s.note } });
-    }
-    ev.sort_by_key(|e| e.pos);
-    ev
-}
-
-/// Copy the spans starting in `[a, b)` to begin at `dest`, appended to the set.
-/// Copies whose start would land outside the loop are dropped.
-fn dup_spans(spans: &[Span], a: u64, b: u64, dest: u64, loop_len: u64) -> Vec<Span> {
-    let shift = dest as i64 - a as i64;
-    let mut out = spans.to_vec();
-    for s in spans {
-        if s.start >= a && s.start < b {
-            let ns = s.start as i64 + shift;
-            let ne = s.end as i64 + shift;
-            if ns >= 0 && (ns as u64) < loop_len {
-                out.push(Span {
-                    start: ns as u64,
-                    end: (ne.max(ns + 1) as u64).min(loop_len),
-                    note: s.note,
-                    vel: s.vel,
-                });
-            }
-        }
-    }
-    out
-}
-
-/// Copy automation points in `[a, b)` to start at `dest`, appended to the set.
-fn dup_auto(auto: &[AutoEv], a: u64, b: u64, dest: u64, loop_len: u64) -> Vec<AutoEv> {
-    let shift = dest as i64 - a as i64;
-    let mut out = auto.to_vec();
-    for x in auto {
-        if x.pos >= a && x.pos < b {
-            let np = x.pos as i64 + shift;
-            if np >= 0 && (np as u64) < loop_len {
-                out.push(AutoEv { pos: np as u64, target: x.target.clone(), value: x.value });
-            }
-        }
-    }
-    out
-}
-
-/// Wrap a (possibly negative) sample position into `[0, len)`.
-fn wrap_pos(p: i64, len: u64) -> u64 {
-    let l = len as i64;
-    (((p % l) + l) % l) as u64
-}
-
-/// Apply a [`RegionOp`] to a note-event list (period `len` samples). Shared by
-/// track editing and per-clip editing.
-fn apply_region_events(events: &mut Vec<Event>, len: u64, op: &RegionOp, sr: f32, grid: f64) {
-    let p = |secs: f32| ((secs * sr).round().max(0.0) as u64).min(len);
-    let mut spans = events_to_spans(events, len);
-    match *op {
-        RegionOp::Delete { a, b } => {
-            let (a, b) = (p(a), p(b));
-            spans.retain(|s| !(s.start >= a && s.start < b));
-        }
-        RegionOp::Keep { a, b } => {
-            let (a, b) = (p(a), p(b));
-            spans.retain(|s| s.start >= a && s.start < b);
-        }
-        RegionOp::Duplicate { a, b, dest } => {
-            spans = dup_spans(&spans, p(a), p(b), p(dest), len);
-        }
-        RegionOp::Move { a, b, dest } => {
-            let (a, b) = (p(a), p(b));
-            spans = dup_spans(&spans, a, b, p(dest), len);
-            spans.retain(|s| !(s.start >= a && s.start < b));
-        }
-        RegionOp::Shift { delta } => {
-            let d = (delta * sr).round() as i64;
-            for s in &mut spans {
-                let dur = s.end.saturating_sub(s.start);
-                s.start = wrap_pos(s.start as i64 + d, len);
-                s.end = (s.start + dur).min(len);
-            }
-        }
-        RegionOp::Transpose { a, b, semitones } => {
-            let (a, b) = (p(a), p(b));
-            for s in &mut spans {
-                if s.start >= a && s.start < b {
-                    s.note = (s.note as i32 + semitones).clamp(0, 127) as u8;
-                }
-            }
-        }
-        RegionOp::VelScale { a, b, factor } => {
-            let (a, b) = (p(a), p(b));
-            for s in &mut spans {
-                if s.start >= a && s.start < b {
-                    s.vel = (s.vel * factor).clamp(0.0, 1.0);
-                }
-            }
-        }
-        RegionOp::VelRamp { a, b, from, to } => {
-            let (a, b) = (p(a), p(b));
-            let span_len = (b.saturating_sub(a)).max(1) as f32;
-            for s in &mut spans {
-                if s.start >= a && s.start < b {
-                    let frac = (s.start - a) as f32 / span_len;
-                    s.vel = (from + (to - from) * frac).clamp(0.0, 1.0);
-                }
-            }
-        }
-        RegionOp::Quantize { a, b } => {
-            let (a, b) = (p(a), p(b));
-            for s in &mut spans {
-                if s.start >= a && s.start < b {
-                    let dur = s.end.saturating_sub(s.start);
-                    let q = ((s.start as f64 / grid).round() * grid).round() as u64;
-                    s.start = q.min(len.saturating_sub(1));
-                    s.end = (s.start + dur).min(len);
-                }
-            }
-        }
-        RegionOp::Reverse { a, b } => {
-            let (a, b) = (p(a), p(b));
-            for s in &mut spans {
-                if s.start >= a && s.start < b {
-                    let (ns, ne) = (a + b.saturating_sub(s.end), a + b.saturating_sub(s.start));
-                    s.start = ns.min(len);
-                    s.end = ne.min(len);
-                }
-            }
-        }
-    }
-    *events = spans_to_events(&spans);
-    events.sort_by_key(|e| e.pos);
-}
-
-/// Apply the range-moving region ops to an automation list (others are no-ops).
-fn apply_region_auto(auto: &mut Vec<AutoEv>, len: u64, op: &RegionOp, sr: f32) {
-    let p = |secs: f32| ((secs * sr).round().max(0.0) as u64).min(len);
-    match *op {
-        RegionOp::Delete { a, b } => auto.retain(|x| !(x.pos >= p(a) && x.pos < p(b))),
-        RegionOp::Keep { a, b } => auto.retain(|x| x.pos >= p(a) && x.pos < p(b)),
-        RegionOp::Duplicate { a, b, dest } => *auto = dup_auto(auto, p(a), p(b), p(dest), len),
-        RegionOp::Move { a, b, dest } => {
-            let (a, b) = (p(a), p(b));
-            let mut d = dup_auto(auto, a, b, p(dest), len);
-            d.retain(|x| !(x.pos >= a && x.pos < b));
-            *auto = d;
-        }
-        RegionOp::Shift { delta } => {
-            let d = (delta * sr).round() as i64;
-            for x in auto.iter_mut() {
-                x.pos = wrap_pos(x.pos as i64 + d, len);
-            }
-        }
-        _ => {}
-    }
-    auto.sort_by_key(|a| a.pos);
-}
-
-/// The numeric (`f64`-valued) top-level fields of a params object — the
-/// automatable parameters. Non-numbers (enums, bools) are skipped.
 fn numeric_fields(v: &serde_json::Value) -> Vec<(String, f64)> {
     match v.as_object() {
         Some(map) => map
@@ -2681,75 +2677,6 @@ mod tests {
         }
     }
 
-    fn ons_of(s: &Studio) -> Vec<u8> {
-        s.snapshot_loop().tracks[0].events.iter().filter(|e| e.on).map(|e| e.note).collect()
-    }
-
-    #[test]
-    fn region_delete_removes_notes_in_range() {
-        let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(two_note_loop()));
-        s.handle(Command::RegionEdit { track: 0, op: RegionOp::Delete { a: 0.4, b: 0.7 } });
-        assert_eq!(ons_of(&s), vec![60], "note 62 (starts at 0.5) deleted");
-    }
-
-    #[test]
-    fn region_keep_crops_to_range() {
-        let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(two_note_loop()));
-        s.handle(Command::RegionEdit { track: 0, op: RegionOp::Keep { a: 0.4, b: 0.7 } });
-        assert_eq!(ons_of(&s), vec![62], "cropped to the [0.4,0.7) window");
-    }
-
-    #[test]
-    fn region_duplicate_copies_range() {
-        let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(two_note_loop()));
-        s.handle(Command::RegionEdit { track: 0, op: RegionOp::Duplicate { a: 0.0, b: 0.2, dest: 0.5 } });
-        let n60 = s.snapshot_loop().tracks[0].events.iter().filter(|e| e.on && e.note == 60).count();
-        assert_eq!(n60, 2, "note 60 now appears twice");
-    }
-
-    #[test]
-    fn region_move_relocates_range() {
-        let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(two_note_loop()));
-        s.handle(Command::RegionEdit { track: 0, op: RegionOp::Move { a: 0.0, b: 0.2, dest: 0.5 } });
-        let snap = s.snapshot_loop();
-        let n60: Vec<i32> = snap.tracks[0]
-            .events
-            .iter()
-            .filter(|e| e.on && e.note == 60)
-            .map(|e| (e.t * 10.0).round() as i32)
-            .collect();
-        assert_eq!(n60, vec![5], "note 60 moved from 0.0 to 0.5, not duplicated");
-    }
-
-    #[test]
-    fn region_transpose_shifts_selected_notes() {
-        let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(two_note_loop()));
-        s.handle(Command::RegionEdit { track: 0, op: RegionOp::Transpose { a: 0.0, b: 1.0, semitones: 5 } });
-        assert_eq!(ons_of(&s), vec![65, 67], "both notes up a fourth");
-    }
-
-    #[test]
-    fn region_reverse_mirrors_in_time() {
-        let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(two_note_loop()));
-        s.handle(Command::RegionEdit { track: 0, op: RegionOp::Reverse { a: 0.0, b: 1.0 } });
-        let snap = s.snapshot_loop();
-        let mut ons: Vec<(u8, i32)> = snap.tracks[0]
-            .events
-            .iter()
-            .filter(|e| e.on)
-            .map(|e| (e.note, (e.t * 10.0).round() as i32))
-            .collect();
-        ons.sort_by_key(|x| x.1);
-        // 62 (0.5→0.4) comes before 60 (0.0→0.9) after reversing.
-        assert_eq!(ons, vec![(62, 4), (60, 9)]);
-    }
-
     #[test]
     fn shorter_track_loops_within_a_longer_song() {
         use crate::project::{LoopData, LoopEvent, LoopTrack};
@@ -2861,22 +2788,6 @@ mod tests {
     }
 
     #[test]
-    fn set_track_period_changes_the_loop_length_nondestructively() {
-        let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
-        let original = s.tracks[0].period;
-        assert!(original > 0);
-        // Halve the loop length: the track now repeats twice as often.
-        s.handle(Command::SetTrackPeriod { track: 0, secs: 0.05 });
-        assert_eq!(s.tracks[0].period, (0.05 * 48_000.0) as u64);
-        // Events are retained (stored relative to the take), not truncated.
-        assert_eq!(s.tracks[0].events.len(), 1);
-        // Restoring the period restores the original loop length.
-        s.handle(Command::SetTrackPeriod { track: 0, secs: 0.1 });
-        assert_eq!(s.tracks[0].period, original);
-    }
-
-    #[test]
     fn duplicate_lands_in_free_space_and_never_resizes_the_original() {
         let mut s = Studio::new(48_000.0);
         s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
@@ -2938,28 +2849,22 @@ mod tests {
     }
 
     #[test]
-    fn clip_layer_transpose_and_make_unique() {
+    fn clip_transpose_stays_linked_but_content_edits_fork() {
         let mut s = Studio::new(48_000.0);
         s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
         assert_eq!(s.arrangement.len(), 1);
 
-        // Linked transpose + velocity.
+        // Transpose + velocity are non-destructive and stay linked to the track.
         s.handle(Command::SetClipLayer { index: 0, transpose: 5, vel: 0.5 });
         assert_eq!(s.arrangement[0].transpose, 5);
         assert!((s.arrangement[0].vel - 0.5).abs() < 1e-6);
         assert!(s.arrangement[0].own_events.is_none(), "transpose stays linked");
 
-        // Make unique forks the notes; the base track is untouched.
-        let is_on = |e: &Event| matches!(e.msg, EvMsg::On { .. });
-        let base_ons = s.tracks[0].events.iter().filter(|e| is_on(e)).count();
-        s.handle(Command::MakeClipUnique { index: 0 });
-        assert!(s.arrangement[0].own_events.is_some());
-
-        // Chopping the clip empties its own notes but leaves the track intact.
-        s.handle(Command::ClipRegionEdit { index: 0, op: RegionOp::Delete { a: 0.0, b: 10.0 } });
-        let clip_ons = s.arrangement[0].own_events.as_ref().unwrap().iter().filter(|e| is_on(e)).count();
-        assert_eq!(clip_ons, 0, "clip notes deleted");
-        assert_eq!(s.tracks[0].events.iter().filter(|e| is_on(e)).count(), base_ons, "base track untouched");
+        // A content edit (crop) forks the clip into its own independent notes.
+        let orig_len = s.arrangement[0].length;
+        s.handle(Command::CropClip { index: 0, a: 0.0, b: 0.05 });
+        assert!(s.arrangement[0].own_events.is_some(), "crop forks the clip");
+        assert!(s.arrangement[0].length < orig_len, "crop shortens the clip");
     }
 
     #[test]
@@ -2988,7 +2893,7 @@ mod tests {
         // A single track, placed by a clip starting at 0.2s.
         let data = LoopData {
             length: 0.4,
-            arrangement: vec![ClipData { track: 0, start: 0.2, length: 0.0, offset: 0.0, transpose: 0, vel: 1.0, own_events: None }],
+            arrangement: vec![ClipData { track: 0, start: 0.2, length: 0.0, offset: 0.0, content_len: 0.0, loop_len: 0.0, looping: true, transpose: 0, vel: 1.0, own_events: None }],
             tracks: vec![trk],
         };
 
@@ -3023,33 +2928,68 @@ mod tests {
     }
 
     #[test]
-    fn undo_redo_round_trips_a_region_edit() {
+    fn undo_redo_round_trips_a_clip_edit() {
         let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(two_note_loop()));
-        assert_eq!(ons_of(&s), vec![60, 62]);
-        s.handle(Command::RegionEdit { track: 0, op: RegionOp::Delete { a: 0.4, b: 0.7 } });
-        assert_eq!(ons_of(&s), vec![60]);
+        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        assert_eq!(s.arrangement.len(), 1);
+        // Delete the whole clip via a full-span selection → removed.
+        let len = s.arrangement[0].length as f32 / 48_000.0;
+        s.handle(Command::SplitDeleteClip { index: 0, a: 0.0, b: len });
+        assert_eq!(s.arrangement.len(), 0, "whole-clip delete removes it");
         s.handle(Command::Undo);
-        assert_eq!(ons_of(&s), vec![60, 62], "undo restores the deleted note");
+        assert_eq!(s.arrangement.len(), 1, "undo restores the clip");
         s.handle(Command::Redo);
-        assert_eq!(ons_of(&s), vec![60], "redo re-applies the delete");
+        assert_eq!(s.arrangement.len(), 0, "redo re-applies the delete");
     }
 
     #[test]
-    fn region_shift_wraps_within_loop() {
+    fn split_delete_middle_makes_two_clips_with_a_gap() {
         let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(two_note_loop()));
-        s.handle(Command::RegionEdit { track: 0, op: RegionOp::Shift { delta: 0.5 } });
-        let snap = s.snapshot_loop();
-        let mut got: Vec<(u8, i32)> = snap.tracks[0]
-            .events
-            .iter()
-            .filter(|e| e.on)
-            .map(|e| (e.note, (e.t * 10.0).round() as i32))
-            .collect();
-        got.sort();
-        assert!(got.contains(&(60, 5)), "note 60 → 0.5s: {got:?}");
-        assert!(got.contains(&(62, 0)), "note 62 → wrapped to 0.0s: {got:?}");
+        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        // Give the clip a concrete length of 0.4s so a middle exists.
+        s.handle(Command::SetClip { index: 0, start: 0.0, length: 0.4 });
+        s.handle(Command::SplitDeleteClip { index: 0, a: 0.1, b: 0.2 });
+        assert_eq!(s.arrangement.len(), 2, "split leaves two clips");
+        let mut spans: Vec<(u64, u64)> = s.arrangement.iter().map(|c| (c.start, c.start + c.length)).collect();
+        spans.sort();
+        // Left ends at 0.1s; right starts at 0.2s → a gap in between.
+        assert_eq!(spans[0].1, (0.1 * 48_000.0) as u64);
+        assert_eq!(spans[1].0, (0.2 * 48_000.0) as u64);
+        assert!(s.arrangement.iter().all(|c| c.own_events.is_some()), "both pieces are forked");
+    }
+
+    #[test]
+    fn loop_range_sets_a_custom_loop_unit() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        s.handle(Command::SetClip { index: 0, start: 0.0, length: 0.4 });
+        s.handle(Command::LoopClipRange { index: 0, a: 0.1, b: 0.2 });
+        assert!(s.arrangement[0].looping);
+        assert_eq!(s.arrangement[0].loop_len, (0.1 * 48_000.0) as u64, "loop unit = selection length");
+    }
+
+    #[test]
+    fn flatten_bakes_repeats_and_turns_looping_off() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        // Period 0.1s; extend to 0.3s while looping → 3 repeats.
+        s.handle(Command::SetClip { index: 0, start: 0.0, length: 0.3 });
+        s.handle(Command::FlattenClip { index: 0 });
+        let c = &s.arrangement[0];
+        assert!(!c.looping, "flatten turns looping off");
+        assert!(c.own_events.is_some(), "flatten forks");
+        // The single on-note (per 0.1s loop) baked to 3 concrete strikes.
+        let ons = c.own_events.as_ref().unwrap().iter().filter(|e| matches!(e.msg, EvMsg::On { .. })).count();
+        assert_eq!(ons, 3, "three repeats baked in");
+    }
+
+    #[test]
+    fn duplicate_forks_into_independent_notes() {
+        let mut s = Studio::new(48_000.0);
+        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        s.handle(Command::DuplicateClip { index: 0, dest: 0.5 });
+        assert_eq!(s.arrangement.len(), 2);
+        assert!(s.arrangement[1].own_events.is_some(), "the copy owns its notes");
     }
 
     fn held_note_loop(pan: f32, volume: f32) -> crate::project::LoopData {
