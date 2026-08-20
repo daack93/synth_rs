@@ -26,7 +26,7 @@ use models::FtmModel;
 use presets::Preset;
 use project::{NamedLoop, Project, TempoGrid, ZoneData};
 use studio::{
-    ClipView, Command, LiveConfig, LooperMode, PlayMode, SharedView, TrackView,
+    ClipView, Command, LiveConfig, SharedView, TrackView,
     TransportState,
 };
 
@@ -94,9 +94,6 @@ struct App {
     /// Zones for the live kit (each an instrument mapped to a key range).
     kit_zones: Vec<ZoneData>,
 
-    // Looper
-    looper_mode: LooperMode,
-
     // Preset library
     /// Presets found in the folder (refreshed on save/load/delete).
     preset_list: Vec<Preset>,
@@ -119,8 +116,6 @@ struct App {
 
     /// Master output level (linear).
     master_volume: f32,
-    /// Transport play mode: false = Loop (all tracks from 0), true = Arrange.
-    arrange_mode: bool,
 
     // Whammy (pitch-bend lever), semitones + configurable range.
     whammy: f32,
@@ -199,7 +194,6 @@ impl App {
             engine,
             live_is_kit: false,
             kit_zones: Vec::new(),
-            looper_mode: LooperMode::Pedal,
             preset_list,
             preset_name: String::new(),
             preset_status: String::new(),
@@ -213,7 +207,6 @@ impl App {
             project_status: String::new(),
             confirm_clear: false,
             master_volume: 1.0,
-            arrange_mode: true,
             whammy: 0.0,
             whammy_down: 12.0,
             whammy_up: 2.0,
@@ -1287,23 +1280,7 @@ impl App {
             .unwrap_or((TransportState::Idle, 0.0));
 
         ui.horizontal(|ui| {
-            ui.strong("Looper");
-
-            let mut mode = self.looper_mode;
-            egui::ComboBox::from_id_salt("looper_mode")
-                .selected_text(match mode {
-                    LooperMode::Pedal => "Pedal cycle",
-                    LooperMode::Overdub => "Overdub",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut mode, LooperMode::Pedal, "Pedal cycle");
-                    ui.selectable_value(&mut mode, LooperMode::Overdub, "Overdub");
-                });
-            if mode != self.looper_mode {
-                self.looper_mode = mode;
-                let _ = self.tx.send(Command::SetLooperMode(mode));
-            }
-
+            ui.strong("Transport");
             ui.separator();
             let (label, color) = match state {
                 TransportState::Idle => ("● Idle", egui::Color32::GRAY),
@@ -1417,13 +1394,12 @@ impl App {
 
     /// The recorded loop tracks, shown below the keyboard.
     fn tracks_panel(&mut self, ui: &mut egui::Ui) {
-        let (tracks, play, loop_secs, clips, arrange_mode) = match &self.view {
+        let (tracks, play, loop_secs, clips) = match &self.view {
             Some(v) => (
                 v.tracks(),
                 v.play_fraction(),
                 v.loop_seconds(self.sample_rate),
                 v.arrangement(),
-                v.is_arrange_mode(),
             ),
             None => return,
         };
@@ -1431,23 +1407,6 @@ impl App {
         ui.horizontal(|ui| {
             ui.strong("Tracks");
             ui.label(egui::RichText::new(format!("({})", tracks.len())).weak());
-            ui.separator();
-            // Play mode: Loop (build beats, all from 0) vs Arrange (play clips).
-            let mut arrange = self.arrange_mode;
-            if ui.selectable_label(!arrange, "🔁 Loop").on_hover_text("Play all tracks looping from the start").clicked() {
-                arrange = false;
-            }
-            if ui.selectable_label(arrange, "🎬 Arrange").on_hover_text("Play the clip arrangement").clicked() {
-                arrange = true;
-            }
-            if arrange != self.arrange_mode {
-                self.arrange_mode = arrange;
-                let _ = self.tx.send(Command::SetPlayMode(if arrange {
-                    PlayMode::Arrange
-                } else {
-                    PlayMode::Loop
-                }));
-            }
             ui.separator();
             ui.label("Master");
             let mut m = self.master_volume;
@@ -1492,14 +1451,14 @@ impl App {
         });
         if tracks.is_empty() {
             ui.label(
-                egui::RichText::new("No tracks yet. In 🔁 Loop mode, hit ⏺ Record (or ＋Rec track) to record a loop — it becomes a track shown here as a clip.")
+                egui::RichText::new("No tracks yet. Hit ⏺ Record to lay down a loop — it becomes a track shown here as a clip you can arrange.")
                     .weak()
                     .small(),
             );
             return;
         }
 
-        self.arrangement_editor(ui, &tracks, &clips, loop_secs, play, arrange_mode);
+        self.arrangement_editor(ui, &tracks, &clips, loop_secs, play);
         ui.separator();
 
         // Controls for the selected track / clip.
@@ -1518,7 +1477,6 @@ impl App {
         clips: &[ClipView],
         song_secs: f32,
         play: f32,
-        arrange_mode: bool,
     ) {
         if tracks.is_empty() {
             return;
@@ -1528,12 +1486,9 @@ impl App {
         let song = song_secs.max(0.001);
         ui.horizontal(|ui| {
             ui.strong("Arrangement");
-            let hint = if arrange_mode {
-                "click to select · drag a clip to move · right edge grows/shrinks the loop · left edge trims the start · click the strip under a row to seek · dbl-click empty lane to place (snaps to 1/4 note)"
-            } else {
-                "(Loop mode — playback ignores placement; switch to 🎬 Arrange to hear it)"
-            };
-            ui.label(egui::RichText::new(hint).weak().small());
+            ui.label(egui::RichText::new(
+                "handle (top-middle) moves · edges resize · drag the body to select a range · click the strip under a row to seek · dbl-click an empty lane to place",
+            ).weak().small());
         });
 
         let lane_h = 22.0;

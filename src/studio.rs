@@ -108,6 +108,8 @@ pub enum Command {
     /// kit's zones. `SetModel`/`SetEngine` still handle single-instrument edits.
     SetLive(LiveConfig),
     AllNotesOff,
+    /// Legacy pedal/overdub selector (kept for tests / a future pedal plugin).
+    #[allow(dead_code)]
     SetLooperMode(LooperMode),
     /// Primary transport tap (legacy combined record/play cycle; kept for tests).
     #[allow(dead_code)]
@@ -139,8 +141,6 @@ pub enum Command {
     Redo,
     /// Stretch the whole loop in time by `factor` (>1 = longer/slower).
     TimeStretch(f32),
-    /// Switch the transport between Loop (all tracks from 0) and Arrange (clips).
-    SetPlayMode(PlayMode),
     /// Add a clip placing `track` at `start` for `length` seconds (0 = one loop).
     AddClip { track: usize, start: f32, length: f32 },
     /// Move/resize the clip at `index`: new `start` and `length` (seconds).
@@ -206,15 +206,6 @@ struct AutoEv {
     pos: u64,
     target: String,
     value: f32,
-}
-
-/// How the transport plays the track pool.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum PlayMode {
-    /// Every track loops from 0 together — the looper/build-a-beat view.
-    Loop,
-    /// Tracks play at their clip placements — the arrangement.
-    Arrange,
 }
 
 /// What a count-in should start once it finishes.
@@ -383,8 +374,6 @@ pub struct SharedView {
     /// Depth of the undo / redo stacks (for enabling the UI buttons).
     undo_depth: AtomicUsize,
     redo_depth: AtomicUsize,
-    /// Play mode (0 = Loop, 1 = Arrange).
-    play_mode: AtomicU8,
 }
 
 impl SharedView {
@@ -399,7 +388,6 @@ impl SharedView {
             snapshot: Mutex::new(LoopData::default()),
             undo_depth: AtomicUsize::new(0),
             redo_depth: AtomicUsize::new(0),
-            play_mode: AtomicU8::new(1),
         }
     }
 
@@ -411,9 +399,6 @@ impl SharedView {
     }
     pub fn arrangement(&self) -> Vec<ClipView> {
         self.arrangement.lock().map(|a| a.clone()).unwrap_or_default()
-    }
-    pub fn is_arrange_mode(&self) -> bool {
-        self.play_mode.load(Ordering::Relaxed) == 1
     }
 
     /// The current loop as serializable data (for "add to project").
@@ -450,8 +435,6 @@ pub struct Studio {
     arrangement: Vec<Clip>,
     /// The active firing list for the current play mode (rebuilt on change).
     playlist: Vec<Clip>,
-    /// Loop = all tracks from 0; Arrange = play the clip placements.
-    play_mode: PlayMode,
     mode: LooperMode,
 
     playing: bool,
@@ -515,7 +498,6 @@ impl Studio {
             tracks: Vec::new(),
             arrangement: Vec::new(),
             playlist: Vec::new(),
-            play_mode: PlayMode::Arrange,
             mode: LooperMode::Pedal,
             playing: false,
             loop_len: None,
@@ -655,17 +637,6 @@ impl Studio {
             Command::Undo => self.undo(),
             Command::Redo => self.redo(),
             Command::TimeStretch(factor) => self.time_stretch(factor),
-            Command::SetPlayMode(m) => {
-                self.play_mode = m;
-                for t in &mut self.tracks {
-                    t.inst.all_notes_off();
-                }
-                self.rebuild_playlist();
-                self.recompute_song_len();
-                self.pos = 0;
-                self.reset_cursors();
-                self.mark_structure_dirty();
-            }
             Command::AddClip { track, start, length } => {
                 if track < self.tracks.len() {
                     self.push_undo();
@@ -1444,7 +1415,7 @@ impl Studio {
         let period = self.take_period().max(1);
         self.arm_period = Some(period);
         // In Arrange mode, punch in at the playhead; in Loop mode, record from 0.
-        self.rec_origin = if self.play_mode == PlayMode::Arrange { self.pos } else { 0 };
+        self.rec_origin = self.pos; // punch in at the playhead
         let cur = self.loop_len.unwrap_or(0);
         self.loop_len = Some(cur.max(self.rec_origin + period));
         self.arm(false);
@@ -1594,16 +1565,9 @@ impl Studio {
     /// Rebuild the firing list for the current play mode: one clip per track from
     /// 0 in Loop mode, or the arrangement's clips in Arrange mode.
     fn rebuild_playlist(&mut self) {
-        self.playlist = match self.play_mode {
-            PlayMode::Loop => (0..self.tracks.len())
-                .map(|track| Clip::at(track, 0, 0))
-                .collect(),
-            PlayMode::Arrange => self
-                .arrangement
-                .iter()
-                .map(|c| Clip { was_active: false, ..c.clone() })
-                .collect(),
-        };
+        // The playlist is always the clip arrangement.
+        self.playlist =
+            self.arrangement.iter().map(|c| Clip { was_active: false, ..c.clone() }).collect();
     }
 
     /// The global song length (samples): the furthest clip end in the current
@@ -2087,9 +2051,6 @@ impl Studio {
             .store(self.loop_len.unwrap_or(0), Ordering::Relaxed);
         self.view.undo_depth.store(self.undo_stack.len(), Ordering::Relaxed);
         self.view.redo_depth.store(self.redo_stack.len(), Ordering::Relaxed);
-        self.view
-            .play_mode
-            .store(if self.play_mode == PlayMode::Arrange { 1 } else { 0 }, Ordering::Relaxed);
     }
 
     fn mark_structure_dirty(&mut self) {
@@ -2865,50 +2826,6 @@ mod tests {
         s.handle(Command::CropClip { index: 0, a: 0.0, b: 0.05 });
         assert!(s.arrangement[0].own_events.is_some(), "crop forks the clip");
         assert!(s.arrangement[0].length < orig_len, "crop shortens the clip");
-    }
-
-    #[test]
-    fn play_mode_switches_between_loop_and_arrangement() {
-        use crate::project::{ClipData, LoopData, LoopEvent, LoopTrack};
-        let trk = LoopTrack {
-            name: "T".into(),
-            model_id: "musical_string".into(),
-            params: serde_json::json!({}),
-            engine: EngineParams::default(),
-            muted: false,
-            volume: 1.0,
-            pan: 0.0,
-            fade_in: 0.0,
-            fade_out: 0.0,
-            period: Some(0.2),
-            start: None,
-            span: None,
-            zones: Vec::new(),
-            automation: Vec::new(),
-            events: vec![
-                LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 },
-                LoopEvent { t: 0.02, on: false, note: 60, vel: 0.0 },
-            ],
-        };
-        // A single track, placed by a clip starting at 0.2s.
-        let data = LoopData {
-            length: 0.4,
-            arrangement: vec![ClipData { track: 0, start: 0.2, length: 0.0, offset: 0.0, content_len: 0.0, loop_len: 0.0, looping: true, transpose: 0, vel: 1.0, own_events: None }],
-            tracks: vec![trk],
-        };
-
-        // Arrange mode (default): silent until the clip's start.
-        let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(data.clone()));
-        drain(&mut s, 4_800); // 0.1s
-        assert_eq!(s.tracks[0].inst.active_voices(), 0, "arrange: waits for the clip");
-
-        // Loop mode: plays from the top regardless of the placement.
-        let mut s2 = Studio::new(48_000.0);
-        s2.handle(Command::LoadLoop(data));
-        s2.handle(Command::SetPlayMode(PlayMode::Loop));
-        drain(&mut s2, 200);
-        assert!(s2.tracks[0].inst.active_voices() > 0, "loop: plays from the start");
     }
 
     #[test]
