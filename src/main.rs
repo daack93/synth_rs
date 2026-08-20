@@ -1351,12 +1351,27 @@ impl App {
             }
 
             ui.separator();
+            // Play / pause — never records.
+            let playing = matches!(state, TransportState::Playing | TransportState::Recording);
+            let play_label = if playing { "⏸ Pause" } else { "▶ Play" };
             if ui
-                .button("⏺ Rec / Play")
-                .on_hover_text("Idle → record the first loop → play → record over into a new track → tap again to finish. Each recorded take becomes a track.")
+                .button(play_label)
+                .on_hover_text("Start / pause playback (no recording).")
                 .clicked()
             {
-                let _ = self.tx.send(Command::Tap);
+                let _ = self.tx.send(Command::Play);
+            }
+            // Record — separate from Play.
+            let recording = matches!(state, TransportState::Recording);
+            let rec_label = if recording { "⏹ Finish take" } else { "⏺ Record" };
+            let rec_hint = if self.project.tempo.count_in {
+                "Record (separate from Play). Playing → punches in at the playhead now. Stopped → one bar of count-in, then records from the seek cursor. No loop yet → records the first take."
+            } else {
+                "Record (separate from Play). Playing → punches in at the playhead. Stopped/idle → first take, or punch-in at the seek cursor. Turn on Count-in for a lead-in bar before recording."
+            };
+            let rec_btn = egui::Button::new(egui::RichText::new(rec_label).color(egui::Color32::from_rgb(230, 90, 90)));
+            if ui.add(rec_btn).on_hover_text(rec_hint).clicked() {
+                let _ = self.tx.send(Command::Record);
             }
             if ui.button("⏹ Stop").clicked() {
                 let _ = self.tx.send(Command::Stop);
@@ -1364,21 +1379,9 @@ impl App {
             if ui.button("⟲ Reset").on_hover_text("Clear all tracks").clicked() {
                 let _ = self.tx.send(Command::Reset);
             }
-            if self.looper_mode == LooperMode::Pedal && loop_secs > 0.0 {
-                if ui
-                    .button("＋ Rec track")
-                    .on_hover_text("Record another track. In 🎬 Arrange mode it punches in at the playhead; in 🔁 Loop mode it records from the top.")
-                    .clicked()
-                {
-                    let _ = self.tx.send(Command::ArmOverdub);
-                }
-            }
         });
 
-        let hint = match self.looper_mode {
-            LooperMode::Pedal => "⏺ Rec/Play: first tap records the base loop, next plays it, next records over into a new track. Each take = a new track shown as a clip in the arrangement.",
-            LooperMode::Overdub => "⏺ Rec/Play: first tap records the base track, then each tap layers another track. Every take shows up as a clip.",
-        };
+        let hint = "▶ Play and ⏺ Record are separate. Record while playing punches in at the playhead; Record from a stop gives a count-in (when enabled) and records from the seek cursor. Each take becomes a track / clip.";
         ui.label(egui::RichText::new(hint).weak().small());
 
         self.tempo_bar(ui);

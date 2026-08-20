@@ -109,13 +109,20 @@ pub enum Command {
     SetLive(LiveConfig),
     AllNotesOff,
     SetLooperMode(LooperMode),
-    /// Primary transport tap (spacebar).
+    /// Primary transport tap (legacy combined record/play cycle; kept for tests).
+    #[allow(dead_code)]
     Tap,
+    /// Start / resume playback without recording (Play button).
+    Play,
+    /// Smart record (Record button): first take, or punch in at the seek cursor.
+    /// From a stop it count-ins first (when enabled); pressed again it finishes.
+    Record,
     /// Stop playback, keep loops.
     Stop,
     /// Clear all loops.
     Reset,
-    /// Pedal mode: record one extra pass into a new track.
+    /// Pedal mode: record one extra pass into a new track (legacy; kept for tests).
+    #[allow(dead_code)]
     ArmOverdub,
     ToggleMute(usize),
     DeleteTrack(usize),
@@ -581,6 +588,8 @@ impl Studio {
                 self.view.mode.store(m.as_u8(), Ordering::Relaxed);
             }
             Command::Tap => self.tap(),
+            Command::Play => self.play(),
+            Command::Record => self.record(),
             Command::Stop => self.stop(),
             Command::Reset => self.reset(),
             Command::ArmOverdub => self.request_overdub_one_pass(),
@@ -1019,6 +1028,82 @@ impl Studio {
                 }
             },
             _ => {}
+        }
+        self.mark_structure_dirty();
+    }
+
+    /// Play button: start / resume playback, never recording. Ignored during a
+    /// count-in; a no-op when there is nothing recorded yet.
+    fn play(&mut self) {
+        if self.pre_roll > 0 || self.recording.is_some() || self.armed {
+            return;
+        }
+        if self.loop_len.is_some() {
+            self.playing = !self.playing; // toggle play / pause
+            if self.playing {
+                self.reset_cursors();
+            }
+            self.mark_structure_dirty();
+        }
+    }
+
+    /// Record button: the record entry point, decoupled from Play.
+    /// - Pressed during a count-in → cancel it.
+    /// - Pressed while a take is in progress → finish that take.
+    /// - No loop yet → the first (loop-defining) take.
+    /// - A loop exists and playing → punch in immediately at the playhead.
+    /// - A loop exists and stopped → count in (when enabled), then punch in at
+    ///   the seek cursor.
+    fn record(&mut self) {
+        if self.pre_roll > 0 {
+            self.pre_roll = 0; // cancel a running count-in
+            self.pending = None;
+            self.playing = false;
+            self.mark_structure_dirty();
+            return;
+        }
+        if self.recording.is_some() || self.armed {
+            self.finish_take();
+            return;
+        }
+        match self.loop_len {
+            None => {
+                if self.tempo.count_in {
+                    self.start_count_in(Pending::FirstTake);
+                } else {
+                    self.begin_first_take();
+                }
+            }
+            Some(_) => {
+                if self.playing {
+                    self.arm_overdub_one_pass(); // punch in now, no count-in
+                } else if self.tempo.count_in {
+                    self.start_count_in(Pending::PunchIn);
+                } else {
+                    self.arm_overdub_one_pass();
+                }
+            }
+        }
+        self.mark_structure_dirty();
+    }
+
+    /// Close the take in progress. The first (defining) take fixes the loop
+    /// length and starts looping; a later overdub just finalizes and keeps
+    /// playing.
+    fn finish_take(&mut self) {
+        if self.defining && self.recording.is_some() {
+            let len = self.pos.max(1);
+            if let Some(r) = self.recording {
+                self.tracks[r].period = len;
+            }
+            self.disarm_and_finalize();
+            self.recompute_song_len();
+            self.defining = false;
+            self.pos = 0;
+            self.reset_cursors();
+            self.playing = true;
+        } else {
+            self.disarm_and_finalize(); // finish the overdub, keep playing
         }
         self.mark_structure_dirty();
     }
@@ -2449,6 +2534,43 @@ mod tests {
         );
         let snap = s.snapshot_loop();
         assert!(snap.tracks[0].automation.iter().any(|a| a.target == "@bend"));
+    }
+
+    #[test]
+    fn record_button_is_separate_from_play() {
+        use crate::project::TempoGrid;
+        let mut s = Studio::new(48_000.0);
+        // Record from idle → first take; Record again → finish, now a loop plays.
+        s.handle(Command::Record);
+        s.handle(Command::NoteOn { note: 60, vel: 1.0 });
+        drain(&mut s, 4_800);
+        s.handle(Command::NoteOff { note: 60 });
+        s.handle(Command::Record); // finish the take
+        assert_eq!(s.tracks.len(), 1);
+        assert!(s.loop_len.is_some());
+        assert!(s.playing, "finishing the first take starts playback");
+
+        // Count-in enabled, but Record WHILE PLAYING punches in immediately.
+        s.handle(Command::SetTempo(TempoGrid {
+            bpm: 120.0, beats_per_bar: 4, bars: 0, quantize: 0, metronome: false, count_in: true,
+        }));
+        s.handle(Command::Record);
+        assert_eq!(s.pre_roll, 0, "no count-in while already playing");
+        assert!(s.armed || s.recording.is_some(), "punches in immediately");
+        s.handle(Command::Record); // finish that overdub
+
+        // Play toggles playback without recording.
+        s.handle(Command::Play); // pause
+        assert!(!s.playing, "Play toggles to paused");
+        s.handle(Command::Play); // resume
+        assert!(s.playing);
+
+        // From a STOP, Record does a count-in first.
+        s.handle(Command::Stop);
+        s.handle(Command::Seek(0.03));
+        s.handle(Command::Record);
+        assert!(s.pre_roll > 0, "count-in when Record is pressed before playing");
+        assert!(s.recording.is_none() && !s.armed, "not recording during the count-in");
     }
 
     #[test]
