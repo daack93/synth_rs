@@ -1706,7 +1706,9 @@ impl App {
             let t = &tracks[c.track];
             let default_len = if c.length > 0.0 { c.length } else { (song - c.start).max(0.0) };
             let (start, len) = match self.arr_drag {
-                Some((di, _, ps, pl)) if di == ci => (ps, pl),
+                // Move / resize previews carry (start, len); a Select drag does
+                // NOT resize the clip — its floats are the selection, not a size.
+                Some((di, k, ps, pl)) if di == ci && k != DragKind::Select => (ps, pl),
                 Some((di, DragKind::Move, ps, _)) if self.sel_clips.contains(&ci) && self.sel_clips.contains(&di) => {
                     let delta = ps - clips.get(di).map(|d| d.start).unwrap_or(0.0);
                     ((c.start + delta).max(0.0), default_len)
