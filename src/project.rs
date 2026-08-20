@@ -147,6 +147,7 @@ impl LoopData {
     pub fn is_empty(&self) -> bool {
         self.length <= 0.0 || self.tracks.is_empty()
     }
+    #[allow(dead_code)] // used by tests; the loop-list UI that displayed it was removed
     pub fn note_count(&self) -> usize {
         self.tracks.iter().map(|t| t.events.iter().filter(|e| e.on).count()).sum()
     }

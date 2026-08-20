@@ -104,17 +104,17 @@ struct App {
     /// Last preset action result, shown in the UI.
     preset_status: String,
 
-    // Project (loop library)
-    /// The in-memory project (its loops).
+    // Project
+    /// The in-memory project (the current loop + tempo).
     project: Project,
     /// Project name input.
     project_name: String,
-    /// Name input for the loop being added.
-    loop_name: String,
     /// Saved project names on disk.
     project_list: Vec<String>,
     /// Last project action result.
     project_status: String,
+    /// True while the "Clear project?" confirmation modal is open.
+    confirm_clear: bool,
 
     /// Master output level (linear).
     master_volume: f32,
@@ -217,9 +217,9 @@ impl App {
                 tempo: TempoGrid::default(),
             },
             project_name: "Untitled".to_string(),
-            loop_name: String::new(),
             project_list: project::list(),
             project_status: String::new(),
+            confirm_clear: false,
             master_volume: 1.0,
             arrange_mode: true,
             whammy: 0.0,
@@ -343,31 +343,20 @@ impl App {
         self.preset_list = presets::list();
     }
 
-    /// Capture the studio's current loop into the project as a named loop.
-    fn add_current_loop(&mut self) {
-        let data = match &self.view {
-            Some(v) => v.snapshot(),
-            None => return,
-        };
-        if data.is_empty() {
-            self.project_status = "No loop to add — record one first.".into();
-            return;
-        }
-        let name = if self.loop_name.trim().is_empty() {
-            format!("Loop {}", self.project.loops.len() + 1)
-        } else {
-            self.loop_name.trim().to_string()
-        };
-        let tracks = data.tracks.len();
-        self.project.loops.push(NamedLoop { name, data });
-        self.loop_name.clear();
-        self.project_status = format!("Added loop ({tracks} tracks).");
-    }
-
+    /// Save the current studio loop (tracks + arrangement) as the project.
     fn save_project(&mut self) {
         let name = self.project_name.trim();
         self.project.name = if name.is_empty() { "Untitled".into() } else { name.to_string() };
         self.project_name = self.project.name.clone();
+        // Capture whatever is currently in the studio as the project's content.
+        if let Some(v) = &self.view {
+            let data = v.snapshot();
+            self.project.loops = if data.is_empty() {
+                Vec::new()
+            } else {
+                vec![NamedLoop { name: self.project.name.clone(), data }]
+            };
+        }
         match project::save(&self.project) {
             Ok(path) => {
                 self.project_status = format!("Saved project → {}", path.display());
@@ -381,30 +370,77 @@ impl App {
         match project::load_named(name) {
             Ok(p) => {
                 self.project_name = p.name.clone();
-                self.project_status =
-                    format!("Loaded “{}” ({} loops).", p.name, p.loops.len());
                 let _ = self.tx.send(Command::SetTempo(p.tempo));
+                // Load its loop straight into the studio.
+                if let Some(nl) = p.loops.first() {
+                    let _ = self.tx.send(Command::LoadLoop(nl.data.clone()));
+                }
+                self.edit_target = Target::Live;
+                self.track_edit = None;
+                self.project_status = format!("Loaded “{}”.", p.name);
                 self.project = p;
             }
             Err(e) => self.project_status = format!("Load failed: {e}"),
         }
     }
 
-    fn load_loop_into_studio(&mut self, i: usize) {
-        if let Some(nl) = self.project.loops.get(i) {
-            let _ = self.tx.send(Command::LoadLoop(nl.data.clone()));
-            self.edit_target = Target::Live;
-            self.track_edit = None;
-            self.project_status = format!("Loaded loop “{}”.", nl.name);
-        }
+    /// Clear everything: wipe the studio (tracks + arrangement) and start a new,
+    /// empty project. Behind a confirmation — there is no undo for this.
+    fn clear_project(&mut self) {
+        let _ = self.tx.send(Command::Reset);
+        self.project = Project {
+            name: "Untitled".into(),
+            loops: Vec::new(),
+            tempo: self.project.tempo,
+        };
+        self.project_name = "Untitled".into();
+        self.edit_target = Target::Live;
+        self.track_edit = None;
+        self.project_status = "Cleared — new project.".into();
     }
 
-    /// Remove a loop and keep the arrangement's indices valid.
-    fn remove_loop(&mut self, i: usize) {
-        if i >= self.project.loops.len() {
+    /// The "Clear project?" confirmation modal: a dimmed, click-blocking backdrop
+    /// plus a centered dialog. Only clearing goes through here (there's no undo).
+    fn clear_confirm_modal(&mut self, ctx: &egui::Context) {
+        if !self.confirm_clear {
             return;
         }
-        self.project.loops.remove(i);
+        egui::Area::new(egui::Id::new("clear_backdrop"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::Pos2::ZERO)
+            .interactable(true)
+            .show(ctx, |ui| {
+                let screen = ctx.screen_rect();
+                ui.allocate_response(screen.size(), egui::Sense::click());
+                ui.painter().rect_filled(screen, 0.0, egui::Color32::from_black_alpha(160));
+            });
+        egui::Window::new("Clear project?")
+            .order(egui::Order::Tooltip)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("This removes all tracks and the arrangement and starts a new project.");
+                ui.label(egui::RichText::new("This can't be undone.").weak());
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_clear = false;
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("Clear everything").color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(200, 60, 60)),
+                        )
+                        .clicked()
+                    {
+                        self.clear_project();
+                        self.confirm_clear = false;
+                    }
+                });
+            });
     }
 
     fn connect_midi(&mut self, index: usize) {
@@ -555,6 +591,8 @@ impl eframe::App for App {
             self.midi_panel(ui);
             });
         });
+
+        self.clear_confirm_modal(ctx);
     }
 }
 
@@ -586,78 +624,19 @@ impl App {
             if let Some(name) = load {
                 self.load_project(&name);
             }
-            if ui.button("New").clicked() {
-                self.project = Project {
-                    name: "Untitled".into(),
-                    loops: Vec::new(),
-                    tempo: self.project.tempo,
-                };
-                self.project_name = "Untitled".into();
-                self.project_status = "New project.".into();
-            }
             if ui.button("⟳").on_hover_text("Rescan project folder").clicked() {
                 self.project_list = project::list();
             }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("Add current loop:");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.loop_name)
-                    .hint_text("loop name")
-                    .desired_width(150.0),
-            );
+            ui.separator();
+            // Destructive: gated behind a confirmation modal (there's no undo).
             if ui
-                .button("＋ Add loop")
-                .on_hover_text("Capture the loop currently in the tracks below into this project")
+                .add(egui::Button::new(egui::RichText::new("🗑 Clear project").color(egui::Color32::from_rgb(230, 90, 90))))
+                .on_hover_text("Remove all tracks and the arrangement and start fresh")
                 .clicked()
             {
-                self.add_current_loop();
+                self.confirm_clear = true;
             }
         });
-
-        ui.separator();
-        if self.project.loops.is_empty() {
-            ui.label(
-                egui::RichText::new("No loops yet — record a loop, then “Add loop”.")
-                    .weak()
-                    .small(),
-            );
-        } else {
-            let mut load = None;
-            let mut remove = None;
-            egui::ScrollArea::vertical()
-                .max_height(110.0)
-                .show(ui, |ui| {
-                    for (i, nl) in self.project.loops.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            if ui.button("▶").on_hover_text("Load this loop").clicked() {
-                                load = Some(i);
-                            }
-                            ui.label(format!("{}. {}", i + 1, nl.name));
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} tracks · {} notes · {:.1}s",
-                                    nl.data.tracks.len(),
-                                    nl.data.note_count(),
-                                    nl.data.length
-                                ))
-                                .weak()
-                                .small(),
-                            );
-                            if ui.button("🗑").on_hover_text("Remove from project").clicked() {
-                                remove = Some(i);
-                            }
-                        });
-                    }
-                });
-            if let Some(i) = load {
-                self.load_loop_into_studio(i);
-            }
-            if let Some(i) = remove {
-                self.remove_loop(i);
-            }
-        }
 
         self.export_ui(ui);
 
@@ -1375,9 +1354,6 @@ impl App {
             }
             if ui.button("⏹ Stop").clicked() {
                 let _ = self.tx.send(Command::Stop);
-            }
-            if ui.button("⟲ Reset").on_hover_text("Clear all tracks").clicked() {
-                let _ = self.tx.send(Command::Reset);
             }
         });
 
