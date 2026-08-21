@@ -71,6 +71,38 @@ enum DragKind {
     Select,
 }
 
+/// Grid that clip drags snap to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Snap {
+    Bar,
+    Quarter,
+    Eighth,
+    Sixteenth,
+    Free,
+}
+
+impl Snap {
+    fn label(self) -> &'static str {
+        match self {
+            Snap::Bar => "Bar",
+            Snap::Quarter => "1/4",
+            Snap::Eighth => "1/8",
+            Snap::Sixteenth => "1/16",
+            Snap::Free => "Free",
+        }
+    }
+    /// Snap length in seconds (None = free / no snap), given bar and beat lengths.
+    fn secs(self, bar: f32, beat: f32) -> Option<f32> {
+        match self {
+            Snap::Bar => Some(bar),
+            Snap::Quarter => Some(beat),
+            Snap::Eighth => Some(beat * 0.5),
+            Snap::Sixteenth => Some(beat * 0.25),
+            Snap::Free => None,
+        }
+    }
+}
+
 struct App {
     tx: Sender<Command>,
     _audio: Option<AudioEngine>,
@@ -118,6 +150,8 @@ struct App {
     master_volume: f32,
     /// Whether the song repeats at the end (default off = play once).
     repeat: bool,
+    /// Snap grid for clip drags (default quarter note).
+    snap: Snap,
 
     // Whammy (pitch-bend lever), semitones + configurable range.
     whammy: f32,
@@ -210,6 +244,7 @@ impl App {
             confirm_clear: false,
             master_volume: 1.0,
             repeat: false,
+            snap: Snap::Quarter,
             whammy: 0.0,
             whammy_down: 12.0,
             whammy_up: 2.0,
@@ -1502,8 +1537,17 @@ impl App {
         let song = song_secs.max(0.001);
         ui.horizontal(|ui| {
             ui.strong("Arrangement");
+            ui.separator();
+            ui.label("Snap");
+            egui::ComboBox::from_id_salt("snap_grid")
+                .selected_text(self.snap.label())
+                .show_ui(ui, |ui| {
+                    for sn in [Snap::Bar, Snap::Quarter, Snap::Eighth, Snap::Sixteenth, Snap::Free] {
+                        ui.selectable_value(&mut self.snap, sn, sn.label());
+                    }
+                });
             ui.label(egui::RichText::new(
-                "handle (top-middle) moves · edges resize · drag the body to select a range · click the strip under a row to seek · dbl-click an empty lane to place",
+                "· handle moves · edges resize · drag body to select · strip seeks · dbl-click empty to place",
             ).weak().small());
         });
 
@@ -1735,18 +1779,17 @@ impl App {
                     }
                 }
             }
-            // Notes, following the clip's loop config: content window `s`, loop
-            // unit `l` (silence beyond the window each cycle), front-trim offset.
-            // (Uses the track's notes as the source — a guide for forked clips.)
-            let period = t.period.max(1e-6);
+            // Notes, following the clip's loop config: its own content notes
+            // (`c.notes`, fractions of the content span `s`), the loop unit `l`
+            // (silence beyond the window each cycle), and the front-trim offset.
             let s = c.content_len.max(1e-6);
             let l = if c.looping { c.loop_len.max(1e-6) } else { len.max(1e-6) };
-            let base_off = eff_offset.rem_euclid(period);
+            let base_off = eff_offset.rem_euclid(s);
             let bound = s.min(l);
-            for nsp in &t.notes {
-                let note_pos = nsp.start * period;
-                let dur = ((nsp.end - nsp.start) * period).max(1e-4);
-                let phase0 = (note_pos - base_off).rem_euclid(period);
+            for nsp in &c.notes {
+                let note_pos = nsp.start * s;
+                let dur = ((nsp.end - nsp.start) * s).max(1e-4);
+                let phase0 = (note_pos - base_off).rem_euclid(s);
                 if phase0 >= bound {
                     continue;
                 }
@@ -1814,9 +1857,15 @@ impl App {
         }
 
         // ---- interaction ----
-        // Snap to a quarter note (one beat), the natural editing grid.
+        // Snap to the configured grid (quarter note by default; Free = no snap).
         let beat_secs = (bar_secs / self.project.tempo.beats_per_bar.max(1) as f32).max(1e-4);
-        let snap = |s: f32| (s / beat_secs).round() * beat_secs;
+        let snap_len = self.snap.secs(bar_secs, beat_secs);
+        let snap = |s: f32| match snap_len {
+            Some(d) if d > 0.0 => (s / d).round() * d,
+            _ => s,
+        };
+        // Smallest a clip may be trimmed to — the snap unit (or ~a 32nd when free).
+        let min_len = snap_len.unwrap_or(beat_secs * 0.125).max(1e-3);
         let shift = ui.input(|i| i.modifiers.shift);
         if resp.drag_started() {
             // Use the press origin (where the mouse went down), not the current
@@ -1881,8 +1930,8 @@ impl App {
                                 limit = limit.min(o.start);
                             }
                         }
-                        let max_len = (limit - c.start).max(beat_secs);
-                        let len = snap((time_at(p) - c.start).max(beat_secs)).min(max_len);
+                        let max_len = (limit - c.start).max(min_len);
+                        let len = snap((time_at(p) - c.start).max(min_len)).min(max_len);
                         self.arr_drag = Some((ci, kind, c.start, len));
                     }
                     DragKind::ResizeL => {
@@ -1895,7 +1944,7 @@ impl App {
                                 lo = lo.max(sib_end(o));
                             }
                         }
-                        let start = snap(time_at(p)).clamp(lo, end - beat_secs);
+                        let start = snap(time_at(p)).clamp(lo, end - min_len);
                         self.arr_drag = Some((ci, kind, start, end - start));
                     }
                     DragKind::Move => {

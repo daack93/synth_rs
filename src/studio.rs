@@ -313,7 +313,6 @@ pub struct TrackView {
     pub name: String,
     pub instrument: String,
     pub muted: bool,
-    pub notes: Vec<NoteSpan>,
     /// The track instrument's plugin id + serialized params + engine, so the UI
     /// can open it in the editor. For a kit `model_id` is `"kit"` and `zones`
     /// holds its mapping; otherwise `zones` is empty.
@@ -347,6 +346,8 @@ pub struct ClipView {
     pub loop_len: f32,
     /// Whether the clip repeats.
     pub looping: bool,
+    /// The clip's content notes, as fractions of its content span.
+    pub notes: Vec<NoteSpan>,
     /// True if the clip owns its own (forked) notes.
     pub unique: bool,
 }
@@ -2019,7 +2020,6 @@ impl Studio {
                     name: t.name.clone(),
                     instrument: t.label.clone(),
                     muted: t.muted,
-                    notes: note_spans(&t.events, period),
                     model_id,
                     params,
                     engine,
@@ -2040,7 +2040,18 @@ impl Studio {
             .arrangement
             .iter()
             .map(|c| {
-                let (_, _, s, l) = self.clip_dims(c);
+                let (period, span, s, l) = self.clip_dims(c);
+                // The clip's own content notes (forked, else the track's),
+                // as fractions of the content span — so a forked/cropped clip
+                // shows what it actually plays, not the track's original notes.
+                let notes = match &c.own_events {
+                    Some(ev) => note_spans(ev, span as f32),
+                    None => self
+                        .tracks
+                        .get(c.track)
+                        .map(|t| note_spans(&t.events, period as f32))
+                        .unwrap_or_default(),
+                };
                 ClipView {
                     track: c.track,
                     start: c.start as f32 / sr,
@@ -2049,6 +2060,7 @@ impl Studio {
                     content_len: s as f32 / sr,
                     loop_len: l as f32 / sr,
                     looping: c.looping,
+                    notes,
                     unique: c.own_events.is_some(),
                 }
             })
