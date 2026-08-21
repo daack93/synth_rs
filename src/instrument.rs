@@ -271,6 +271,17 @@ impl Instrument {
         }
     }
 
+    /// Release every sounding voice (as if each got a note-off) — used when the
+    /// transport stops so a note held at the stop point fades instead of ringing
+    /// forever. Struck voices keep decaying; sustained ones enter their release.
+    pub fn release_all(&mut self) {
+        for v in &mut self.voices {
+            if v.active {
+                v.releasing = true;
+            }
+        }
+    }
+
     #[allow(dead_code)] // used in tests; handy for a future voice meter
     pub fn active_voices(&self) -> usize {
         self.voices.iter().filter(|v| v.active).count()

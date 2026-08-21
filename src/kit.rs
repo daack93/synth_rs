@@ -112,6 +112,12 @@ impl Kit {
         }
     }
 
+    pub fn release_all(&mut self) {
+        for z in &mut self.zones {
+            z.inst.release_all();
+        }
+    }
+
     pub fn set_bend(&mut self, ratio: f32) {
         for z in &mut self.zones {
             z.inst.set_bend(ratio);
@@ -187,6 +193,13 @@ impl Playable {
         match self {
             Playable::Single(i) => i.all_notes_off(),
             Playable::Kit(k) => k.all_notes_off(),
+        }
+    }
+
+    pub fn release_all(&mut self) {
+        match self {
+            Playable::Single(i) => i.release_all(),
+            Playable::Kit(k) => k.release_all(),
         }
     }
 

@@ -1011,6 +1011,11 @@ impl Studio {
             self.playing = !self.playing; // toggle play / pause
             if self.playing {
                 self.reset_cursors();
+            } else {
+                // Pausing: release held notes so nothing sticks on.
+                for t in &mut self.tracks {
+                    t.inst.release_all();
+                }
             }
             self.mark_structure_dirty();
         }
@@ -1973,10 +1978,14 @@ impl Studio {
                         self.close_defining();
                     }
                 } else {
-                    // Play once: stop at the end and rewind (voices ring out).
+                    // Play once: stop at the end. Release held notes so a note
+                    // still sounding at the end fades instead of ringing forever.
                     self.playing = false;
                     self.pos = 0;
                     self.reset_cursors();
+                    for t in &mut self.tracks {
+                        t.inst.release_all();
+                    }
                 }
             }
         }

@@ -176,8 +176,6 @@ struct App {
     // Export
     export_name: String,
     export_sr: u32,
-    export_repeats: u32,
-    export_tail: f32,
     export_hi_res: bool,
     export_status: String,
 
@@ -256,8 +254,6 @@ impl App {
             arr_seeking: false,
             export_name: "take".to_string(),
             export_sr: 48_000,
-            export_repeats: 2,
-            export_tail: 1.0,
             export_hi_res: false,
             export_status: String::new(),
             base_midi: 60, // C4
@@ -660,15 +656,9 @@ impl App {
                 });
             ui.checkbox(&mut self.export_hi_res, "Hi-res")
                 .on_hover_text("Max out the horn eigensolve resolution for the render (higher rate already admits more modes).");
-        });
-        ui.horizontal(|ui| {
-            ui.label("Loop ×");
-            ui.add(egui::DragValue::new(&mut self.export_repeats).range(1..=256));
-            ui.label("Tail");
-            ui.add(egui::DragValue::new(&mut self.export_tail).range(0.0..=10.0).speed(0.1).suffix(" s"));
             if ui
                 .button("⬇ Export song")
-                .on_hover_text("Render the whole arrangement to a WAV")
+                .on_hover_text("Render the whole arrangement once to a WAV")
                 .clicked()
             {
                 self.export_loop();
@@ -691,14 +681,8 @@ impl App {
         }
         let path = export::export_path(&self.export_name);
         let sr = self.export_sr as f32;
-        match export::render_loop_to_wav(
-            data,
-            sr,
-            self.export_repeats,
-            self.export_tail,
-            self.export_hi_res,
-            &path,
-        ) {
+        // Render the song once, with a fixed tail so trailing decays aren't cut.
+        match export::render_loop_to_wav(data, sr, 1, 3.0, self.export_hi_res, &path) {
             Ok(()) => self.export_status = format!("Wrote {}", path.display()),
             Err(e) => self.export_status = format!("Export failed: {e}"),
         }
