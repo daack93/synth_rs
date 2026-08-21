@@ -7,3 +7,5 @@
 /presets
 # Runtime project / loop saves
 /projects
+# Rendered WAV exports
+/exports
