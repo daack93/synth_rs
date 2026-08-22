@@ -252,3 +252,93 @@ pub fn unbounded_slider<'a, N: egui::emath::Numeric>(
         .clamping(egui::SliderClamping::Never)
         .text(text.to_owned())
 }
+
+// --- Note / pitch helpers, shared by pitch inputs (kit ranges, horn anchor) ---
+
+const NOTE_NAMES: [&str; 12] =
+    ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+/// MIDI note number → concert-pitch name, e.g. 60 → "C4".
+pub fn midi_name(n: i32) -> String {
+    let n = n.clamp(0, 127);
+    format!("{}{}", NOTE_NAMES[(n % 12) as usize], n / 12 - 1)
+}
+
+/// Parse a note name ("E2", "Bb3", "F#4") or a raw MIDI number → MIDI note.
+pub fn parse_note(s: &str) -> Option<i32> {
+    let s = s.trim();
+    if let Ok(n) = s.parse::<i32>() {
+        return Some(n.clamp(0, 127));
+    }
+    let bytes = s.as_bytes();
+    let base = match bytes.first()?.to_ascii_uppercase() {
+        b'C' => 0, b'D' => 2, b'E' => 4, b'F' => 5, b'G' => 7, b'A' => 9, b'B' => 11,
+        _ => return None,
+    };
+    let rest = &s[1..];
+    let (semi, oct_str) = match rest.as_bytes().first() {
+        Some(b'#') | Some(b's') | Some(b'S') => (base + 1, &rest[1..]),
+        Some(b'b') | Some(b'B') => (base - 1, &rest[1..]),
+        _ => (base, rest),
+    };
+    let oct: i32 = oct_str.trim().parse().ok()?;
+    Some(((oct + 1) * 12 + semi).clamp(0, 127))
+}
+
+/// MIDI note → frequency (Hz), A4 = 440.
+pub fn midi_freq(n: i32) -> f32 {
+    440.0 * 2f32.powf((n as f32 - 69.0) / 12.0)
+}
+
+/// Frequency (Hz) → nearest MIDI note.
+pub fn freq_to_midi(hz: f32) -> i32 {
+    (69.0 + 12.0 * (hz.max(1.0) / 440.0).log2()).round() as i32
+}
+
+/// A pitch input showing a concert-pitch name, editable by typing ("E2") **or**
+/// by clicking 🎹 and playing a note (MIDI / keyboard / on-screen piano) —
+/// "MIDI-learn". `id_salt` must be unique per field. Returns `true` if changed.
+///
+/// Reads the most-recent note from the app's `NoteMonitor`, stashed in egui
+/// context data under `"note_monitor"` as `(generation, note)`.
+pub fn note_field(ui: &mut egui::Ui, id_salt: &str, note: &mut i32) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        changed |= ui
+            .add(
+                egui::DragValue::new(note)
+                    .range(0..=127)
+                    .speed(0.15)
+                    .custom_formatter(|n, _| midi_name(n as i32))
+                    .custom_parser(|s| parse_note(s).map(|m| m as f64)),
+            )
+            .changed();
+        let armed_id = egui::Id::new(("note_learn", id_salt));
+        let seen_id = egui::Id::new(("note_learn_gen", id_salt));
+        let mut armed = ui.data(|d| d.get_temp::<bool>(armed_id).unwrap_or(false));
+        let monitor_id = egui::Id::new("note_monitor");
+        if ui
+            .add(egui::Button::new("🎹").selected(armed))
+            .on_hover_text("MIDI-learn: click, then play a note (MIDI / keyboard) to set this")
+            .clicked()
+        {
+            armed = !armed;
+            let (gen, _) = ui.ctx().data(|d| d.get_temp::<(u32, u8)>(monitor_id)).unwrap_or((0, 0));
+            ui.data_mut(|d| {
+                d.insert_temp(armed_id, armed);
+                d.insert_temp(seen_id, gen); // baseline: only capture the NEXT note
+            });
+        }
+        if armed {
+            let (gen, n) = ui.ctx().data(|d| d.get_temp::<(u32, u8)>(monitor_id)).unwrap_or((0, 0));
+            let seen = ui.data(|d| d.get_temp::<u32>(seen_id)).unwrap_or(gen);
+            if seen != gen {
+                *note = n as i32;
+                changed = true;
+                ui.data_mut(|d| d.insert_temp(armed_id, false));
+            }
+            ui.ctx().request_repaint(); // keep polling while armed
+        }
+    });
+    changed
+}

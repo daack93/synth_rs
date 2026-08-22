@@ -193,6 +193,8 @@ struct App {
     midi_ports: Vec<String>,
     midi_sel: Option<usize>,
     _midi: Option<MidiInputHandle>,
+    /// Shared "last note played" for MIDI-learn on pitch fields.
+    note_monitor: midi::NoteMonitor,
     midi_status: String,
 }
 
@@ -266,6 +268,7 @@ impl App {
             midi_ports,
             midi_sel: None,
             _midi: None,
+            note_monitor: midi::NoteMonitor::default(),
             midi_status: "not connected".to_string(),
         }
     }
@@ -462,7 +465,7 @@ impl App {
     }
 
     fn connect_midi(&mut self, index: usize) {
-        match midi::connect(index, self.tx.clone()) {
+        match midi::connect(index, self.tx.clone(), self.note_monitor.clone()) {
             Ok(h) => {
                 self.midi_status = format!("connected: {}", h.port_name);
                 self._midi = Some(h);
@@ -477,6 +480,7 @@ impl App {
     }
 
     fn note_on(&mut self, note: u8, vel: f32) {
+        self.note_monitor.record(note); // feed MIDI-learn (keyboard / piano)
         let _ = self.tx.send(Command::NoteOn { note, vel });
     }
     fn note_off(&mut self, note: u8) {
@@ -545,6 +549,10 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Keep animating so key/piano input is polled continuously.
         ctx.request_repaint();
+
+        // Publish the last note played for MIDI-learn pitch fields to read.
+        let latest = self.note_monitor.latest();
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("note_monitor"), latest));
 
         self.handle_computer_keyboard(ctx);
 
@@ -1035,16 +1043,21 @@ impl App {
                             }
                         });
 
-                        // --- Key range + pad / transpose ---
+                        // --- Key range + pad / transpose --- (note-name fields,
+                        // typeable or set by playing a note via 🎹 MIDI-learn)
                         ui.horizontal(|ui| {
                             ui.label("Keys");
-                            changed |= ui.add(egui::DragValue::new(&mut z.lo).range(0..=127)).changed();
+                            let mut lo = z.lo as i32;
+                            if models::note_field(ui, &format!("kit_lo_{zi}"), &mut lo) {
+                                z.lo = lo.clamp(0, 127) as u8;
+                                changed = true;
+                            }
                             ui.label("–");
-                            changed |= ui.add(egui::DragValue::new(&mut z.hi).range(0..=127)).changed();
-                            ui.label(
-                                egui::RichText::new(format!("{}–{}", note_name(z.lo), note_name(z.hi)))
-                                    .weak(),
-                            );
+                            let mut hi = z.hi as i32;
+                            if models::note_field(ui, &format!("kit_hi_{zi}"), &mut hi) {
+                                z.hi = hi.clamp(0, 127) as u8;
+                                changed = true;
+                            }
                         });
                         ui.horizontal(|ui| {
                             let mut pad = z.fixed_note.is_some();
@@ -1057,8 +1070,11 @@ impl App {
                                 changed = true;
                             }
                             if let Some(fixed) = z.fixed_note.as_mut() {
-                                changed |= ui.add(egui::DragValue::new(fixed).range(0..=127)).changed();
-                                ui.label(egui::RichText::new(note_name(*fixed)).weak());
+                                let mut n = *fixed as i32;
+                                if models::note_field(ui, &format!("kit_pad_{zi}"), &mut n) {
+                                    *fixed = n.clamp(0, 127) as u8;
+                                    changed = true;
+                                }
                             } else {
                                 ui.label("transpose");
                                 changed |= ui

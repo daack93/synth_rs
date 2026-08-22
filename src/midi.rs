@@ -1,7 +1,9 @@
 //! MIDI input via `midir`. Connects to a chosen port and forwards note-on /
 //! note-off messages into the audio command channel.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 
 use midir::{MidiInput, MidiInputConnection};
 
@@ -9,6 +11,25 @@ use crate::studio::Command;
 
 /// Pitch-wheel bend range in semitones (the usual default).
 const PITCH_WHEEL_RANGE: f32 = 2.0;
+
+/// A lock-free "last note played" slot the UI can poll for MIDI-learn — every
+/// note-on (from MIDI, the on-screen piano, or the computer keyboard) bumps a
+/// generation counter and records the note, so a UI field armed for learn can
+/// notice the next note and capture it. Packs `gen` (high 24 bits) + `note`.
+#[derive(Clone, Default)]
+pub struct NoteMonitor(Arc<AtomicU32>);
+
+impl NoteMonitor {
+    pub fn record(&self, note: u8) {
+        let gen = (self.0.load(Ordering::Relaxed) >> 8).wrapping_add(1);
+        self.0.store((gen << 8) | note as u32, Ordering::Relaxed);
+    }
+    /// `(generation, note)` — the generation changes on every recorded note.
+    pub fn latest(&self) -> (u32, u8) {
+        let v = self.0.load(Ordering::Relaxed);
+        (v >> 8, (v & 0xff) as u8)
+    }
+}
 
 pub struct MidiInputHandle {
     _conn: MidiInputConnection<()>,
@@ -28,7 +49,7 @@ pub fn list_ports() -> Vec<String> {
 }
 
 /// Connect to the input port at `index`, forwarding events to `tx`.
-pub fn connect(index: usize, tx: Sender<Command>) -> Result<MidiInputHandle, String> {
+pub fn connect(index: usize, tx: Sender<Command>, monitor: NoteMonitor) -> Result<MidiInputHandle, String> {
     let mut midi_in = MidiInput::new("ftm_synth").map_err(|e| e.to_string())?;
     midi_in.ignore(midir::Ignore::None);
     let ports = midi_in.ports();
@@ -42,7 +63,7 @@ pub fn connect(index: usize, tx: Sender<Command>) -> Result<MidiInputHandle, Str
             port,
             "ftm_synth-in",
             move |_stamp, message, _| {
-                handle_message(message, &tx);
+                handle_message(message, &tx, &monitor);
             },
             (),
         )
@@ -54,7 +75,7 @@ pub fn connect(index: usize, tx: Sender<Command>) -> Result<MidiInputHandle, Str
     })
 }
 
-fn handle_message(message: &[u8], tx: &Sender<Command>) {
+fn handle_message(message: &[u8], tx: &Sender<Command>, monitor: &NoteMonitor) {
     if message.len() < 3 {
         return;
     }
@@ -68,6 +89,7 @@ fn handle_message(message: &[u8], tx: &Sender<Command>) {
                 let _ = tx.send(Command::NoteOff { note });
             } else {
                 let vel = data2 as f32 / 127.0;
+                monitor.record(note); // let the UI's MIDI-learn see it
                 let _ = tx.send(Command::NoteOn { note, vel });
             }
         }
