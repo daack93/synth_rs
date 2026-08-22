@@ -188,10 +188,12 @@ pub fn factory() -> Vec<Preset> {
             "Trumpet",
             WebsterHorn {
                 boundary: Boundary::Brass,
-                r1: 0.0045,
-                r2: -0.0030,
-                r3: 0.0320,
-                length: 1.4,
+                // Bell-flare quadratic over its final 0.6 m (Bb trumpet). Base
+                // resonance 116.5 Hz = open bore → longest bore anchored at E2.
+                r1: 0.0058,
+                r2: 0.0150,
+                r3: 0.1550,
+                length: 0.6,
                 wave_speed: 343.0,
                 blow_pos: 0.0,
                 depth: 32,
@@ -217,10 +219,10 @@ pub fn factory() -> Vec<Preset> {
             "French Horn (F)",
             WebsterHorn {
                 boundary: Boundary::Brass,
-                r1: 0.0045,
-                r2: -0.0020,
-                r3: 0.0250,
-                length: 2.4,
+                r1: 0.0090,
+                r2: 0.0350,
+                r3: 0.1110,
+                length: 1.0,
                 blow_pos: 0.0,
                 depth: 30,
                 resolution: 400,
@@ -245,10 +247,10 @@ pub fn factory() -> Vec<Preset> {
             "French Horn (Bb)",
             WebsterHorn {
                 boundary: Boundary::Brass,
-                r1: 0.0045,
-                r2: -0.0020,
-                r3: 0.0250,
-                length: 2.4,
+                r1: 0.0090,
+                r2: 0.0350,
+                r3: 0.1110,
+                length: 1.0,
                 blow_pos: 0.0,
                 depth: 30,
                 resolution: 400,
@@ -277,7 +279,28 @@ pub fn factory() -> Vec<Preset> {
         // Trombone: long cylindrical brass with a bell flare.
         make(
             "Trombone",
-            WebsterHorn { boundary: Boundary::Brass, r1: 0.0068, r2: -0.001, r3: 0.030, length: 2.7, blow_pos: 0.0, depth: 30, resolution: 400, damping: 8.0, freq_dep_damping: -0.08, visco_loss: 1.8, radiation: 1.4, wavefront: Wavefront::Spherical, ..WebsterHorn::default() },
+            WebsterHorn {
+                boundary: Boundary::Brass,
+                // Bell-flare quadratic over its final 0.8 m (tenor Bb trombone).
+                // Base resonance 58.3 Hz = open bore → longest position anchored
+                // at E1. The slide's 7 positions map to the 0..6 semitone steps.
+                r1: 0.0067,
+                r2: 0.0220,
+                r3: 0.1450,
+                length: 0.8,
+                blow_pos: 0.0,
+                depth: 30,
+                resolution: 400,
+                damping: 8.0,
+                freq_dep_damping: -0.08,
+                visco_loss: 1.8,
+                radiation: 1.4,
+                wavefront: Wavefront::Spherical,
+                play_mode: HornPlay::OverblowTracked,
+                valve_steps: 6,
+                overblow_anchor_hz: 41.20,
+                ..WebsterHorn::default()
+            },
             eng(0.6, 25.0, 60.0),
         ),
         // ---- Woodwinds (bore shape + end condition set the character) ----
