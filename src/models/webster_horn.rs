@@ -39,6 +39,30 @@ pub enum PlayMode {
     /// a bugle/natural horn. Snaps pitch to the resonance ladder; the fixed
     /// cutoff makes low notes dark/resonant and high notes bright.
     Overblow,
+    /// Key-tracked overblow: like a real brass player — overblow to the harmonic
+    /// just above the key, then adjust the bore length (valve/slide) by the small
+    /// amount that tunes that harmonic exactly onto the key. Chromatic tracking
+    /// with the overblown, fixed-formant timbre (formant motion stays bounded to
+    /// the gap between adjacent harmonics rather than sweeping the whole range).
+    OverblowTracked,
+}
+
+/// Pick the tube resonance to overblow for a key-tracked note: the lowest
+/// resonance at/above `target` (the least bore stretch — a real player picks the
+/// nearest harmonic above), or the highest resonance if the key is above them
+/// all. Returns `(resonance_hz, index)`.
+fn overblow_pick(target: f64, res: &[f64]) -> (f64, usize) {
+    let mut best_above: Option<(f64, usize)> = None;
+    let mut highest: (f64, usize) = (0.0, 0);
+    for (i, &f) in res.iter().enumerate() {
+        if f > highest.0 {
+            highest = (f, i);
+        }
+        if f >= target && best_above.map_or(true, |(bf, _)| f < bf) {
+            best_above = Some((f, i));
+        }
+    }
+    best_above.unwrap_or(highest)
 }
 
 /// Wavefront geometry used to build the horn potential.
@@ -298,8 +322,10 @@ impl FtmModel for WebsterHorn {
         const RAD_C: f64 = 5.0;
         let keefe_rad = |fh: f64| KEEFE_C * visco * flare_loss * fh.sqrt() + RAD_C * radiation * (fh * 1e-3).powi(2);
 
-        // --- Overblow: fixed tube, the key selects a natural resonance ---
-        if self.play_mode == PlayMode::Overblow {
+        // --- Overblow family: fixed-tube timbre; Overblow snaps to the resonance
+        //     ladder, OverblowTracked tunes the bore so the chosen harmonic lands
+        //     exactly on the key (chromatic tracking, overblown tone). ---
+        if matches!(self.play_mode, PlayMode::Overblow | PlayMode::OverblowTracked) {
             // Resonances at absolute Hz (fixed geometry).
             let res: Vec<f64> = modes
                 .iter()
@@ -309,12 +335,27 @@ impl FtmModel for WebsterHorn {
             if res.is_empty() {
                 return;
             }
-            // Snap the played note to the nearest resonance (log distance).
-            let ft = (freq_hz as f64).max(1.0).ln();
-            let f_sel = *res
-                .iter()
-                .min_by(|a, b| (a.ln() - ft).abs().partial_cmp(&(b.ln() - ft).abs()).unwrap())
-                .unwrap();
+            // Choose the sounding pitch `f_sel` and the resonance ladder `boost`
+            // that shapes its harmonics.
+            let (f_sel, boost): (f64, Vec<f64>) = if self.play_mode == PlayMode::OverblowTracked
+            {
+                // Nearest harmonic at/above the key, then retune the bore onto it:
+                // scale the whole ladder by target/f_n (a small valve/slide move).
+                let target = (freq_hz as f64).max(1.0);
+                let (f_n, _n) = overblow_pick(target, &res);
+                let ladder_scale = target / f_n.max(1e-9);
+                let scaled: Vec<f64> = res.iter().map(|&f| f * ladder_scale).collect();
+                (target, scaled)
+            } else {
+                // Snap the played note to the nearest resonance (log distance).
+                let ft = (freq_hz as f64).max(1.0).ln();
+                let f_sel = *res
+                    .iter()
+                    .min_by(|a, b| (a.ln() - ft).abs().partial_cmp(&(b.ln() - ft).abs()).unwrap())
+                    .unwrap();
+                (f_sel, res.clone())
+            };
+            let res = boost; // resonance ladder used to shape the harmonic series
             // Synthesize that resonance's harmonic series, each harmonic boosted
             // when it lands on a tube resonance (so a harmonic tube sounds full,
             // an odd-resonance tube like a cylinder-closed clarinet loses its
@@ -419,6 +460,7 @@ impl FtmModel for WebsterHorn {
             .selected_text(match self.play_mode {
                 PlayMode::Chromatic => "Chromatic (resize)",
                 PlayMode::Overblow => "Overblow (fixed tube)",
+                PlayMode::OverblowTracked => "Overblow (key-tracked)",
             })
             .show_ui(ui, |ui| {
                 changed |= ui
@@ -428,6 +470,10 @@ impl FtmModel for WebsterHorn {
                 changed |= ui
                     .selectable_value(&mut self.play_mode, PlayMode::Overblow, "Overblow (fixed tube)")
                     .on_hover_text("Fixed tube: the key selects the nearest natural resonance (a bugle). Pitch snaps to the resonance ladder.")
+                    .changed();
+                changed |= ui
+                    .selectable_value(&mut self.play_mode, PlayMode::OverblowTracked, "Overblow (key-tracked)")
+                    .on_hover_text("Overblow to the harmonic above the key, then tune the bore length onto it — chromatic pitch with the overblown, fixed-formant tone.")
                     .changed();
             });
         ui.add_space(4.0);
@@ -670,6 +716,19 @@ fn tqli(d: &mut [f64], e: &mut [f64], mut z: Option<&mut [Vec<f64>]>) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn overblow_pick_tracks_the_nearest_harmonic_above() {
+        let res = vec![100.0, 200.0, 300.0, 400.0];
+        assert_eq!(overblow_pick(250.0, &res).0, 300.0, "between: nearest harmonic above");
+        assert_eq!(overblow_pick(200.0, &res).0, 200.0, "exact hit");
+        assert_eq!(overblow_pick(60.0, &res).0, 100.0, "below all: lowest resonance");
+        assert_eq!(overblow_pick(500.0, &res).0, 400.0, "above all: highest resonance");
+        // Retuning that harmonic onto the key lands the pitch exactly on target.
+        let (f_n, _) = overblow_pick(250.0, &res);
+        let scale = 250.0 / f_n;
+        assert!((f_n * scale - 250.0).abs() < 1e-9, "bore retune lands on the key");
+    }
+
     /// A straight tube (V = 0) with Dirichlet ends has k_j ≈ jπ/L; check the
     /// eigensolver recovers that.
     #[test]
@@ -708,6 +767,21 @@ mod tests {
         // The flare pushes the second resonance off a pure 2:1 (it's a horn, not a tube).
         let ratio = buf.freq[1] / buf.freq[0];
         assert!(ratio > 1.5, "upper resonance above the fundamental: {ratio}");
+    }
+
+    #[test]
+    fn overblow_tracked_lands_the_fundamental_on_each_key() {
+        let h = WebsterHorn { play_mode: PlayMode::OverblowTracked, ..WebsterHorn::default() };
+        for &target in &[196.0_f32, 262.0, 330.0, 392.0, 523.0] {
+            let mut buf = ModeBuffer::default();
+            h.excite(target, 1.0, 48_000.0, &mut buf);
+            assert!(buf.n > 0, "tracked overblow produced modes at {target} Hz");
+            let lo = buf.freq[..buf.n].iter().cloned().fold(f32::INFINITY, f32::min);
+            assert!(
+                (lo - target).abs() / target < 0.02,
+                "fundamental sits on the key: {lo} vs {target}"
+            );
+        }
     }
 
     #[test]

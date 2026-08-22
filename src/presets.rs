@@ -19,7 +19,7 @@ use crate::models::musical_string::MusicalString;
 use crate::models::pure_plate::PurePlate;
 use crate::models::pure_string::PureString;
 use crate::models::snare::Snare;
-use crate::models::webster_horn::{Boundary, Wavefront, WebsterHorn};
+use crate::models::webster_horn::{Boundary, PlayMode as HornPlay, Wavefront, WebsterHorn};
 use crate::models::{model_from_id, Excitation, FtmModel};
 use crate::instrument::EngineParams;
 use crate::project::ZoneData;
@@ -201,6 +201,9 @@ pub fn factory() -> Vec<Preset> {
                 visco_loss: 1.5,             // narrow leadpipe = warm boundary-layer loss
                 radiation: 1.6,              // bright, open bell
                 wavefront: Wavefront::Spherical, // real bore: curved wavefronts at the bell
+                // Proof of concept: overblow to the harmonic above each key and
+                // tune the bore onto it — the overblown tone, but chromatic.
+                play_mode: HornPlay::OverblowTracked,
                 ..WebsterHorn::default()
             },
             eng(0.6, 30.0, 45.0),
