@@ -43,6 +43,12 @@ pub struct Preset {
     /// Kit zones. Empty ⇒ a single instrument; non-empty ⇒ a kit.
     #[serde(default)]
     pub zones: Vec<ZoneData>,
+    /// Provenance: `Some(true)` = a built-in factory preset (code-owned, so it
+    /// is refreshed from [`factory`] on launch); `Some(false)` = user-saved
+    /// (never overwritten); `None` = a legacy file from before this field, which
+    /// [`load_library`] treats as refreshable so old factory copies update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<bool>,
 }
 
 impl Preset {
@@ -54,6 +60,7 @@ impl Preset {
             params: model.to_json(),
             engine: engine.clone(),
             zones: Vec::new(),
+            builtin: Some(false),
         }
     }
 
@@ -65,6 +72,7 @@ impl Preset {
             params: serde_json::Value::Null,
             engine: EngineParams::default(),
             zones,
+            builtin: Some(false),
         }
     }
 
@@ -364,21 +372,36 @@ pub fn factory() -> Vec<Preset> {
         make("Triangle Lead", BasicWave { waveform: Waveform::Triangle, harmonics: 16, decay_time: 1.5 }, eng(0.5, 3.0, 120.0)),
         make("Saw Lead", BasicWave { waveform: Waveform::Saw, harmonics: 40, decay_time: 1.2 }, eng(0.45, 3.0, 120.0)),
     ]
+    // Stamp every factory preset as built-in so the launch refresh keeps them
+    // in sync with this code (user-saved presets are left untouched).
+    .into_iter()
+    .map(|mut p| {
+        p.builtin = Some(true);
+        p
+    })
+    .collect()
 }
 
 /// Seed the folder with the factory presets if it currently has none (first run).
 /// Returns the resulting list.
-pub fn seed_if_empty() -> Vec<Preset> {
+/// Load the on-disk library, refreshing built-in presets from [`factory`] so
+/// code changes to them take effect on launch. A same-named file is overwritten
+/// only when it is a built-in (`builtin == Some(true)`) or a legacy file from
+/// before the `builtin` field (`None`); a user-saved preset (`Some(false)`) is
+/// never touched, and a brand-new factory preset is written for the first time.
+pub fn load_library() -> Vec<Preset> {
     let dir = presets_dir();
     let existing = list_in(&dir);
-    if existing.is_empty() {
-        for p in factory() {
+    for p in factory() {
+        let refresh = match existing.iter().find(|e| e.name == p.name) {
+            None => true,                        // new factory preset → seed it
+            Some(e) => e.builtin != Some(false), // built-in or legacy → refresh
+        };
+        if refresh {
             let _ = save_in(&dir, &p);
         }
-        list_in(&dir)
-    } else {
-        existing
     }
+    list_in(&dir)
 }
 
 /// (Re)write every factory preset, overwriting same-named files. Returns the list.

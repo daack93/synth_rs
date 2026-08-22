@@ -218,7 +218,7 @@ impl App {
 
         let midi_ports = midi::list_ports();
         // First run seeds the folder with the factory instrument kit.
-        let preset_list = presets::seed_if_empty();
+        let preset_list = presets::load_library();
 
         App {
             tx,
