@@ -201,9 +201,13 @@ pub fn factory() -> Vec<Preset> {
                 visco_loss: 1.5,             // narrow leadpipe = warm boundary-layer loss
                 radiation: 1.6,              // bright, open bell
                 wavefront: Wavefront::Spherical, // real bore: curved wavefronts at the bell
-                // Proof of concept: overblow to the harmonic above each key and
-                // tune the bore onto it — the overblown tone, but chromatic.
+                // Proof of concept: play like a real Bb trumpet — overblow onto
+                // one of the 7 valve bore lengths (0..6 semitones) and land it on
+                // the key. Longest bore's fundamental = concert E2 (open bore =
+                // pedal Bb2 a tritone above).
                 play_mode: HornPlay::OverblowTracked,
+                valve_steps: 6,
+                overblow_anchor_hz: 82.41,
                 ..WebsterHorn::default()
             },
             eng(0.6, 30.0, 45.0),
