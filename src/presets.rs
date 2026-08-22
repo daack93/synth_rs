@@ -214,7 +214,7 @@ pub fn factory() -> Vec<Preset> {
         ),
         // French Horn: same bore idea, longer + darker (more HF damping).
         make(
-            "French Horn",
+            "French Horn (F)",
             WebsterHorn {
                 boundary: Boundary::Brass,
                 r1: 0.0045,
@@ -229,6 +229,40 @@ pub fn factory() -> Vec<Preset> {
                 visco_loss: 2.5,             // long narrow tubing = mellow, stuffed
                 radiation: 0.5,              // dark, backward-facing bell
                 wavefront: Wavefront::Spherical,
+                // Key-tracked: 3 valves (0..6 semitones). Horn "in F" → the open
+                // bore's fundamental is concert F1 (43.65 Hz), so the LONGEST bore
+                // (−6 semitones) is anchored at B0 = 30.87 Hz. Mid-range notes fall
+                // on high harmonics (8th–16th) — the mellow, "living high" horn
+                // character.
+                play_mode: HornPlay::OverblowTracked,
+                valve_steps: 6,
+                overblow_anchor_hz: 30.87,
+                ..WebsterHorn::default()
+            },
+            eng(0.55, 30.0, 150.0),
+        ),
+        make(
+            "French Horn (Bb)",
+            WebsterHorn {
+                boundary: Boundary::Brass,
+                r1: 0.0045,
+                r2: -0.0020,
+                r3: 0.0250,
+                length: 2.4,
+                blow_pos: 0.0,
+                depth: 30,
+                resolution: 400,
+                damping: 8.0,
+                freq_dep_damping: -0.10,
+                visco_loss: 2.5,
+                radiation: 0.5,
+                wavefront: Wavefront::Spherical,
+                // The Bb side of a double horn: shorter, so a given note sits on a
+                // lower harmonic — more secure/brighter. Open fundamental concert
+                // Bb1 (58.27 Hz) → longest bore anchored at E1 = 41.20 Hz.
+                play_mode: HornPlay::OverblowTracked,
+                valve_steps: 6,
+                overblow_anchor_hz: 41.20,
                 ..WebsterHorn::default()
             },
             eng(0.55, 30.0, 150.0),
