@@ -311,7 +311,20 @@ impl FtmModel for WebsterHorn {
             return;
         }
         lambdas.sort_by(|a, b| b.partial_cmp(a).unwrap()); // descending λ ⇒ ascending k
-        let take = self.depth.clamp(1, super::MAX_MODES).min(lambdas.len());
+        // A finite-difference eigensolve on `n` grid points only resolves its
+        // lowest ~n/3 eigenvalues accurately; higher ones saturate against the
+        // operator's largest eigenvalue and pile up into a dense, spurious,
+        // *buzzy* cluster (measured: on a 512 grid the mode ratios flatten near
+        // index ~240). Cap the modes we keep to that resolvable count so a large
+        // DEPTH can never sound that numerical garbage. Chromatic sounds these
+        // directly; the Overblow paths only use them as a resonance ladder, so
+        // for those this just trims an inaudible tail.
+        let resolvable = (n / 3).max(1);
+        let take = self
+            .depth
+            .clamp(1, super::MAX_MODES)
+            .min(lambdas.len())
+            .min(resolvable);
         let mut modes: Vec<(f64, f64)> = Vec::with_capacity(take);
         for &lambda in lambdas.iter().take(take) {
             let k = (-lambda).sqrt();
@@ -959,3 +972,6 @@ mod tests {
         assert!(buf.amp[..buf.n].iter().all(|a| a.is_finite()));
     }
 }
+
+
+
