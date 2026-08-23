@@ -19,11 +19,18 @@ use super::musical_string::MusicalString;
 use super::pure_plate::PurePlate;
 use super::pure_string::PureString;
 use super::webster_horn::WebsterHorn;
-use super::{unbounded_slider, FtmModel, ModeBuffer};
+use super::{freq_to_midi, midi_name, unbounded_slider, FtmModel, ModeBuffer};
 use crate::graph::{
     DriveExciter, FormantResonator, Graph, ImpulseExciter, ModalResonator, Node, ReedExciter,
     SnareWires, Sum,
 };
+
+const PI: f32 = std::f32::consts::PI;
+const TWO_PI: f32 = std::f32::consts::TAU;
+/// Speed of sound in air at ~20 °C, m/s — sets the body's Helmholtz pitch.
+const C_AIR: f32 = 343.0;
+/// ln(1000): a decay rate of `ln(1000)/T` reaches −60 dB at `t = T` seconds.
+const LN_1000: f32 = 6.907_755;
 
 /// One node in an instrument graph. Each variant is a physics component with
 /// its own inherent parameters (kept as their natural types).
@@ -44,9 +51,11 @@ pub enum Comp {
     Bell(MetalBell),
     /// A struck cymbal / gong plate resonator (dense inharmonic modes).
     Cymbal(Cymbal),
-    /// A body / oral-cavity resonator: fixed formants, `ring` = how long it
-    /// rings, `tone` = formant-frequency scale.
-    Body { ring: f32, tone: f32 },
+    /// A resonant body: a Helmholtz air cavity (its pitch derived from
+    /// `cavity_litres` + `soundhole_cm`) plus a top/soundboard plate resonance
+    /// (`top_hz`), ringing for `decay_s` seconds. Set the cavity to 0 for a
+    /// cavity-less soundboard (e.g. a piano); a small cavity models an oral tract.
+    Body { cavity_litres: f32, soundhole_cm: f32, top_hz: f32, decay_s: f32 },
     /// Snare wires resting on a head: a rattle that buzzes with the head's motion.
     /// `level` = rattle amount, `tone` = band brightness.
     Wires { level: f32, tone: f32 },
@@ -70,7 +79,7 @@ impl Comp {
             Comp::MusicalString(_) => "Musical string (resonator)",
             Comp::Bell(_) => "Bell / cowbell (resonator)",
             Comp::Cymbal(_) => "Cymbal / gong (resonator)",
-            Comp::Body { .. } => "Body (resonator)",
+            Comp::Body { .. } => "Body / cavity (resonator)",
             Comp::Wires { .. } => "Snare wires",
             Comp::Breath { .. } => "Breath (exciter)",
             Comp::Reed { .. } => "Reed / lip (exciter)",
@@ -95,8 +104,11 @@ impl Comp {
             Comp::MusicalString(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
             Comp::Bell(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
             Comp::Cymbal(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
-            Comp::Body { ring, tone } => {
-                Box::new(FormantResonator::new(&body_bank(*ring, *tone), sr))
+            Comp::Body { cavity_litres, soundhole_cm, top_hz, decay_s } => {
+                Box::new(FormantResonator::new(
+                    &body_bank(*cavity_litres, *soundhole_cm, *top_hz, *decay_s),
+                    sr,
+                ))
             }
             Comp::Wires { level, tone } => {
                 let t = tone.clamp(0.3, 3.0);
@@ -128,15 +140,34 @@ impl Comp {
             Comp::MusicalString(m) => m.params_ui(ui),
             Comp::Bell(m) => m.params_ui(ui),
             Comp::Cymbal(m) => m.params_ui(ui),
-            Comp::Body { ring, tone } => {
+            Comp::Body { cavity_litres, soundhole_cm, top_hz, decay_s } => {
                 let mut c = false;
+                let f_h = helmholtz_hz(*cavity_litres, *soundhole_cm);
+                if f_h > 0.0 {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "air resonance ≈ {f_h:.0} Hz ({})",
+                            midi_name(freq_to_midi(f_h))
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                }
                 c |= ui
-                    .add(unbounded_slider(ring, 0.1..=4.0, "Body ring"))
-                    .on_hover_text("How long the body rings. Keep modest — a body is damped.")
+                    .add(unbounded_slider(cavity_litres, 0.0..=60.0, "Cavity volume").suffix(" L"))
+                    .on_hover_text("Enclosed air volume. With the soundhole it sets the Helmholtz 'boom'. 0 = no cavity (a soundboard).")
                     .changed();
                 c |= ui
-                    .add(unbounded_slider(tone, 0.5..=2.0, "Body tone"))
-                    .on_hover_text("Shifts the body's resonant frequencies (brightness).")
+                    .add(unbounded_slider(soundhole_cm, 0.0..=15.0, "Soundhole").suffix(" cm"))
+                    .on_hover_text("Soundhole diameter — bigger raises the air resonance.")
+                    .changed();
+                c |= ui
+                    .add(unbounded_slider(top_hz, 40.0..=1500.0, "Top resonance").suffix(" Hz"))
+                    .on_hover_text("Main top/soundboard plate resonance (a guitar top ≈ 195 Hz).")
+                    .changed();
+                c |= ui
+                    .add(unbounded_slider(decay_s, 0.02..=1.0, "Body decay").suffix(" s"))
+                    .on_hover_text("How long the body rings — bodies are well damped (~0.15 s).")
                     .changed();
                 c
             }
@@ -168,13 +199,38 @@ impl Comp {
 }
 
 /// A body's formant bank (base freq, gain), scaled by `tone`, damped by `ring`.
-fn body_bank(ring: f32, tone: f32) -> ModeBuffer {
-    let base = [(100.0f32, 0.5f32), (210.0, 0.4), (300.0, 0.3), (450.0, 0.2)];
-    let ring = ring.clamp(0.1, 6.0);
-    let tone = tone.clamp(0.4, 2.5);
+/// Helmholtz air-resonance frequency (Hz) of a cavity of `cavity_litres` with a
+/// circular soundhole of diameter `soundhole_cm`: `f = (c/2π)·√(A/(V·L))`, with
+/// neck-end correction `L ≈ 1.7·r`. Returns 0 if there is no cavity/hole.
+fn helmholtz_hz(cavity_litres: f32, soundhole_cm: f32) -> f32 {
+    let v = (cavity_litres * 1e-3).max(0.0); // m³
+    let d = (soundhole_cm * 1e-2).max(0.0); // m
+    if v <= 1e-6 || d <= 1e-4 {
+        return 0.0;
+    }
+    let r = 0.5 * d;
+    let area = PI * r * r; // m²
+    let l_eff = 1.7 * r; // end-corrected neck length, m
+    (C_AIR / TWO_PI) * (area / (v * l_eff)).sqrt()
+}
+
+/// A resonant body: a Helmholtz air cavity (from real volume + soundhole) plus a
+/// top/soundboard plate resonance and two higher body modes above it. The
+/// frequencies are note-independent — a real box rings at its own resonances,
+/// not the played pitch. The higher body modes (×1.9, ×3.1 of the top) are
+/// approximate stand-ins for the plate's inharmonic panel modes.
+fn body_bank(cavity_litres: f32, soundhole_cm: f32, top_hz: f32, decay_s: f32) -> ModeBuffer {
     let mut b = ModeBuffer::default();
-    for (f, g) in base {
-        b.push(f * tone, g, 45.0 / ring);
+    let a0 = LN_1000 / decay_s.max(0.02); // base decay rate, 1/s
+    let f_h = helmholtz_hz(cavity_litres, soundhole_cm);
+    if f_h > 0.0 {
+        b.push(f_h, 0.6, a0); // the "main air" resonance (the low boom)
+    }
+    let top = top_hz.max(0.0);
+    if top > 1.0 {
+        b.push(top, 0.45, a0 * 1.3); // main top / soundboard plate resonance
+        b.push(top * 1.9, 0.28, a0 * 1.7); // higher body panel modes (approx)
+        b.push(top * 3.1, 0.16, a0 * 2.2);
     }
     b
 }
@@ -186,7 +242,7 @@ impl Comp {
             Comp::String(_) => &["length", "tension", "decay"],
             Comp::Membrane(_) => &["radius"],
             Comp::Plate(_) => &["ring"],
-            Comp::Body { .. } => &["ring", "tone"],
+            Comp::Body { .. } => &["top_hz", "decay"],
             Comp::Horn(_) => &["length"],
             Comp::MusicalString(_) | Comp::Bell(_) | Comp::Cymbal(_) | Comp::Strike | Comp::Mix
             | Comp::Wires { .. } | Comp::Breath { .. } | Comp::Reed { .. } => &[],
@@ -201,8 +257,8 @@ impl Comp {
             (Comp::String(m), "decay") => Some(m.decay_time),
             (Comp::Membrane(m), "radius") => Some(m.radius),
             (Comp::Plate(m), "ring") => Some(m.decay_time),
-            (Comp::Body { ring, .. }, "ring") => Some(*ring),
-            (Comp::Body { tone, .. }, "tone") => Some(*tone),
+            (Comp::Body { top_hz, .. }, "top_hz") => Some(*top_hz),
+            (Comp::Body { decay_s, .. }, "decay") => Some(*decay_s),
             (Comp::Horn(m), "length") => Some(m.length),
             _ => None,
         }
@@ -216,8 +272,8 @@ impl Comp {
             (Comp::String(m), "decay") => m.decay_time = v,
             (Comp::Membrane(m), "radius") => m.radius = v,
             (Comp::Plate(m), "ring") => m.decay_time = v,
-            (Comp::Body { ring, .. }, "ring") => *ring = v,
-            (Comp::Body { tone, .. }, "tone") => *tone = v,
+            (Comp::Body { top_hz, .. }, "top_hz") => *top_hz = v,
+            (Comp::Body { decay_s, .. }, "decay") => *decay_s = v,
             (Comp::Horn(m), "length") => m.length = v,
             _ => {}
         }
@@ -265,7 +321,7 @@ impl Default for InstrumentGraph {
             components: vec![
                 Comp::Strike,
                 Comp::String(PureString::default()),
-                Comp::Body { ring: 1.0, tone: 1.0 },
+                Comp::Body { cavity_litres: 15.0, soundhole_cm: 9.0, top_hz: 195.0, decay_s: 0.18 },
                 Comp::Mix,
             ],
             edges: vec![
@@ -423,7 +479,7 @@ impl FtmModel for InstrumentGraph {
                 changed = true;
             }
             if ui.small_button("Body").clicked() {
-                self.components.push(Comp::Body { ring: 1.0, tone: 1.0 });
+                self.components.push(Comp::Body { cavity_litres: 15.0, soundhole_cm: 9.0, top_hz: 195.0, decay_s: 0.18 });
                 changed = true;
             }
             if ui.small_button("Wires").clicked() {
@@ -605,6 +661,20 @@ mod tests {
         };
         assert!(render(0.5) > render(0.0), "more body mix = more energy");
     }
+
+    #[test]
+    fn body_helmholtz_matches_real_geometry() {
+        // A ~15 L guitar box with a 9 cm soundhole rings near its measured
+        // "main air" resonance (~100–130 Hz), and the bank carries that mode.
+        let f_h = helmholtz_hz(15.0, 9.0);
+        assert!((100.0..=140.0).contains(&f_h), "guitar air resonance {f_h} Hz off");
+        // No cavity → no air mode (a soundboard is just its plate resonance).
+        assert_eq!(helmholtz_hz(0.0, 9.0), 0.0);
+        let bank = body_bank(15.0, 9.0, 195.0, 0.18);
+        assert!(bank.n >= 2, "cavity body has an air mode + top modes");
+        assert!(bank.freq[..bank.n].iter().any(|f| (*f - f_h).abs() < 1.0), "air mode present");
+        assert!(bank.freq[..bank.n].iter().any(|f| (*f - 195.0).abs() < 1.0), "top mode present");
+    }
     #[test]
     fn key_map_drives_a_param() {
         // The grounded string tracks pitch itself, so the key map drives a
@@ -642,7 +712,7 @@ mod tests {
         // default: [Strike(0), String(1), Body(2), Mix(3)],
         // edges (0→1),(1→2),(1→3),(2→3), output 3.
         let mut g = InstrumentGraph::default();
-        g.key_map.push(KeyTarget { component: 2, param: "tone".into(), amount: 1.0 });
+        g.key_map.push(KeyTarget { component: 2, param: "top_hz".into(), amount: 1.0 });
         g.remove_component(1); // drop the String
         assert_eq!(g.components.len(), 3, "one fewer component");
         // edges touching 1 dropped; only old (2→3) survives, shifted to (1→2).

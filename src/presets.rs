@@ -171,7 +171,7 @@ pub fn factory() -> Vec<Preset> {
                 components: vec![
                     Comp::Strike,
                     Comp::String(string(0.648, 90.0, 1.10, BRONZE, 2.5, 0.6, 0.12)),
-                    Comp::Body { ring: 1.0, tone: 1.0 },
+                    Comp::Body { cavity_litres: 15.0, soundhole_cm: 9.0, top_hz: 195.0, decay_s: 0.18 },
                     Comp::Mix,
                 ],
                 edges: vec![
@@ -289,7 +289,7 @@ pub fn factory() -> Vec<Preset> {
                 components: vec![
                     Comp::Strike,
                     Comp::String(string(0.864, 60.0, 1.30, NICKEL, 2.0, 0.5, 0.15)),
-                    Comp::Body { ring: 1.4, tone: 0.7 }, // big, low, boomy body
+                    Comp::Body { cavity_litres: 30.0, soundhole_cm: 10.0, top_hz: 90.0, decay_s: 0.25 }, // big box, air ≈ 96 Hz
                     Comp::Mix,
                 ],
                 edges: vec![
@@ -309,7 +309,7 @@ pub fn factory() -> Vec<Preset> {
                 components: vec![
                     Comp::Strike,
                     Comp::String(string(0.600, 700.0, 1.10, STEEL, 3.5, 0.3, 0.12)),
-                    Comp::Body { ring: 1.6, tone: 1.3 }, // bright, long soundboard
+                    Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 110.0, decay_s: 0.45 }, // soundboard (no air cavity)
                     Comp::Mix,
                 ],
                 edges: vec![
@@ -351,7 +351,7 @@ pub fn factory() -> Vec<Preset> {
                 components: vec![
                     Comp::Strike,
                     Comp::MusicalString(MusicalString { pluck_pos: 0.14, inharmonicity: 0.0004, decay_time: 1.6, hf_damping: 1.4, num_modes: 32 }),
-                    Comp::Body { ring: 1.2, tone: 0.9 },
+                    Comp::Body { cavity_litres: 17.0, soundhole_cm: 8.5, top_hz: 190.0, decay_s: 0.20 },
                     Comp::Mix,
                 ],
                 edges: vec![
@@ -372,7 +372,7 @@ pub fn factory() -> Vec<Preset> {
                 components: vec![
                     Comp::Strike,
                     Comp::Membrane(DrumMembrane { strike_pos: 0.5, damping: 9.0, freq_dep_damping: -3.5, radius: 10.0, depth: 40, stiffness: 0.5, ..DrumMembrane::default() }),
-                    Comp::Body { ring: 0.5, tone: 0.6 }, // short, low shell
+                    Comp::Body { cavity_litres: 6.0, soundhole_cm: 12.0, top_hz: 90.0, decay_s: 0.10 }, // shell air
                     Comp::Mix,
                 ],
                 edges: vec![
@@ -446,7 +446,7 @@ pub fn factory() -> Vec<Preset> {
                 components: vec![
                     Comp::Breath { level: 0.2, tone: 0.6 },
                     Comp::Horn(WebsterHorn { boundary: Boundary::Open, blow_pos: 0.10, r2: 0.5, r3: 0.5, length: 3.0, damping: 0.6, freq_dep_damping: -0.03, visco_loss: 0.6, radiation: 0.15, depth: 20, ..WebsterHorn::default() }),
-                    Comp::Body { ring: 0.8, tone: 1.0 }, // vocal-tract "wah"
+                    Comp::Body { cavity_litres: 0.15, soundhole_cm: 2.5, top_hz: 1200.0, decay_s: 0.05 }, // mouth/tract formants
                     Comp::Mix,
                 ],
                 edges: vec![
