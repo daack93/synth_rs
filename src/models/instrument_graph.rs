@@ -18,8 +18,8 @@ use super::pure_string::PureString;
 use super::webster_horn::WebsterHorn;
 use super::{unbounded_slider, FtmModel, ModeBuffer};
 use crate::graph::{
-    DriveExciter, FormantResonator, Graph, ImpulseExciter, ModalResonator, Node, SnareWires,
-    Sum,
+    DriveExciter, FormantResonator, Graph, ImpulseExciter, ModalResonator, Node, ReedExciter,
+    SnareWires, Sum,
 };
 
 /// One node in an instrument graph. Each variant is a physics component with
@@ -43,6 +43,8 @@ pub enum Comp {
     Wires { level: f32, tone: f32 },
     /// A continuous breath drive (band-passed noise) — sustains a resonator.
     Breath { level: f32, tone: f32 },
+    /// A self-oscillating reed/lip (needs a feedback edge from its resonator).
+    Reed { pressure: f32, stiffness: f32 },
     /// A flaring air column (Webster horn) resonator.
     Horn(WebsterHorn),
     /// A mixer / output node: the (edge-scaled) sum of its inputs.
@@ -59,6 +61,7 @@ impl Comp {
             Comp::Body { .. } => "Body (resonator)",
             Comp::Wires { .. } => "Snare wires",
             Comp::Breath { .. } => "Breath (exciter)",
+            Comp::Reed { .. } => "Reed / lip (exciter)",
             Comp::Horn(_) => "Air column (resonator)",
             Comp::Mix => "Mix / output",
         }
@@ -89,6 +92,7 @@ impl Comp {
                 Box::new(DriveExciter::new(*level, 300.0 * t, 3_000.0 * t, sr))
             }
             Comp::Horn(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
+            Comp::Reed { pressure, stiffness } => Box::new(ReedExciter::new(*pressure, *stiffness, sr)),
             Comp::Mix => Box::new(Sum),
         }
     }
@@ -131,6 +135,12 @@ impl Comp {
                 c
             }
             Comp::Horn(m) => m.params_ui(ui),
+            Comp::Reed { pressure, stiffness } => {
+                let mut c = false;
+                c |= ui.add(unbounded_slider(pressure, 0.0..=2.0, "Mouth pressure")).changed();
+                c |= ui.add(unbounded_slider(stiffness, 0.0..=3.0, "Reed stiffness")).changed();
+                c
+            }
             Comp::Mix => {
                 ui.label(egui::RichText::new("Sums its inputs (see edge strengths).").weak().small());
                 false
@@ -160,7 +170,7 @@ impl Comp {
             Comp::Plate(_) => &["ring"],
             Comp::Body { .. } => &["ring", "tone"],
             Comp::Horn(_) => &["length"],
-            Comp::Strike | Comp::Mix | Comp::Wires { .. } | Comp::Breath { .. } => &[],
+            Comp::Strike | Comp::Mix | Comp::Wires { .. } | Comp::Breath { .. } | Comp::Reed { .. } => &[],
         }
     }
 
@@ -657,5 +667,31 @@ mod tests {
         let early = rms(&y[4_800..9_600]); // 0.1–0.2 s
         let late = rms(&y[38_400..43_200]); // 0.8–0.9 s
         assert!(late > early * 0.5, "driven voice sustains (early={early:.4} late={late:.4})");
+    }
+    #[test]
+    fn reed_feedback_is_stable_and_sounds() {
+        use crate::models::webster_horn::{Boundary, WebsterHorn};
+        let sr = 48_000.0;
+        let g = InstrumentGraph {
+            components: vec![
+                Comp::Reed { pressure: 0.6, stiffness: 1.5 },
+                Comp::Horn(WebsterHorn { boundary: Boundary::Brass, r1: 0.0073, r3: 0.002, length: 0.66, depth: 18, resolution: 300, damping: 4.0, ..WebsterHorn::default() }),
+                Comp::Mix,
+            ],
+            edges: vec![
+                Edge { from: 0, to: 1, gain: 0.12 },
+                Edge { from: 1, to: 0, gain: 0.4 },
+                Edge { from: 1, to: 2, gain: 1.0 },
+            ],
+            output: 2,
+            key_map: Vec::new(),
+        };
+        let mut n = g.build_graph(220.0, 1.0, sr).unwrap();
+        let y: Vec<f32> = (0..48_000).map(|_| n.tick(&[])).collect();
+        // The reed's tanh nonlinearity must bound the feedback loop (a real reed clips).
+        assert!(y.iter().all(|v| v.is_finite() && v.abs() < 10.0), "reed loop is stable");
+        let rms = |a: &[f32]| (a.iter().map(|v| v * v).sum::<f32>() / a.len() as f32).sqrt();
+        eprintln!("REED rms(settled) = {}", rms(&y[24_000..48_000]));
+        assert!(rms(&y[24_000..48_000]) > 1e-4, "reed drives the bore (makes sound)");
     }
 }

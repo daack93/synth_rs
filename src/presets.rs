@@ -237,6 +237,39 @@ pub fn factory() -> Vec<Preset> {
             },
             eng(0.5, 20.0, 200.0),
         ),
+        // ---- Self-oscillating reed into a bore (feedback graph) ----
+        make(
+            "Reed (graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Reed { pressure: 0.6, stiffness: 1.5 },
+                    Comp::Horn(WebsterHorn {
+                        boundary: Boundary::Brass,
+                        r1: 0.0073,
+                        r2: 0.0,
+                        r3: 0.002,
+                        length: 0.66,
+                        blow_pos: 0.0,
+                        depth: 18,
+                        resolution: 300,
+                        damping: 4.0,
+                        freq_dep_damping: -0.08,
+                        visco_loss: 0.8,
+                        radiation: 0.6,
+                        ..WebsterHorn::default()
+                    }),
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 0.12 }, // reed drives the bore
+                    Edge { from: 1, to: 0, gain: 0.4 },  // bore pressure feeds back to the reed
+                    Edge { from: 1, to: 2, gain: 1.0 },  // bore → out
+                ],
+                output: 2,
+                key_map: Vec::new(),
+            },
+            eng(0.5, 20.0, 200.0),
+        ),
         // ---- Bowed strings (driven → sustain; bow near the bridge = bright/saw) ----
         make("Violin", bowed(0.5, 2.5, -1.2, 4.0, 44, 0.12), eng(0.55, 60.0, 150.0)),
         make("Viola", bowed(0.6, 2.5, -1.5, 5.0, 40, 0.14), eng(0.55, 65.0, 160.0)),
