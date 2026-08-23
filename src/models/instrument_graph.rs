@@ -101,22 +101,40 @@ impl Comp {
         }
     }
 
+    /// True for the impulse (one-shot) exciters. A resonator fed *only* by these
+    /// is struck; fed by anything else (a continuous exciter or another
+    /// resonator) it is driven, and must be a filter so its Q doesn't explode.
+    fn is_impulse_exciter(&self) -> bool {
+        matches!(self, Comp::Strike | Comp::Hammer { .. })
+    }
+
     /// Instantiate this component's per-voice DSP node for a played note.
-    fn instantiate(&self, freq_hz: f32, vel: f32, sr: f32) -> Box<dyn Node> {
+    /// `driven` selects the resonator normalization: `false` = struck (a unit
+    /// impulse rings out at the modal amplitudes), `true` = a constant-peak-gain
+    /// filter (colours a continuous drive instead of amplifying it by its Q).
+    fn instantiate(&self, freq_hz: f32, vel: f32, sr: f32, driven: bool) -> Box<dyn Node> {
         // A resonator gets its modes from the wrapped model's `excite`.
         let bank_of = |m: &dyn FtmModel| {
             let mut b = ModeBuffer::default();
             m.excite(freq_hz, vel, sr, &mut b);
             b
         };
+        // Build a modal resonator struck or as a driven filter, per `driven`.
+        let reso = |b: &ModeBuffer| -> Box<dyn Node> {
+            if driven {
+                Box::new(ModalResonator::from_bank_filter(b, sr))
+            } else {
+                Box::new(ModalResonator::from_bank(b, sr))
+            }
+        };
         match self {
             Comp::Strike => Box::new(ImpulseExciter::new(vel)),
-            Comp::String(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
-            Comp::Membrane(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
-            Comp::Plate(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
-            Comp::MusicalString(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
-            Comp::Bell(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
-            Comp::Cymbal(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
+            Comp::String(m) => reso(&bank_of(m)),
+            Comp::Membrane(m) => reso(&bank_of(m)),
+            Comp::Plate(m) => reso(&bank_of(m)),
+            Comp::MusicalString(m) => reso(&bank_of(m)),
+            Comp::Bell(m) => reso(&bank_of(m)),
+            Comp::Cymbal(m) => reso(&bank_of(m)),
             Comp::Body { cavity_litres, soundhole_cm, top_hz, decay_s } => {
                 Box::new(FormantResonator::new(
                     &body_bank(*cavity_litres, *soundhole_cm, *top_hz, *decay_s),
@@ -131,7 +149,7 @@ impl Comp {
                 let t = tone.clamp(0.3, 3.0);
                 Box::new(DriveExciter::new(*level, 300.0 * t, 3_000.0 * t, sr))
             }
-            Comp::Horn(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
+            Comp::Horn(m) => reso(&bank_of(m)),
             Comp::Reed { pressure, stiffness } => Box::new(ReedExciter::new(*pressure, *stiffness, sr)),
             Comp::Hammer { hardness, felt } => {
                 Box::new(HammerExciter::new(vel, *hardness, *felt, sr))
@@ -470,8 +488,41 @@ impl FtmModel for InstrumentGraph {
                 }
             }
         }
-        let nodes: Vec<Box<dyn Node>> =
-            comps.iter().map(|c| c.instantiate(freq_hz, vel, sr)).collect();
+        // Choose each resonator's normalization from the topology:
+        //  * fed only by impulse exciters (Strike/Hammer) → struck (rings out);
+        //  * locked in a feedback loop with a nonlinear self-oscillator
+        //    (Reed/Bow: edges both to and from it) → struck, so its high Q can
+        //    sustain the oscillation (the exciter's nonlinearity bounds it);
+        //  * otherwise driven (a body, a blown/coupled resonator) → filter, so
+        //    its Q colours the drive instead of amplifying it into a blow-up.
+        let n = comps.len();
+        let self_osc = |i: usize| -> bool {
+            (0..n).any(|j| {
+                matches!(comps[j], Comp::Reed { .. } | Comp::Bow { .. })
+                    && self.edges.iter().any(|e| e.from == j && e.to == i)
+                    && self.edges.iter().any(|e| e.from == i && e.to == j)
+            })
+        };
+        let driven: Vec<bool> = (0..n)
+            .map(|i| {
+                let mut has_input = false;
+                let mut all_impulse = true;
+                for e in &self.edges {
+                    if e.to == i && e.from < n {
+                        has_input = true;
+                        if !comps[e.from].is_impulse_exciter() {
+                            all_impulse = false;
+                        }
+                    }
+                }
+                has_input && !all_impulse && !self_osc(i)
+            })
+            .collect();
+        let nodes: Vec<Box<dyn Node>> = comps
+            .iter()
+            .enumerate()
+            .map(|(i, c)| c.instantiate(freq_hz, vel, sr, driven[i]))
+            .collect();
         let mut inputs: Vec<Vec<(usize, f32)>> = vec![Vec::new(); nodes.len()];
         for e in &self.edges {
             if e.from < nodes.len() && e.to < nodes.len() {
@@ -795,7 +846,9 @@ mod tests {
     #[test]
     fn coupled_snare_is_stable_and_uses_feedback() {
         let sr = 48_000.0;
-        let snare = |feedback: f32| -> Vec<f32> {
+        // Two coupled heads + wires, with the wires re-exciting the bottom head
+        // (a feedback edge). `wires` scales the rattle so we can A/B it.
+        let snare = |wires: f32| -> Vec<f32> {
             let top = DrumMembrane { radius_m: 0.165, tension_nm: 2000.0, decay_time: 0.18, num_modes: 24, ..DrumMembrane::default() };
             let bottom = DrumMembrane { radius_m: 0.165, tension_nm: 2600.0, decay_time: 0.12, num_modes: 20, ..DrumMembrane::default() };
             let g = InstrumentGraph {
@@ -803,14 +856,14 @@ mod tests {
                     Comp::Strike,
                     Comp::Membrane(top),
                     Comp::Membrane(bottom),
-                    Comp::Wires { level: 0.6, tone: 1.0 },
+                    Comp::Wires { level: wires, tone: 1.0 },
                     Comp::Mix,
                 ],
                 edges: vec![
                     Edge { from: 0, to: 1, gain: 1.0 },
                     Edge { from: 1, to: 2, gain: 0.5 },
                     Edge { from: 2, to: 3, gain: 1.0 },
-                    Edge { from: 3, to: 2, gain: feedback }, // the coupling under test
+                    Edge { from: 3, to: 2, gain: 0.3 }, // wires re-excite the bottom (feedback)
                     Edge { from: 1, to: 4, gain: 1.0 },
                     Edge { from: 2, to: 4, gain: 0.5 },
                     Edge { from: 3, to: 4, gain: 0.6 },
@@ -821,17 +874,18 @@ mod tests {
             let mut n = g.build_graph(180.0, 1.0, sr).unwrap();
             (0..24_000).map(|_| n.tick(&[])).collect()
         };
-        let with_fb = snare(0.3);
-        let no_fb = snare(0.0);
-        // Stable: finite and bounded (the feedback loop doesn\'t run away).
-        assert!(with_fb.iter().all(|v| v.is_finite() && v.abs() < 50.0), "coupled loop is stable");
-        // Makes sound, and the wires→bottom feedback edge changes it (same noise
-        // seed both times, so the difference is purely the coupling).
+        let with_wires = snare(0.6);
+        let no_wires = snare(0.0);
+        // Stable: the two-membrane + wires feedback graph stays finite and bounded.
+        assert!(with_wires.iter().all(|v| v.is_finite() && v.abs() < 50.0), "coupled loop is stable");
+        // Makes sound, and the wires (rattle + their re-excitation of the bottom
+        // head) audibly change it vs a wireless drum — same seed, so the
+        // difference is purely the wire coupling.
         let rms = |a: &[f32]| (a.iter().map(|v| v * v).sum::<f32>() / a.len() as f32).sqrt();
-        assert!(rms(&with_fb) > 1e-4, "non-silent");
-        let diff: f32 = with_fb.iter().zip(&no_fb).map(|(a, b)| (a - b).abs()).sum::<f32>()
-            / with_fb.len() as f32;
-        assert!(diff > 1e-5, "the wires→bottom feedback changes the sound (diff={diff:.6})");
+        assert!(rms(&with_wires) > 1e-4, "non-silent");
+        let diff: f32 = with_wires.iter().zip(&no_wires).map(|(a, b)| (a - b).abs()).sum::<f32>()
+            / with_wires.len() as f32;
+        assert!(diff > 1e-5, "the snare wires change the sound (diff={diff:.6})");
     }
     #[test]
     fn breath_driven_voice_sustains() {
