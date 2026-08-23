@@ -267,8 +267,8 @@ pub fn factory() -> Vec<Preset> {
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.12 }, // reed drives the bore
-                    Edge { from: 1, to: 0, gain: 0.4 },  // bore pressure feeds back to the reed
+                    Edge { from: 0, to: 1, gain: 0.3 }, // reed drives the bore
+                    Edge { from: 1, to: 0, gain: 0.55 },  // bore pressure feeds back to the reed
                     Edge { from: 1, to: 2, gain: 1.0 },  // bore → out
                 ],
                 output: 2,
@@ -470,8 +470,8 @@ pub fn factory() -> Vec<Preset> {
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.12 },
-                    Edge { from: 1, to: 0, gain: 0.4 },
+                    Edge { from: 0, to: 1, gain: 0.3 },
+                    Edge { from: 1, to: 0, gain: 0.55 },
                     Edge { from: 1, to: 2, gain: 1.0 },
                 ],
                 output: 2,
@@ -488,8 +488,8 @@ pub fn factory() -> Vec<Preset> {
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.12 },
-                    Edge { from: 1, to: 0, gain: 0.4 },
+                    Edge { from: 0, to: 1, gain: 0.3 },
+                    Edge { from: 1, to: 0, gain: 0.55 },
                     Edge { from: 1, to: 2, gain: 1.0 },
                 ],
                 output: 2,
@@ -508,7 +508,7 @@ pub fn factory() -> Vec<Preset> {
                 ],
                 edges: vec![
                     Edge { from: 0, to: 1, gain: 0.15 },
-                    Edge { from: 1, to: 0, gain: 0.4 },
+                    Edge { from: 1, to: 0, gain: 0.55 },
                     Edge { from: 1, to: 2, gain: 1.0 },
                 ],
                 output: 2,
@@ -525,8 +525,8 @@ pub fn factory() -> Vec<Preset> {
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.14 },
-                    Edge { from: 1, to: 0, gain: 0.4 },
+                    Edge { from: 0, to: 1, gain: 0.32 },
+                    Edge { from: 1, to: 0, gain: 0.55 },
                     Edge { from: 1, to: 2, gain: 1.0 },
                 ],
                 output: 2,
@@ -749,21 +749,23 @@ pub fn factory() -> Vec<Preset> {
         make("Triangle Lead", BasicWave { waveform: Waveform::Triangle, harmonics: 16, decay_time: 1.5 }, eng(0.5, 3.0, 120.0)),
         make("Saw Lead", BasicWave { waveform: Waveform::Saw, harmonics: 40, decay_time: 1.2 }, eng(0.45, 3.0, 120.0)),
 
-        // ================= Google-designed instrument graphs =================
+        // ===================== Base instrument set =====================
+        // Authored from real physics on the grounded models: real dimensions,
+        // dry primary + colouring body, self-oscillating reed/lip & bow loops.
         make(
-            "Google: Acoustic Guitar",
+            "Base: Acoustic Guitar",
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
-                    Comp::String(PureString { length_m: 0.65, tension_n: 75.0, diameter_mm: 0.32, density_kgm3: 7850.0, youngs_gpa: 210.0, pluck_pos: 0.2, decay_time: 4.5, hf_damping: 0.08, num_modes: 40, ..PureString::default() }),
-                    Comp::Body { cavity_litres: 15.0, soundhole_cm: 8.5, top_hz: 185.0, decay_s: 0.45 },
+                    Comp::String(string(0.648, 90.0, 1.1, BRONZE, 2.5, 0.6, 0.12)),
+                    Comp::Body { cavity_litres: 15.0, soundhole_cm: 9.0, top_hz: 195.0, decay_s: 0.18 },
                     Comp::Mix,
                 ],
                 edges: vec![
                     Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 3, gain: 0.7 },
+                    Edge { from: 1, to: 3, gain: 1.0 },
                     Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 0.3 },
+                    Edge { from: 2, to: 3, gain: 0.12 },
                 ],
                 output: 3,
                 key_map: Vec::new(),
@@ -771,11 +773,11 @@ pub fn factory() -> Vec<Preset> {
             eng(0.6, 3.0, 150.0),
         ),
         make(
-            "Google: Electric Guitar",
+            "Base: Electric Guitar",
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
-                    Comp::String(PureString { length_m: 0.648, tension_n: 68.0, diameter_mm: 0.26, density_kgm3: 7850.0, youngs_gpa: 210.0, pluck_pos: 0.25, decay_time: 6.0, hf_damping: 0.02, num_modes: 32, ..PureString::default() }),
+                    Comp::String(string(0.648, 78.0, 1.0, NICKEL, 3.5, 0.35, 0.1)),
                     Comp::Mix,
                 ],
                 edges: vec![
@@ -785,22 +787,22 @@ pub fn factory() -> Vec<Preset> {
                 output: 2,
                 key_map: Vec::new(),
             },
-            eng(0.6, 3.0, 200.0),
+            eng(0.6, 3.0, 220.0),
         ),
         make(
-            "Google: Nylon Guitar",
+            "Base: Nylon Guitar",
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
-                    Comp::String(PureString { length_m: 0.65, tension_n: 60.0, diameter_mm: 0.71, density_kgm3: 1100.0, youngs_gpa: 5.0, pluck_pos: 0.18, decay_time: 2.5, hf_damping: 0.45, num_modes: 24, ..PureString::default() }),
-                    Comp::Body { cavity_litres: 14.0, soundhole_cm: 8.0, top_hz: 175.0, decay_s: 0.55 },
+                    Comp::String(string(0.65, 60.0, 0.9, NYLON, 2.2, 1.0, 0.14)),
+                    Comp::Body { cavity_litres: 14.0, soundhole_cm: 8.5, top_hz: 175.0, decay_s: 0.2 },
                     Comp::Mix,
                 ],
                 edges: vec![
                     Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 3, gain: 0.4 },
+                    Edge { from: 1, to: 3, gain: 1.0 },
                     Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 0.6 },
+                    Edge { from: 2, to: 3, gain: 0.15 },
                 ],
                 output: 3,
                 key_map: Vec::new(),
@@ -808,19 +810,19 @@ pub fn factory() -> Vec<Preset> {
             eng(0.6, 3.0, 150.0),
         ),
         make(
-            "Google: Acoustic Bass",
+            "Base: Acoustic Bass",
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
-                    Comp::String(PureString { length_m: 1.05, tension_n: 280.0, diameter_mm: 2.1, density_kgm3: 7850.0, youngs_gpa: 210.0, pluck_pos: 0.12, decay_time: 3.8, hf_damping: 0.15, num_modes: 20, ..PureString::default() }),
-                    Comp::Body { cavity_litres: 160.0, soundhole_cm: 14.0, top_hz: 65.0, decay_s: 0.8 },
+                    Comp::String(string(0.86, 80.0, 1.3, NICKEL, 2.0, 0.5, 0.15)),
+                    Comp::Body { cavity_litres: 40.0, soundhole_cm: 10.0, top_hz: 90.0, decay_s: 0.25 },
                     Comp::Mix,
                 ],
                 edges: vec![
                     Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 3, gain: 0.1 },
+                    Edge { from: 1, to: 3, gain: 1.0 },
                     Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 0.9 },
+                    Edge { from: 2, to: 3, gain: 0.12 },
                 ],
                 output: 3,
                 key_map: Vec::new(),
@@ -828,11 +830,11 @@ pub fn factory() -> Vec<Preset> {
             eng(0.7, 4.0, 140.0),
         ),
         make(
-            "Google: Electric Bass",
+            "Base: Electric Bass",
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
-                    Comp::String(PureString { length_m: 0.864, tension_n: 220.0, diameter_mm: 1.8, density_kgm3: 8900.0, youngs_gpa: 200.0, pluck_pos: 0.22, decay_time: 7.0, hf_damping: 0.03, num_modes: 25, ..PureString::default() }),
+                    Comp::String(string(0.864, 70.0, 1.25, NICKEL, 3.5, 0.35, 0.12)),
                     Comp::Mix,
                 ],
                 edges: vec![
@@ -845,19 +847,60 @@ pub fn factory() -> Vec<Preset> {
             eng(0.7, 4.0, 160.0),
         ),
         make(
-            "Google: Piano",
+            "Base: Harp",
             InstrumentGraph {
                 components: vec![
-                    Comp::Hammer { hardness: 0.45, felt: 2.6 },
-                    Comp::MusicalString(MusicalString { inharmonicity: 0.0003, pluck_pos: 0.14, decay_time: 8.0, hf_damping: 0.015, num_modes: 80 }),
-                    Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 110.0, decay_s: 1.2 },
+                    Comp::Strike,
+                    Comp::String(string(0.9, 55.0, 0.8, NYLON, 3.0, 0.5, 0.16)),
+                    Comp::Body { cavity_litres: 30.0, soundhole_cm: 0.0, top_hz: 140.0, decay_s: 0.35 },
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 1, to: 3, gain: 1.0 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.2 },
+                ],
+                output: 3,
+                key_map: Vec::new(),
+            },
+            eng(0.6, 3.0, 220.0),
+        ),
+        make(
+            "Base: Banjo",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Strike,
+                    Comp::String(string(0.67, 55.0, 0.4, STEEL, 0.9, 1.2, 0.08)),
+                    Comp::Membrane(DrumMembrane { radius_m: 0.14, tension_nm: 3200.0, areal_density_kgm2: 0.22, bending_nm: 0.02, strike_pos: 0.5, decay_time: 0.15, hf_damping: 8.0, num_modes: 20, ..DrumMembrane::default() }),
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 1, to: 3, gain: 0.5 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.8 },
+                ],
+                output: 3,
+                key_map: Vec::new(),
+            },
+            eng(0.6, 2.0, 100.0),
+        ),
+        make(
+            "Base: Piano",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Hammer { hardness: 0.5, felt: 2.6 },
+                    Comp::MusicalString(MusicalString { inharmonicity: 0.0004, pluck_pos: 0.14, decay_time: 6.0, hf_damping: 0.02, num_modes: 70 }),
+                    Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 110.0, decay_s: 0.6 },
                     Comp::Mix,
                 ],
                 edges: vec![
                     Edge { from: 0, to: 1, gain: 1.0 },
                     Edge { from: 1, to: 0, gain: 1.0 },
+                    Edge { from: 1, to: 3, gain: 1.0 },
                     Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.2 },
                 ],
                 output: 3,
                 key_map: Vec::new(),
@@ -865,58 +908,114 @@ pub fn factory() -> Vec<Preset> {
             eng(0.6, 2.0, 250.0),
         ),
         make(
-            "Google: Banjo",
+            "Base: Harpsichord",
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
-                    Comp::String(PureString { length_m: 0.67, tension_n: 55.0, diameter_mm: 0.23, density_kgm3: 7850.0, youngs_gpa: 210.0, pluck_pos: 0.1, decay_time: 1.2, hf_damping: 0.05, num_modes: 30, ..PureString::default() }),
-                    Comp::Membrane(DrumMembrane { radius_m: 0.14, tension_nm: 3200.0, areal_density_kgm2: 0.22, bending_nm: 0.02, decay_time: 0.15, hf_damping: 8.0, num_modes: 20, strike_pos: 0.5, ..DrumMembrane::default() }),
+                    Comp::String(string(0.7, 42.0, 0.18, (8500.0, 110.0), 1.8, 0.02, 0.06)),
+                    Comp::Body { cavity_litres: 30.0, soundhole_cm: 7.0, top_hz: 210.0, decay_s: 0.25 },
                     Comp::Mix,
                 ],
                 edges: vec![
                     Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 1, to: 0, gain: 0.0 },
+                    Edge { from: 1, to: 3, gain: 1.0 },
                     Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.25 },
                 ],
                 output: 3,
                 key_map: Vec::new(),
             },
-            eng(0.6, 2.0, 90.0),
+            eng(0.55, 2.0, 120.0),
         ),
         make(
-            "Google: Harp",
+            "Base: Clavichord",
             InstrumentGraph {
                 components: vec![
-                    Comp::Strike,
-                    Comp::String(PureString { length_m: 0.72, tension_n: 150.0, diameter_mm: 0.85, density_kgm3: 1300.0, youngs_gpa: 6.5, pluck_pos: 0.45, decay_time: 5.5, hf_damping: 0.06, num_modes: 35, ..PureString::default() }),
-                    Comp::Body { cavity_litres: 45.0, soundhole_cm: 9.0, top_hz: 140.0, decay_s: 0.65 },
+                    Comp::Hammer { hardness: 0.9, felt: 1.2 },
+                    Comp::String(string(0.62, 38.0, 0.22, (8500.0, 110.0), 1.2, 0.05, 0.03)),
+                    Comp::Body { cavity_litres: 18.0, soundhole_cm: 5.0, top_hz: 190.0, decay_s: 0.2 },
                     Comp::Mix,
                 ],
                 edges: vec![
                     Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 3, gain: 0.8 },
-                    Edge { from: 1, to: 2, gain: 0.4 },
-                    Edge { from: 2, to: 3, gain: 0.4 },
+                    Edge { from: 1, to: 0, gain: 1.0 },
+                    Edge { from: 1, to: 3, gain: 1.0 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.2 },
                 ],
                 output: 3,
                 key_map: Vec::new(),
             },
-            eng(0.6, 3.0, 200.0),
+            eng(0.55, 2.0, 120.0),
         ),
         make(
-            "Google: Violin",
+            "Base: Cimbalom",
             InstrumentGraph {
                 components: vec![
-                    Comp::Bow { speed: 0.15, force: 0.25 },
-                    Comp::String(PureString { length_m: 0.328, tension_n: 55.0, diameter_mm: 0.55, density_kgm3: 4200.0, youngs_gpa: 15.0, pluck_pos: 0.08, decay_time: 2.0, hf_damping: 0.12, num_modes: 45, ..PureString::default() }),
+                    Comp::Hammer { hardness: 0.8, felt: 1.8 },
+                    Comp::String(string(0.68, 160.0, 0.45, STEEL, 5.0, 0.01, 0.2)),
+                    Comp::Body { cavity_litres: 65.0, soundhole_cm: 0.0, top_hz: 130.0, decay_s: 0.5 },
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 1, to: 0, gain: 0.5 },
+                    Edge { from: 1, to: 3, gain: 1.0 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.2 },
+                ],
+                output: 3,
+                key_map: Vec::new(),
+            },
+            eng(0.6, 1.0, 200.0),
+        ),
+        make(
+            "Base: Grand Piano",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Hammer { hardness: 0.5, felt: 2.6 },
+                    Comp::MusicalString(MusicalString { inharmonicity: 0.0004, pluck_pos: 0.14, decay_time: 6.0, hf_damping: 0.02, num_modes: 60 }),
+                    Comp::MusicalString(MusicalString { inharmonicity: 0.0004, pluck_pos: 0.14, decay_time: 6.0, hf_damping: 0.02, num_modes: 60 }),
+                    Comp::MusicalString(MusicalString { inharmonicity: 0.0004, pluck_pos: 0.14, decay_time: 6.0, hf_damping: 0.02, num_modes: 60 }),
+                    Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 110.0, decay_s: 0.6 },
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 0, to: 2, gain: 1.0 },
+                    Edge { from: 0, to: 3, gain: 1.0 },
+                    Edge { from: 1, to: 0, gain: 0.3 },
+                    Edge { from: 2, to: 0, gain: 0.3 },
+                    Edge { from: 3, to: 0, gain: 0.3 },
+                    Edge { from: 1, to: 5, gain: 0.6 },
+                    Edge { from: 2, to: 5, gain: 0.6 },
+                    Edge { from: 3, to: 5, gain: 0.6 },
+                    Edge { from: 1, to: 4, gain: 1.0 },
+                    Edge { from: 2, to: 4, gain: 1.0 },
+                    Edge { from: 3, to: 4, gain: 1.0 },
+                    Edge { from: 4, to: 5, gain: 0.2 },
+                ],
+                output: 5,
+                key_map: Vec::new(),
+            },
+            eng(0.55, 2.0, 300.0),
+        ),
+        make(
+            "Base: Violin",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Bow { speed: 0.6, force: 1.0 },
+                    Comp::String(string(0.33, 50.0, 0.7, GUT, 1.5, 0.6, 0.12)),
                     Comp::Body { cavity_litres: 2.2, soundhole_cm: 3.2, top_hz: 280.0, decay_s: 0.35 },
                     Comp::Mix,
                 ],
                 edges: vec![
                     Edge { from: 0, to: 1, gain: 1.0 },
                     Edge { from: 1, to: 0, gain: 1.0 },
+                    Edge { from: 1, to: 3, gain: 0.8 },
                     Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.3 },
                 ],
                 output: 3,
                 key_map: Vec::new(),
@@ -924,19 +1023,20 @@ pub fn factory() -> Vec<Preset> {
             eng(0.5, 45.0, 200.0),
         ),
         make(
-            "Google: Viola",
+            "Base: Viola",
             InstrumentGraph {
                 components: vec![
-                    Comp::Bow { speed: 0.12, force: 0.35 },
-                    Comp::String(PureString { length_m: 0.375, tension_n: 62.0, diameter_mm: 0.72, density_kgm3: 4500.0, youngs_gpa: 12.0, pluck_pos: 0.09, decay_time: 2.2, hf_damping: 0.18, num_modes: 40, ..PureString::default() }),
+                    Comp::Bow { speed: 0.55, force: 1.1 },
+                    Comp::String(string(0.38, 55.0, 1.1, GUT, 1.7, 0.5, 0.11)),
                     Comp::Body { cavity_litres: 4.5, soundhole_cm: 3.8, top_hz: 210.0, decay_s: 0.38 },
                     Comp::Mix,
                 ],
                 edges: vec![
                     Edge { from: 0, to: 1, gain: 1.0 },
                     Edge { from: 1, to: 0, gain: 1.0 },
+                    Edge { from: 1, to: 3, gain: 0.8 },
                     Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.3 },
                 ],
                 output: 3,
                 key_map: Vec::new(),
@@ -944,51 +1044,79 @@ pub fn factory() -> Vec<Preset> {
             eng(0.5, 45.0, 200.0),
         ),
         make(
-            "Google: Cello",
+            "Base: Cello",
             InstrumentGraph {
                 components: vec![
-                    Comp::Bow { speed: 0.1, force: 0.55 },
-                    Comp::String(PureString { length_m: 0.69, tension_n: 110.0, diameter_mm: 1.2, density_kgm3: 5500.0, youngs_gpa: 10.0, pluck_pos: 0.1, decay_time: 3.2, hf_damping: 0.22, num_modes: 35, ..PureString::default() }),
+                    Comp::Bow { speed: 0.5, force: 1.3 },
+                    Comp::String(string(0.69, 110.0, 1.8, GUT, 2.0, 0.5, 0.1)),
                     Comp::Body { cavity_litres: 28.0, soundhole_cm: 6.5, top_hz: 105.0, decay_s: 0.5 },
                     Comp::Mix,
                 ],
                 edges: vec![
                     Edge { from: 0, to: 1, gain: 1.0 },
                     Edge { from: 1, to: 0, gain: 1.0 },
+                    Edge { from: 1, to: 3, gain: 0.8 },
                     Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.3 },
                 ],
                 output: 3,
                 key_map: Vec::new(),
             },
-            eng(0.5, 45.0, 200.0),
+            eng(0.5, 50.0, 220.0),
         ),
         make(
-            "Google: Double Bass",
+            "Base: Double Bass",
             InstrumentGraph {
                 components: vec![
-                    Comp::Bow { speed: 0.08, force: 0.75 },
-                    Comp::String(PureString { length_m: 1.05, tension_n: 290.0, diameter_mm: 2.4, density_kgm3: 7200.0, youngs_gpa: 8.0, pluck_pos: 0.12, decay_time: 4.0, hf_damping: 0.35, num_modes: 25, ..PureString::default() }),
-                    Comp::Body { cavity_litres: 120.0, soundhole_cm: 11.5, top_hz: 60.0, decay_s: 0.65 },
+                    Comp::Bow { speed: 0.45, force: 1.4 },
+                    Comp::String(string(1.06, 290.0, 2.5, GUT, 2.4, 0.5, 0.1)),
+                    Comp::Body { cavity_litres: 120.0, soundhole_cm: 11.5, top_hz: 60.0, decay_s: 0.6 },
                     Comp::Mix,
                 ],
                 edges: vec![
                     Edge { from: 0, to: 1, gain: 1.0 },
                     Edge { from: 1, to: 0, gain: 1.0 },
+                    Edge { from: 1, to: 3, gain: 0.8 },
                     Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.3 },
                 ],
                 output: 3,
                 key_map: Vec::new(),
             },
-            eng(0.5, 45.0, 200.0),
+            eng(0.5, 50.0, 250.0),
         ),
         make(
-            "Google: Flute",
+            "Base: Hurdy-Gurdy",
             InstrumentGraph {
                 components: vec![
-                    Comp::Breath { level: 0.6, tone: 1.0 },
-                    Comp::Horn(WebsterHorn { length: 0.65, wave_speed: 343.0, r1: 0.009, r2: 0.0, r3: 0.0, blow_pos: 0.0, depth: 16, resolution: 64, damping: 0.001, freq_dep_damping: 0.002, damp_period: 1.0, visco_loss: 0.05, radiation: 0.1, overblow_anchor_hz: 261.63, boundary: Boundary::Open, ..WebsterHorn::default() }),
+                    Comp::Bow { speed: 0.5, force: 1.0 },
+                    Comp::String(string(0.34, 50.0, 0.55, GUT, 1.5, 0.4, 0.06)),
+                    Comp::String(string(0.68, 90.0, 0.95, GUT, 2.5, 0.4, 0.03)),
+                    Comp::Body { cavity_litres: 12.0, soundhole_cm: 0.0, top_hz: 160.0, decay_s: 0.4 },
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 0, to: 2, gain: 1.0 },
+                    Edge { from: 1, to: 0, gain: 1.0 },
+                    Edge { from: 2, to: 0, gain: 1.0 },
+                    Edge { from: 1, to: 4, gain: 0.7 },
+                    Edge { from: 2, to: 4, gain: 0.7 },
+                    Edge { from: 1, to: 3, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 1.0 },
+                    Edge { from: 3, to: 4, gain: 0.3 },
+                ],
+                output: 4,
+                key_map: Vec::new(),
+            },
+            eng(0.5, 40.0, 250.0),
+        ),
+        make(
+            "Base: Flute",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Breath { level: 0.12, tone: 1.2 },
+                    Comp::Horn(WebsterHorn { length: 0.66, wave_speed: 343.0, r1: 0.0095, r2: 0.0, r3: 0.0, blow_pos: 0.0, depth: 14, resolution: 220, damping: 3.0, freq_dep_damping: -0.1, visco_loss: 0.3, radiation: 0.5, boundary: Boundary::Open, ..WebsterHorn::default() }),
                     Comp::Mix,
                 ],
                 edges: vec![
@@ -1001,16 +1129,16 @@ pub fn factory() -> Vec<Preset> {
             eng(0.5, 40.0, 90.0),
         ),
         make(
-            "Google: Clarinet",
+            "Base: Clarinet",
             InstrumentGraph {
                 components: vec![
-                    Comp::Reed { pressure: 0.7, stiffness: 0.65 },
-                    Comp::Horn(WebsterHorn { length: 0.58, wave_speed: 343.0, r1: 0.0075, r2: 0.002, r3: 0.001, blow_pos: 0.0, depth: 24, resolution: 64, damping: 0.002, freq_dep_damping: 0.004, damp_period: 1.0, visco_loss: 0.08, radiation: 0.15, overblow_anchor_hz: 146.8, boundary: Boundary::Brass, ..WebsterHorn::default() }),
+                    Comp::Reed { pressure: 0.6, stiffness: 1.5 },
+                    Comp::Horn(WebsterHorn { length: 0.58, wave_speed: 343.0, r1: 0.0075, r2: 0.0, r3: 0.001, blow_pos: 0.0, depth: 18, resolution: 240, damping: 4.0, freq_dep_damping: -0.08, visco_loss: 0.8, radiation: 0.6, boundary: Boundary::Brass, ..WebsterHorn::default() }),
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 0, gain: 0.8 },
+                    Edge { from: 0, to: 1, gain: 0.3 },
+                    Edge { from: 1, to: 0, gain: 0.55 },
                     Edge { from: 1, to: 2, gain: 1.0 },
                 ],
                 output: 2,
@@ -1019,16 +1147,16 @@ pub fn factory() -> Vec<Preset> {
             eng(0.5, 25.0, 90.0),
         ),
         make(
-            "Google: Alto Sax",
+            "Base: Alto Sax",
             InstrumentGraph {
                 components: vec![
-                    Comp::Reed { pressure: 0.75, stiffness: 0.5 },
-                    Comp::Horn(WebsterHorn { length: 0.52, wave_speed: 343.0, r1: 0.006, r2: 0.035, r3: 0.008, blow_pos: 0.0, depth: 30, resolution: 64, damping: 0.003, freq_dep_damping: 0.005, damp_period: 1.0, visco_loss: 0.06, radiation: 0.4, overblow_anchor_hz: 164.8, boundary: Boundary::Brass, ..WebsterHorn::default() }),
+                    Comp::Reed { pressure: 0.7, stiffness: 1.3 },
+                    Comp::Horn(WebsterHorn { length: 1.0, wave_speed: 343.0, r1: 0.006, r2: 0.03, r3: 0.005, blow_pos: 0.0, depth: 24, resolution: 300, damping: 5.0, freq_dep_damping: -0.08, visco_loss: 1.0, radiation: 1.2, boundary: Boundary::Brass, ..WebsterHorn::default() }),
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 0, gain: 0.9 },
+                    Edge { from: 0, to: 1, gain: 0.3 },
+                    Edge { from: 1, to: 0, gain: 0.55 },
                     Edge { from: 1, to: 2, gain: 1.0 },
                 ],
                 output: 2,
@@ -1037,16 +1165,16 @@ pub fn factory() -> Vec<Preset> {
             eng(0.55, 25.0, 90.0),
         ),
         make(
-            "Google: Bassoon",
+            "Base: Bassoon",
             InstrumentGraph {
                 components: vec![
-                    Comp::Reed { pressure: 0.65, stiffness: 0.75 },
-                    Comp::Horn(WebsterHorn { length: 2.54, wave_speed: 343.0, r1: 0.002, r2: 0.012, r3: 0.0005, blow_pos: 0.0, depth: 40, resolution: 128, damping: 0.004, freq_dep_damping: 0.01, damp_period: 1.0, visco_loss: 0.25, radiation: 0.2, overblow_anchor_hz: 58.2, boundary: Boundary::Brass, ..WebsterHorn::default() }),
+                    Comp::Reed { pressure: 0.65, stiffness: 1.6 },
+                    Comp::Horn(WebsterHorn { length: 2.5, wave_speed: 343.0, r1: 0.004, r2: 0.008, r3: 0.001, blow_pos: 0.0, depth: 28, resolution: 300, damping: 6.0, freq_dep_damping: -0.1, visco_loss: 2.0, radiation: 0.5, boundary: Boundary::Brass, ..WebsterHorn::default() }),
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 0, gain: 0.7 },
+                    Edge { from: 0, to: 1, gain: 0.3 },
+                    Edge { from: 1, to: 0, gain: 0.55 },
                     Edge { from: 1, to: 2, gain: 1.0 },
                 ],
                 output: 2,
@@ -1055,16 +1183,16 @@ pub fn factory() -> Vec<Preset> {
             eng(0.5, 25.0, 110.0),
         ),
         make(
-            "Google: Trumpet",
+            "Base: Trumpet",
             InstrumentGraph {
                 components: vec![
-                    Comp::Reed { pressure: 0.8, stiffness: 0.55 },
-                    Comp::Horn(WebsterHorn { length: 1.48, wave_speed: 343.0, r1: 0.0045, r2: 0.015, r3: 0.04, blow_pos: 0.0, depth: 32, resolution: 64, damping: 0.001, freq_dep_damping: 0.003, damp_period: 1.0, visco_loss: 0.04, radiation: 0.65, overblow_anchor_hz: 233.08, boundary: Boundary::Brass, ..WebsterHorn::default() }),
+                    Comp::Reed { pressure: 0.8, stiffness: 1.1 },
+                    Comp::Horn(WebsterHorn { length: 1.48, wave_speed: 343.0, r1: 0.006, r2: 0.015, r3: 0.04, blow_pos: 0.0, depth: 28, resolution: 300, damping: 6.0, freq_dep_damping: -0.08, visco_loss: 1.2, radiation: 1.4, boundary: Boundary::Brass, ..WebsterHorn::default() }),
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 0, gain: 0.85 },
+                    Edge { from: 0, to: 1, gain: 0.32 },
+                    Edge { from: 1, to: 0, gain: 0.55 },
                     Edge { from: 1, to: 2, gain: 1.0 },
                 ],
                 output: 2,
@@ -1073,16 +1201,16 @@ pub fn factory() -> Vec<Preset> {
             eng(0.55, 25.0, 90.0),
         ),
         make(
-            "Google: Trombone",
+            "Base: Trombone",
             InstrumentGraph {
                 components: vec![
-                    Comp::Reed { pressure: 0.75, stiffness: 0.35 },
-                    Comp::Horn(WebsterHorn { length: 2.7, wave_speed: 343.0, r1: 0.0065, r2: 0.012, r3: 0.025, blow_pos: 0.0, depth: 40, resolution: 96, damping: 0.002, freq_dep_damping: 0.004, damp_period: 1.0, visco_loss: 0.06, radiation: 0.75, overblow_anchor_hz: 116.54, boundary: Boundary::Brass, ..WebsterHorn::default() }),
+                    Comp::Reed { pressure: 0.8, stiffness: 1.0 },
+                    Comp::Horn(WebsterHorn { length: 2.7, wave_speed: 343.0, r1: 0.007, r2: 0.012, r3: 0.025, blow_pos: 0.0, depth: 30, resolution: 300, damping: 6.0, freq_dep_damping: -0.08, visco_loss: 1.6, radiation: 1.4, boundary: Boundary::Brass, ..WebsterHorn::default() }),
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 0, gain: 0.8 },
+                    Edge { from: 0, to: 1, gain: 0.32 },
+                    Edge { from: 1, to: 0, gain: 0.55 },
                     Edge { from: 1, to: 2, gain: 1.0 },
                 ],
                 output: 2,
@@ -1091,16 +1219,16 @@ pub fn factory() -> Vec<Preset> {
             eng(0.55, 25.0, 90.0),
         ),
         make(
-            "Google: French Horn",
+            "Base: French Horn",
             InstrumentGraph {
                 components: vec![
-                    Comp::Reed { pressure: 0.85, stiffness: 0.75 },
-                    Comp::Horn(WebsterHorn { length: 3.7, wave_speed: 343.0, r1: 0.0035, r2: 0.008, r3: 0.05, blow_pos: 0.0, depth: 50, resolution: 128, damping: 0.002, freq_dep_damping: 0.005, damp_period: 1.0, visco_loss: 0.12, radiation: 0.85, overblow_anchor_hz: 87.3, boundary: Boundary::Brass, ..WebsterHorn::default() }),
+                    Comp::Reed { pressure: 0.85, stiffness: 1.1 },
+                    Comp::Horn(WebsterHorn { length: 3.7, wave_speed: 343.0, r1: 0.004, r2: 0.008, r3: 0.05, blow_pos: 0.0, depth: 32, resolution: 300, damping: 7.0, freq_dep_damping: -0.1, visco_loss: 2.2, radiation: 0.6, boundary: Boundary::Brass, ..WebsterHorn::default() }),
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 0, gain: 0.75 },
+                    Edge { from: 0, to: 1, gain: 0.32 },
+                    Edge { from: 1, to: 0, gain: 0.55 },
                     Edge { from: 1, to: 2, gain: 1.0 },
                 ],
                 output: 2,
@@ -1109,21 +1237,22 @@ pub fn factory() -> Vec<Preset> {
             eng(0.5, 30.0, 150.0),
         ),
         make(
-            "Google: Didgeridoo",
+            "Base: Didgeridoo",
             InstrumentGraph {
                 components: vec![
-                    Comp::Reed { pressure: 0.9, stiffness: 0.15 },
-                    Comp::Horn(WebsterHorn { length: 1.35, wave_speed: 343.0, r1: 0.015, r2: 0.065, r3: 0.01, blow_pos: 0.0, depth: 35, resolution: 64, damping: 0.005, freq_dep_damping: 0.015, damp_period: 1.0, visco_loss: 0.18, radiation: 0.5, overblow_anchor_hz: 73.4, boundary: Boundary::Brass, ..WebsterHorn::default() }),
-                    Comp::Voice { open_quotient: 0.5, level: 0.4 },
-                    Comp::Body { cavity_litres: 3.5, soundhole_cm: 0.0, top_hz: 90.0, decay_s: 0.15 },
+                    Comp::Reed { pressure: 0.9, stiffness: 0.6 },
+                    Comp::Horn(WebsterHorn { length: 1.4, wave_speed: 343.0, r1: 0.015, r2: 0.05, r3: 0.01, blow_pos: 0.0, depth: 20, resolution: 240, damping: 2.5, freq_dep_damping: -0.05, visco_loss: 0.6, radiation: 0.3, boundary: Boundary::Open, ..WebsterHorn::default() }),
+                    Comp::Voice { open_quotient: 0.5, level: 0.15 },
+                    Comp::Body { cavity_litres: 0.15, soundhole_cm: 2.5, top_hz: 1200.0, decay_s: 0.05 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 0, gain: 0.8 },
+                    Edge { from: 0, to: 1, gain: 0.32 },
+                    Edge { from: 1, to: 0, gain: 0.55 },
                     Edge { from: 2, to: 1, gain: 0.5 },
                     Edge { from: 1, to: 3, gain: 1.0 },
-                    Edge { from: 3, to: 4, gain: 1.0 },
+                    Edge { from: 1, to: 4, gain: 1.0 },
+                    Edge { from: 3, to: 4, gain: 0.3 },
                 ],
                 output: 4,
                 key_map: Vec::new(),
@@ -1131,19 +1260,37 @@ pub fn factory() -> Vec<Preset> {
             eng(0.5, 30.0, 400.0),
         ),
         make(
-            "Google: Kick",
+            "Base: Vocal Synth",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Voice { open_quotient: 0.65, level: 0.15 },
+                    Comp::Horn(WebsterHorn { length: 0.17, wave_speed: 343.0, r1: 0.012, r2: 0.02, r3: 0.015, blow_pos: 0.0, depth: 18, resolution: 200, damping: 6.0, freq_dep_damping: -0.08, visco_loss: 1.5, radiation: 0.4, boundary: Boundary::Open, ..WebsterHorn::default() }),
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                ],
+                output: 2,
+                key_map: Vec::new(),
+            },
+            eng(0.5, 30.0, 200.0),
+        ),
+        make(
+            "Base: Kick",
             InstrumentGraph {
                 components: vec![
                     Comp::Hammer { hardness: 0.2, felt: 3.2 },
-                    Comp::Membrane(DrumMembrane { radius_m: 0.28, tension_nm: 800.0, areal_density_kgm2: 0.42, bending_nm: 0.0, decay_time: 0.18, hf_damping: 5.0, num_modes: 24, strike_pos: 0.35, ..DrumMembrane::default() }),
+                    Comp::Membrane(DrumMembrane { radius_m: 0.28, tension_nm: 800.0, areal_density_kgm2: 0.42, bending_nm: 0.0, strike_pos: 0.35, decay_time: 0.18, hf_damping: 5.0, num_modes: 24, ..DrumMembrane::default() }),
                     Comp::Body { cavity_litres: 140.0, soundhole_cm: 12.0, top_hz: 52.0, decay_s: 0.18 },
                     Comp::Mix,
                 ],
                 edges: vec![
                     Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 0, gain: 0.2 },
+                    Edge { from: 1, to: 3, gain: 1.0 },
                     Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.4 },
+                    Edge { from: 1, to: 0, gain: 0.2 },
                 ],
                 output: 3,
                 key_map: Vec::new(),
@@ -1151,19 +1298,19 @@ pub fn factory() -> Vec<Preset> {
             eng(0.85, 1.0, 80.0),
         ),
         make(
-            "Google: Tom",
+            "Base: Tom",
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
-                    Comp::Membrane(DrumMembrane { radius_m: 0.165, tension_nm: 1500.0, areal_density_kgm2: 0.26, bending_nm: 0.0, decay_time: 0.4, hf_damping: 4.0, num_modes: 32, strike_pos: 0.45, ..DrumMembrane::default() }),
+                    Comp::Membrane(DrumMembrane { radius_m: 0.165, tension_nm: 1500.0, areal_density_kgm2: 0.26, bending_nm: 0.0, strike_pos: 0.5, decay_time: 0.4, hf_damping: 4.0, num_modes: 32, ..DrumMembrane::default() }),
                     Comp::Body { cavity_litres: 22.0, soundhole_cm: 0.0, top_hz: 110.0, decay_s: 0.35 },
                     Comp::Mix,
                 ],
                 edges: vec![
                     Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 2, gain: 0.5 },
-                    Edge { from: 1, to: 3, gain: 0.6 },
-                    Edge { from: 2, to: 3, gain: 0.4 },
+                    Edge { from: 1, to: 3, gain: 1.0 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.3 },
                 ],
                 output: 3,
                 key_map: Vec::new(),
@@ -1171,18 +1318,19 @@ pub fn factory() -> Vec<Preset> {
             eng(0.7, 1.0, 120.0),
         ),
         make(
-            "Google: Timpani",
+            "Base: Timpani",
             InstrumentGraph {
                 components: vec![
                     Comp::Hammer { hardness: 0.25, felt: 2.8 },
-                    Comp::Membrane(DrumMembrane { radius_m: 0.32, tension_nm: 2500.0, areal_density_kgm2: 0.3, bending_nm: 0.0, decay_time: 1.4, hf_damping: 1.5, num_modes: 48, strike_pos: 0.25, ..DrumMembrane::default() }),
+                    Comp::Membrane(DrumMembrane { radius_m: 0.32, tension_nm: 2500.0, areal_density_kgm2: 0.3, bending_nm: 0.0, strike_pos: 0.25, decay_time: 1.4, hf_damping: 1.5, num_modes: 48, ..DrumMembrane::default() }),
                     Comp::Body { cavity_litres: 240.0, soundhole_cm: 0.0, top_hz: 98.0, decay_s: 1.4 },
                     Comp::Mix,
                 ],
                 edges: vec![
                     Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 1, to: 3, gain: 1.0 },
                     Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.4 },
                 ],
                 output: 3,
                 key_map: Vec::new(),
@@ -1190,28 +1338,33 @@ pub fn factory() -> Vec<Preset> {
             eng(0.6, 2.0, 250.0),
         ),
         make(
-            "Google: Snare",
+            "Base: Snare",
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
-                    Comp::Membrane(DrumMembrane { radius_m: 0.165, tension_nm: 2000.0, areal_density_kgm2: 0.26, bending_nm: 0.02, decay_time: 0.18, hf_damping: 6.0, num_modes: 30, strike_pos: 0.3, ..DrumMembrane::default() }),
+                    Comp::Membrane(DrumMembrane { radius_m: 0.165, tension_nm: 2000.0, areal_density_kgm2: 0.26, bending_nm: 0.02, strike_pos: 0.3, decay_time: 0.18, hf_damping: 6.0, num_modes: 24, ..DrumMembrane::default() }),
+                    Comp::Body { cavity_litres: 6.0, soundhole_cm: 0.0, top_hz: 180.0, decay_s: 0.08 },
+                    Comp::Membrane(DrumMembrane { radius_m: 0.165, tension_nm: 2600.0, areal_density_kgm2: 0.24, bending_nm: 0.02, strike_pos: 0.5, decay_time: 0.12, hf_damping: 7.0, num_modes: 20, ..DrumMembrane::default() }),
                     Comp::Wires { level: 0.85, tone: 1.2 },
                     Comp::Mix,
                 ],
                 edges: vec![
                     Edge { from: 0, to: 1, gain: 1.0 },
                     Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 1, gain: 0.4 },
-                    Edge { from: 1, to: 3, gain: 0.3 },
-                    Edge { from: 2, to: 3, gain: 0.7 },
+                    Edge { from: 2, to: 3, gain: 1.0 },
+                    Edge { from: 3, to: 4, gain: 1.0 },
+                    Edge { from: 4, to: 3, gain: 0.4 },
+                    Edge { from: 1, to: 5, gain: 0.8 },
+                    Edge { from: 3, to: 5, gain: 0.5 },
+                    Edge { from: 4, to: 5, gain: 0.7 },
                 ],
-                output: 3,
+                output: 5,
                 key_map: Vec::new(),
             },
             eng(0.7, 1.0, 120.0),
         ),
         make(
-            "Google: Cowbell",
+            "Base: Cowbell",
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
@@ -1228,11 +1381,11 @@ pub fn factory() -> Vec<Preset> {
             eng(0.6, 1.0, 60.0),
         ),
         make(
-            "Google: Crash Cymbal",
+            "Base: Crash Cymbal",
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
-                    Comp::Cymbal(Cymbal { size: 0.23, stiffness: 0.85, damping: 0.015, brightness: 0.005, strike_pos: 0.7, modes: 80, shimmer: 0.9, ..Cymbal::default() }),
+                    Comp::Cymbal(Cymbal { size: 17.0, stiffness: 9.0, damping: 1.0, brightness: -0.5, strike_pos: 0.8, modes: 160, shimmer: 0.4, ..Cymbal::default() }),
                     Comp::Mix,
                 ],
                 edges: vec![
@@ -1245,11 +1398,11 @@ pub fn factory() -> Vec<Preset> {
             eng(0.5, 1.0, 400.0),
         ),
         make(
-            "Google: Ride Cymbal",
+            "Base: Ride Cymbal",
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
-                    Comp::Cymbal(Cymbal { size: 0.27, stiffness: 0.95, damping: 0.003, brightness: 0.002, strike_pos: 0.4, modes: 60, shimmer: 0.35, ..Cymbal::default() }),
+                    Comp::Cymbal(Cymbal { size: 15.0, stiffness: 7.0, damping: 2.2, brightness: -0.25, strike_pos: 0.35, modes: 100, shimmer: 0.15, ..Cymbal::default() }),
                     Comp::Mix,
                 ],
                 edges: vec![
@@ -1262,11 +1415,11 @@ pub fn factory() -> Vec<Preset> {
             eng(0.55, 1.0, 300.0),
         ),
         make(
-            "Google: Gong",
+            "Base: Gong",
             InstrumentGraph {
                 components: vec![
                     Comp::Hammer { hardness: 0.15, felt: 2.4 },
-                    Comp::Plate(PurePlate { poisson: 0.34, decay_time: 6.5, hf_damp: 1.8, strike_pos: 0.0, modes: 70, ..PurePlate::default() }),
+                    Comp::Plate(PurePlate { poisson: 0.34, decay_time: 6.5, hf_damp: 1.8, strike_pos: 0.5, modes: 70, ..PurePlate::default() }),
                     Comp::Mix,
                 ],
                 edges: vec![
@@ -1278,134 +1431,7 @@ pub fn factory() -> Vec<Preset> {
             },
             eng(0.5, 1.0, 500.0),
         ),
-        make(
-            "Google: Grand Piano",
-            InstrumentGraph {
-                components: vec![
-                    Comp::Hammer { hardness: 0.45, felt: 2.6 },
-                    Comp::MusicalString(MusicalString { inharmonicity: 0.0003, pluck_pos: 0.14, decay_time: 8.0, hf_damping: 0.015, num_modes: 60 }),
-                    Comp::MusicalString(MusicalString { inharmonicity: 0.0003005, pluck_pos: 0.14, decay_time: 8.0, hf_damping: 0.015, num_modes: 60 }),
-                    Comp::MusicalString(MusicalString { inharmonicity: 0.0002995, pluck_pos: 0.14, decay_time: 8.0, hf_damping: 0.015, num_modes: 60 }),
-                    Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 110.0, decay_s: 1.2 },
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 0, to: 2, gain: 1.0 },
-                    Edge { from: 0, to: 3, gain: 1.0 },
-                    Edge { from: 1, to: 0, gain: 0.3 },
-                    Edge { from: 2, to: 0, gain: 0.3 },
-                    Edge { from: 3, to: 0, gain: 0.3 },
-                    Edge { from: 1, to: 4, gain: 1.0 },
-                    Edge { from: 2, to: 4, gain: 1.0 },
-                    Edge { from: 3, to: 4, gain: 1.0 },
-                    Edge { from: 4, to: 5, gain: 1.0 },
-                ],
-                output: 5,
-                key_map: Vec::new(),
-            },
-            eng(0.55, 2.0, 300.0),
-        ),
-        make(
-            "Google: Harpsichord",
-            InstrumentGraph {
-                components: vec![
-                    Comp::Strike,
-                    Comp::String(PureString { length_m: 0.7, tension_n: 42.0, diameter_mm: 0.18, density_kgm3: 8400.0, youngs_gpa: 110.0, pluck_pos: 0.06, decay_time: 1.8, hf_damping: 0.02, num_modes: 50, ..PureString::default() }),
-                    Comp::Body { cavity_litres: 30.0, soundhole_cm: 7.0, top_hz: 210.0, decay_s: 0.25 },
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 1.0 },
-                ],
-                output: 3,
-                key_map: Vec::new(),
-            },
-            eng(0.55, 2.0, 120.0),
-        ),
-        make(
-            "Google: Cimbalom",
-            InstrumentGraph {
-                components: vec![
-                    Comp::Hammer { hardness: 0.8, felt: 1.8 },
-                    Comp::String(PureString { length_m: 0.68, tension_n: 160.0, diameter_mm: 0.45, density_kgm3: 7850.0, youngs_gpa: 210.0, pluck_pos: 0.2, decay_time: 5.5, hf_damping: 0.01, num_modes: 55, ..PureString::default() }),
-                    Comp::Body { cavity_litres: 65.0, soundhole_cm: 0.0, top_hz: 130.0, decay_s: 0.5 },
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 0, gain: 0.5 },
-                    Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 1.0 },
-                ],
-                output: 3,
-                key_map: Vec::new(),
-            },
-            eng(0.6, 1.0, 200.0),
-        ),
-        make(
-            "Google: Clavichord",
-            InstrumentGraph {
-                components: vec![
-                    Comp::Hammer { hardness: 0.9, felt: 1.0 },
-                    Comp::String(PureString { length_m: 0.62, tension_n: 38.0, diameter_mm: 0.22, density_kgm3: 8400.0, youngs_gpa: 110.0, pluck_pos: 0.02, decay_time: 1.2, hf_damping: 0.05, num_modes: 30, ..PureString::default() }),
-                    Comp::Body { cavity_litres: 18.0, soundhole_cm: 5.0, top_hz: 190.0, decay_s: 0.2 },
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 0, gain: 1.0 },
-                    Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 1.0 },
-                ],
-                output: 3,
-                key_map: Vec::new(),
-            },
-            eng(0.55, 2.0, 120.0),
-        ),
-        make(
-            "Google: Hurdy-Gurdy",
-            InstrumentGraph {
-                components: vec![
-                    Comp::Bow { speed: 0.25, force: 0.4 },
-                    Comp::String(PureString { length_m: 0.34, tension_n: 50.0, diameter_mm: 0.45, density_kgm3: 1300.0, youngs_gpa: 6.5, pluck_pos: 0.05, decay_time: 1.5, hf_damping: 0.2, num_modes: 32, ..PureString::default() }),
-                    Comp::String(PureString { length_m: 0.68, tension_n: 90.0, diameter_mm: 0.95, density_kgm3: 1300.0, youngs_gpa: 6.5, pluck_pos: 0.02, decay_time: 2.5, hf_damping: 0.3, num_modes: 20, ..PureString::default() }),
-                    Comp::Body { cavity_litres: 12.0, soundhole_cm: 0.0, top_hz: 160.0, decay_s: 0.4 },
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 0, to: 2, gain: 1.0 },
-                    Edge { from: 1, to: 0, gain: 1.0 },
-                    Edge { from: 2, to: 0, gain: 1.0 },
-                    Edge { from: 1, to: 3, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 1.0 },
-                    Edge { from: 3, to: 4, gain: 1.0 },
-                ],
-                output: 4,
-                key_map: Vec::new(),
-            },
-            eng(0.5, 40.0, 250.0),
-        ),
-        make(
-            "Google: Vocal Synth",
-            InstrumentGraph {
-                components: vec![
-                    Comp::Voice { open_quotient: 0.65, level: 0.8 },
-                    Comp::Horn(WebsterHorn { length: 0.17, wave_speed: 350.0, r1: 0.012, r2: 0.02, r3: 0.015, blow_pos: 0.0, depth: 20, resolution: 64, damping: 0.008, freq_dep_damping: 0.02, damp_period: 1.0, visco_loss: 0.45, radiation: 0.3, overblow_anchor_hz: 130.8, boundary: Boundary::Open, ..WebsterHorn::default() }),
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 2, gain: 1.0 },
-                ],
-                output: 2,
-                key_map: Vec::new(),
-            },
-            eng(0.5, 30.0, 200.0),
-        ),
+
     ];
 
     // For every struck string / membrane / plate preset, add a "(graph)" twin
@@ -1608,7 +1634,7 @@ mod graph_twin_tests {
                 worst = worst.max(n.tick(&[]).abs());
             }
             let stable = worst.is_finite() && worst < 20.0;
-            let experimental = p.name.starts_with("Google:");
+            let experimental = p.name.starts_with("Base:");
             if !stable {
                 unstable.push((p.name.clone(), worst));
                 if !experimental {
@@ -1766,12 +1792,12 @@ mod tests {
             assert!(buf.n > 0, "{} should produce modes", p.name);
             assert!(buf.freq[..buf.n].iter().all(|f| f.is_finite()), "{}", p.name);
             assert!(buf.decay[..buf.n].iter().all(|d| d.is_finite()), "{}", p.name);
-            // The experimental "Google:" batch is designed against a fully grounded
+            // The experimental "Base:" batch is designed against a fully grounded
             // engine; until the Membrane/Cymbal/Horn-loss models are grounded, some
             // produce degenerate (zero-frequency) or swelling (negative-decay) modes
             // in the classic bank. The graph path clamps decay and the voice limiter
             // keeps them safe; the established presets stay strictly validated.
-            if !p.name.starts_with("Google:") {
+            if !p.name.starts_with("Base:") {
                 assert!(buf.freq[..buf.n].iter().all(|f| *f > 0.0), "{}", p.name);
                 assert!(buf.decay[..buf.n].iter().all(|d| *d >= 0.0), "{}", p.name);
             }
@@ -1787,6 +1813,11 @@ mod tests {
         assert!(!file_stem("a/b\\c").contains(['/', '\\']));
     }
 }
+
+
+
+
+
 
 
 
