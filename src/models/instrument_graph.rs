@@ -212,6 +212,38 @@ impl Default for InstrumentGraph {
     }
 }
 
+impl InstrumentGraph {
+    /// Remove component `r`, fixing up every index that referenced it: edges
+    /// touching it are dropped and higher indices shifted down; key-map targets
+    /// and the output node are adjusted the same way.
+    fn remove_component(&mut self, r: usize) {
+        if r >= self.components.len() {
+            return;
+        }
+        self.components.remove(r);
+        self.edges.retain(|e| e.from != r && e.to != r);
+        for e in &mut self.edges {
+            if e.from > r {
+                e.from -= 1;
+            }
+            if e.to > r {
+                e.to -= 1;
+            }
+        }
+        self.key_map.retain(|k| k.component != r);
+        for k in &mut self.key_map {
+            if k.component > r {
+                k.component -= 1;
+            }
+        }
+        if self.output == r || self.output >= self.components.len() {
+            self.output = self.components.len().saturating_sub(1);
+        } else if self.output > r {
+            self.output -= 1;
+        }
+    }
+}
+
 impl FtmModel for InstrumentGraph {
     fn id(&self) -> &'static str {
         "instrument_graph"
@@ -267,22 +299,107 @@ impl FtmModel for InstrumentGraph {
         let labels: Vec<&'static str> = self.components.iter().map(|c| c.label()).collect();
 
         ui.label(egui::RichText::new("Components").strong());
+        let ncomp = labels.len();
+        let mut remove_comp: Option<usize> = None;
         for (i, c) in self.components.iter_mut().enumerate() {
             ui.separator();
-            ui.strong(format!("{i}. {}", labels[i]));
+            ui.horizontal(|ui| {
+                ui.strong(format!("{i}. {}", labels[i]));
+                if ncomp > 1 && ui.small_button("✕").on_hover_text("remove component").clicked() {
+                    remove_comp = Some(i);
+                }
+            });
             changed |= c.params_ui(ui);
         }
+        if let Some(r) = remove_comp {
+            self.remove_component(r);
+            changed = true;
+        }
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Add:");
+            if ui.small_button("Strike").clicked() {
+                self.components.push(Comp::Strike);
+                changed = true;
+            }
+            if ui.small_button("String").clicked() {
+                self.components.push(Comp::String(PureString::default()));
+                changed = true;
+            }
+            if ui.small_button("Membrane").clicked() {
+                self.components.push(Comp::Membrane(DrumMembrane::default()));
+                changed = true;
+            }
+            if ui.small_button("Plate").clicked() {
+                self.components.push(Comp::Plate(PurePlate::default()));
+                changed = true;
+            }
+            if ui.small_button("Body").clicked() {
+                self.components.push(Comp::Body { ring: 1.0, tone: 1.0 });
+                changed = true;
+            }
+            if ui.small_button("Mix").clicked() {
+                self.components.push(Comp::Mix);
+                changed = true;
+            }
+        });
 
         ui.separator();
         ui.label(egui::RichText::new("Edges — coupling strength").strong());
-        for e in &mut self.edges {
-            let name = format!(
-                "{} → {}",
-                labels.get(e.from).copied().unwrap_or("?"),
-                labels.get(e.to).copied().unwrap_or("?"),
-            );
-            changed |= ui.add(unbounded_slider(&mut e.gain, 0.0..=1.0, &name)).changed();
+        let mut remove_edge: Option<usize> = None;
+        for (ei, e) in self.edges.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                let f = egui::ComboBox::from_id_salt(("e_from", ei))
+                    .width(96.0)
+                    .selected_text(labels.get(e.from).copied().unwrap_or("?"))
+                    .show_ui(ui, |ui| {
+                        let mut ch = false;
+                        for (i, lbl) in labels.iter().enumerate() {
+                            ch |= ui.selectable_value(&mut e.from, i, *lbl).changed();
+                        }
+                        ch
+                    });
+                changed |= f.inner.unwrap_or(false);
+                ui.label("→");
+                let t = egui::ComboBox::from_id_salt(("e_to", ei))
+                    .width(96.0)
+                    .selected_text(labels.get(e.to).copied().unwrap_or("?"))
+                    .show_ui(ui, |ui| {
+                        let mut ch = false;
+                        for (i, lbl) in labels.iter().enumerate() {
+                            ch |= ui.selectable_value(&mut e.to, i, *lbl).changed();
+                        }
+                        ch
+                    });
+                changed |= t.inner.unwrap_or(false);
+                changed |= ui.add(unbounded_slider(&mut e.gain, 0.0..=1.0, "gain")).changed();
+                if ui.small_button("✕").clicked() {
+                    remove_edge = Some(ei);
+                }
+            });
         }
+        if let Some(ei) = remove_edge {
+            self.edges.remove(ei);
+            changed = true;
+        }
+        ui.horizontal(|ui| {
+            if ui.small_button("➕ Add edge").clicked() {
+                self.edges.push(Edge { from: 0, to: labels.len().saturating_sub(1), gain: 0.5 });
+                changed = true;
+            }
+            ui.separator();
+            ui.label("Output:");
+            let o = egui::ComboBox::from_id_salt("graph_out")
+                .selected_text(labels.get(self.output).copied().unwrap_or("?"))
+                .show_ui(ui, |ui| {
+                    let mut ch = false;
+                    for (i, lbl) in labels.iter().enumerate() {
+                        ch |= ui.selectable_value(&mut self.output, i, *lbl).changed();
+                    }
+                    ch
+                });
+            changed |= o.inner.unwrap_or(false);
+        });
 
         // Key map: one key can drive several component params.
         ui.separator();
@@ -411,5 +528,20 @@ mod tests {
             high > low * 3 / 2,
             "the length key-map raises pitch on higher notes (high={high} low={low})"
         );
+    }
+    #[test]
+    fn remove_component_reindexes_everything() {
+        // default: [Strike(0), String(1), Body(2), Mix(3)],
+        // edges (0→1),(1→2),(1→3),(2→3), output 3.
+        let mut g = InstrumentGraph::default();
+        g.key_map.push(KeyTarget { component: 2, param: "tone".into(), amount: 1.0 });
+        g.remove_component(1); // drop the String
+        assert_eq!(g.components.len(), 3, "one fewer component");
+        // edges touching 1 dropped; only old (2→3) survives, shifted to (1→2).
+        assert!(g.edges.iter().all(|e| e.from < 3 && e.to < 3), "no dangling indices");
+        assert!(g.edges.iter().any(|e| e.from == 1 && e.to == 2), "(2→3) became (1→2)");
+        assert_eq!(g.output, 2, "output 3 shifted to 2");
+        assert_eq!(g.key_map[0].component, 1, "key target 2 shifted to 1");
+        assert!(g.build_graph(220.0, 1.0, 48_000.0).is_some(), "still builds");
     }
 }
