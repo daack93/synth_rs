@@ -29,11 +29,6 @@ pub mod instrument_graph;
 /// Maximum partials a single voice can hold (hard array bound).
 pub const MAX_MODES: usize = 512;
 
-/// The modeling tick rate (~10 kHz) that the per-mode decay is expressed in.
-/// `DAMP_PERIOD` and `TIME_SCALE` are counted in these ticks, so this constant
-/// converts them onto real seconds.
-pub const TICK_RATE: f32 = 10_000.0;
-
 /// Reference pitch (C4). Physical-pitch mode scales the geometry so it matches
 /// transpose mode at this note and diverges from there.
 #[allow(dead_code)] // reserved for physical-pitch models
