@@ -525,7 +525,7 @@ pub fn factory() -> Vec<Preset> {
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.32 },
+                    Edge { from: 0, to: 1, gain: 0.5 },
                     Edge { from: 1, to: 0, gain: 0.55 },
                     Edge { from: 1, to: 2, gain: 1.0 },
                 ],
@@ -1191,7 +1191,7 @@ pub fn factory() -> Vec<Preset> {
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.32 },
+                    Edge { from: 0, to: 1, gain: 0.5 },
                     Edge { from: 1, to: 0, gain: 0.55 },
                     Edge { from: 1, to: 2, gain: 1.0 },
                 ],
@@ -1209,7 +1209,7 @@ pub fn factory() -> Vec<Preset> {
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.32 },
+                    Edge { from: 0, to: 1, gain: 0.5 },
                     Edge { from: 1, to: 0, gain: 0.55 },
                     Edge { from: 1, to: 2, gain: 1.0 },
                 ],
@@ -1227,7 +1227,7 @@ pub fn factory() -> Vec<Preset> {
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.32 },
+                    Edge { from: 0, to: 1, gain: 0.5 },
                     Edge { from: 1, to: 0, gain: 0.55 },
                     Edge { from: 1, to: 2, gain: 1.0 },
                 ],
@@ -1247,7 +1247,7 @@ pub fn factory() -> Vec<Preset> {
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.32 },
+                    Edge { from: 0, to: 1, gain: 0.5 },
                     Edge { from: 1, to: 0, gain: 0.55 },
                     Edge { from: 2, to: 1, gain: 0.5 },
                     Edge { from: 1, to: 3, gain: 1.0 },
@@ -1813,6 +1813,8 @@ mod tests {
         assert!(!file_stem("a/b\\c").contains(['/', '\\']));
     }
 }
+
+
 
 
 

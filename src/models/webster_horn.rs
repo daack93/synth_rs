@@ -23,7 +23,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{strike_amplitude, unbounded_slider, FtmModel, ModeBuffer, TICK_RATE};
+use super::{strike_amplitude, unbounded_slider, FtmModel, ModeBuffer};
 
 const TWO_PI: f64 = std::f64::consts::TAU;
 const SQRT_2: f64 = std::f64::consts::SQRT_2;
@@ -334,9 +334,7 @@ impl FtmModel for WebsterHorn {
 
         let k0 = modes[0].0;
         let c = self.wave_speed as f64;
-        let damp_per = self.damp_period.max(1e-3) as f64;
         let d1 = self.damping as f64;
-        let d3 = self.freq_dep_damping as f64;
         let nyq = sr as f64 * 0.45;
 
         // Keefe viscothermal loss scales with bore narrowness. Use mean(r_bell /
@@ -358,10 +356,16 @@ impl FtmModel for WebsterHorn {
         } else {
             0.0
         };
-        // Empirical scales so a coefficient of ~1 gives a musical amount.
-        const KEEFE_C: f64 = 0.02;
+        // Grounded loss magnitudes (in real 1/s): calibrated so a woodwind bore
+        // (visco ≈ 1) rings at Q ≈ 50–100 at the fundamental — the range where a
+        // reed self-oscillates cleanly rather than exploding or dying. Wall loss
+        // ∝ √f (viscothermal boundary layer, Keefe), radiation loss ∝ f² (the
+        // open bell). `damping` is a real per-second base loss (mouthpiece/player).
+        const KEEFE_C: f64 = 0.5;
         const RAD_C: f64 = 5.0;
-        let keefe_rad = |fh: f64| KEEFE_C * visco * flare_loss * fh.sqrt() + RAD_C * radiation * (fh * 1e-3).powi(2);
+        let keefe_rad = |fh: f64| {
+            d1.max(0.0) + KEEFE_C * visco * flare_loss * fh.sqrt() + RAD_C * radiation * (fh * 1e-3).powi(2)
+        };
 
         // --- Overblow family: fixed-tube timbre; Overblow snaps to the resonance
         //     ladder, OverblowTracked tunes the bore so the chosen harmonic lands
@@ -428,10 +432,7 @@ impl FtmModel for WebsterHorn {
                 // the harmonic index so `damping` (overall) and `freq_dep_damping`
                 // (how fast highs roll off) both shape the sustained tone; plus
                 // Keefe wall + bell-radiation loss.
-                let kr = h as f64;
-                let sigma = (d3 * kr * kr - d1) / 2.0;
-                let mut decay = -sigma * TICK_RATE as f64 / (damp_per * damp_per);
-                decay += keefe_rad(fh);
+                let decay = keefe_rad(fh); // grounded wall + radiation loss, 1/s
                 kept.push((fh, amp, decay.max(0.0)));
                 amp_sum += amp;
             }
@@ -458,12 +459,8 @@ impl FtmModel for WebsterHorn {
             if freq >= nyq || freq <= 0.0 {
                 continue;
             }
-            // Base decay (d1/d3), keyed on the harmonic ratio.
-            let sigma = (d3 * kr * kr - d1) / 2.0;
-            let mut decay = -sigma * TICK_RATE as f64 / (damp_per * damp_per);
-            // Keefe wall loss ∝ √f · narrowness; radiation loss ∝ f² (high-pass).
-            decay += KEEFE_C * visco * flare_loss * freq.sqrt();
-            decay += RAD_C * radiation * (freq * 1e-3).powi(2);
+            // Grounded loss: base + Keefe wall (∝√f) + bell radiation (∝f²), 1/s.
+            let decay = keefe_rad(freq);
             kept.push((freq, w, decay));
             amp_sum += w.abs();
         }
