@@ -19,6 +19,7 @@
 use crate::models::ModeBuffer;
 
 const TAU: f32 = std::f32::consts::TAU;
+const PI: f32 = std::f32::consts::PI;
 
 /// A per-voice, per-sample DSP block. `tick` advances one sample: it reads its
 /// input signals (empty for a source like an exciter) and returns its output.
@@ -87,6 +88,57 @@ impl Node for ModalResonator {
             s += m.tick(x);
         }
         s
+    }
+}
+
+/// Snare wires resting against a head: band-passed noise (the rattle) whose
+/// level tracks how hard its input (the head's motion) is moving. Wired *both*
+/// ways in the graph — driven by the bottom membrane and fed back into it — it
+/// buzzes when the head moves and keeps re-exciting it, the coupled-snare sound.
+pub struct SnareWires {
+    rng: u32,
+    follow: f32,
+    follow_decay: f32,
+    hp_a: f32,
+    lp_a: f32,
+    hp_s: f32,
+    lp_s: f32,
+    level: f32,
+}
+
+impl SnareWires {
+    pub fn new(level: f32, hp: f32, lp: f32, sr: f32) -> Self {
+        let a = |hz: f32| 1.0 - (-2.0 * PI * hz.max(1.0) / sr).exp();
+        SnareWires {
+            rng: 0x2545_f491,
+            follow: 0.0,
+            follow_decay: (-1.0 / (0.02 * sr)).exp(), // ~20 ms rattle release
+            hp_a: a(hp),
+            lp_a: a(lp),
+            hp_s: 0.0,
+            lp_s: 0.0,
+            level,
+        }
+    }
+}
+
+impl Node for SnareWires {
+    #[inline]
+    fn tick(&mut self, inputs: &[f32]) -> f32 {
+        let x: f32 = inputs.iter().sum();
+        // Track how much the head is moving; the wires only rattle while it does.
+        self.follow = x.abs().max(self.follow * self.follow_decay);
+        // White noise → band-pass (one-pole HP then LP).
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        let white = (self.rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+        self.hp_s += self.hp_a * (white - self.hp_s);
+        let hp = white - self.hp_s;
+        self.lp_s += self.lp_a * (hp - self.lp_s);
+        // Saturate: a real rattle clips, and this bounds the feedback loop when
+        // the wires are wired back into the head (keeps coupling stable).
+        (self.lp_s * self.follow * self.level).tanh()
     }
 }
 

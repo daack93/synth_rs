@@ -17,7 +17,7 @@ use super::pure_plate::PurePlate;
 use super::pure_string::PureString;
 use super::{unbounded_slider, FtmModel, ModeBuffer};
 use crate::graph::{
-    FormantResonator, Graph, ImpulseExciter, ModalResonator, Node, Sum,
+    FormantResonator, Graph, ImpulseExciter, ModalResonator, Node, SnareWires, Sum,
 };
 
 /// One node in an instrument graph. Each variant is a physics component with
@@ -36,6 +36,9 @@ pub enum Comp {
     /// A body / oral-cavity resonator: fixed formants, `ring` = how long it
     /// rings, `tone` = formant-frequency scale.
     Body { ring: f32, tone: f32 },
+    /// Snare wires resting on a head: a rattle that buzzes with the head's motion.
+    /// `level` = rattle amount, `tone` = band brightness.
+    Wires { level: f32, tone: f32 },
     /// A mixer / output node: the (edge-scaled) sum of its inputs.
     Mix,
 }
@@ -48,6 +51,7 @@ impl Comp {
             Comp::Membrane(_) => "Membrane (resonator)",
             Comp::Plate(_) => "Plate (resonator)",
             Comp::Body { .. } => "Body (resonator)",
+            Comp::Wires { .. } => "Snare wires",
             Comp::Mix => "Mix / output",
         }
     }
@@ -67,6 +71,10 @@ impl Comp {
             Comp::Plate(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
             Comp::Body { ring, tone } => {
                 Box::new(FormantResonator::new(&body_bank(*ring, *tone), sr))
+            }
+            Comp::Wires { level, tone } => {
+                let t = tone.clamp(0.3, 3.0);
+                Box::new(SnareWires::new(*level, 600.0 * t, 8_000.0, sr))
             }
             Comp::Mix => Box::new(Sum),
         }
@@ -97,6 +105,12 @@ impl Comp {
                     .changed();
                 c
             }
+            Comp::Wires { level, tone } => {
+                let mut c = false;
+                c |= ui.add(unbounded_slider(level, 0.0..=2.0, "Rattle level")).changed();
+                c |= ui.add(unbounded_slider(tone, 0.3..=3.0, "Rattle tone")).changed();
+                c
+            }
             Comp::Mix => {
                 ui.label(egui::RichText::new("Sums its inputs (see edge strengths).").weak().small());
                 false
@@ -125,7 +139,7 @@ impl Comp {
             Comp::Membrane(_) => &["radius"],
             Comp::Plate(_) => &["ring"],
             Comp::Body { .. } => &["ring", "tone"],
-            Comp::Strike | Comp::Mix => &[],
+            Comp::Strike | Comp::Mix | Comp::Wires { .. } => &[],
         }
     }
 
@@ -543,5 +557,46 @@ mod tests {
         assert_eq!(g.output, 2, "output 3 shifted to 2");
         assert_eq!(g.key_map[0].component, 1, "key target 2 shifted to 1");
         assert!(g.build_graph(220.0, 1.0, 48_000.0).is_some(), "still builds");
+    }
+    #[test]
+    fn coupled_snare_is_stable_and_uses_feedback() {
+        let sr = 48_000.0;
+        let snare = |feedback: f32| -> Vec<f32> {
+            let top = DrumMembrane { prop_speed: 700.0, damping: 12.0, radius: 7.0, depth: 24, ..DrumMembrane::default() };
+            let bottom = DrumMembrane { prop_speed: 520.0, damping: 20.0, radius: 7.0, depth: 20, ..DrumMembrane::default() };
+            let g = InstrumentGraph {
+                components: vec![
+                    Comp::Strike,
+                    Comp::Membrane(top),
+                    Comp::Membrane(bottom),
+                    Comp::Wires { level: 0.6, tone: 1.0 },
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 1, to: 2, gain: 0.5 },
+                    Edge { from: 2, to: 3, gain: 1.0 },
+                    Edge { from: 3, to: 2, gain: feedback }, // the coupling under test
+                    Edge { from: 1, to: 4, gain: 1.0 },
+                    Edge { from: 2, to: 4, gain: 0.5 },
+                    Edge { from: 3, to: 4, gain: 0.6 },
+                ],
+                output: 4,
+                key_map: Vec::new(),
+            };
+            let mut n = g.build_graph(180.0, 1.0, sr).unwrap();
+            (0..24_000).map(|_| n.tick(&[])).collect()
+        };
+        let with_fb = snare(0.3);
+        let no_fb = snare(0.0);
+        // Stable: finite and bounded (the feedback loop doesn\'t run away).
+        assert!(with_fb.iter().all(|v| v.is_finite() && v.abs() < 50.0), "coupled loop is stable");
+        // Makes sound, and the wires→bottom feedback edge changes it (same noise
+        // seed both times, so the difference is purely the coupling).
+        let rms = |a: &[f32]| (a.iter().map(|v| v * v).sum::<f32>() / a.len() as f32).sqrt();
+        assert!(rms(&with_fb) > 1e-4, "non-silent");
+        let diff: f32 = with_fb.iter().zip(&no_fb).map(|(a, b)| (a - b).abs()).sum::<f32>()
+            / with_fb.len() as f32;
+        assert!(diff > 1e-5, "the wires→bottom feedback changes the sound (diff={diff:.6})");
     }
 }

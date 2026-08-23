@@ -179,6 +179,32 @@ pub fn factory() -> Vec<Preset> {
             },
             eng(0.6, 3.0, 120.0),
         ),
+        // ---- Coupled-membrane snare (feedback graph): two heads + wires that
+        //      re-excite the bottom head. A/B vs the "Snare" model. ----
+        make(
+            "Snare (coupled graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Strike,
+                    Comp::Membrane(DrumMembrane { prop_speed: 700.0, stiffness: 0.3, damping: 12.0, freq_dep_damping: -3.0, radius: 7.0, depth: 24, strike_pos: 0.4, key_tracks_pitch: true, ..DrumMembrane::default() }),
+                    Comp::Membrane(DrumMembrane { prop_speed: 520.0, stiffness: 0.2, damping: 20.0, freq_dep_damping: -3.5, radius: 7.0, depth: 20, strike_pos: 0.5, key_tracks_pitch: true, ..DrumMembrane::default() }),
+                    Comp::Wires { level: 0.6, tone: 1.0 },
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 }, // strike → top head
+                    Edge { from: 1, to: 2, gain: 0.5 }, // top couples to bottom
+                    Edge { from: 2, to: 3, gain: 1.0 }, // bottom drives the wires
+                    Edge { from: 3, to: 2, gain: 0.3 }, // wires re-excite the bottom (feedback)
+                    Edge { from: 1, to: 4, gain: 1.0 }, // top → out
+                    Edge { from: 2, to: 4, gain: 0.5 }, // bottom → out
+                    Edge { from: 3, to: 4, gain: 0.6 }, // wires → out
+                ],
+                output: 4,
+                key_map: Vec::new(),
+            },
+            eng(0.7, 1.0, 200.0),
+        ),
         // ---- Bowed strings (driven → sustain; bow near the bridge = bright/saw) ----
         make("Violin", bowed(0.5, 2.5, -1.2, 4.0, 44, 0.12), eng(0.55, 60.0, 150.0)),
         make("Viola", bowed(0.6, 2.5, -1.5, 5.0, 40, 0.14), eng(0.55, 65.0, 160.0)),
