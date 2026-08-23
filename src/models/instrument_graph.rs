@@ -101,11 +101,20 @@ impl Comp {
         }
     }
 
-    /// True for the impulse (one-shot) exciters. A resonator fed *only* by these
-    /// is struck; fed by anything else (a continuous exciter or another
-    /// resonator) it is driven, and must be a filter so its Q doesn't explode.
-    fn is_impulse_exciter(&self) -> bool {
-        matches!(self, Comp::Strike | Comp::Hammer { .. })
+    /// True for the exciters (energy sources). A resonator fed by an exciter is
+    /// the instrument's *voice* and resonates (struck normalization); one fed by
+    /// another resonator is a coupling *filter* (so its Q colours the drive
+    /// instead of amplifying it into a blow-up).
+    fn is_exciter(&self) -> bool {
+        matches!(
+            self,
+            Comp::Strike
+                | Comp::Hammer { .. }
+                | Comp::Breath { .. }
+                | Comp::Reed { .. }
+                | Comp::Bow { .. }
+                | Comp::Voice { .. }
+        )
     }
 
     /// Instantiate this component's per-voice DSP node for a played note.
@@ -489,33 +498,19 @@ impl FtmModel for InstrumentGraph {
             }
         }
         // Choose each resonator's normalization from the topology:
-        //  * fed only by impulse exciters (Strike/Hammer) → struck (rings out);
-        //  * locked in a feedback loop with a nonlinear self-oscillator
-        //    (Reed/Bow: edges both to and from it) → struck, so its high Q can
-        //    sustain the oscillation (the exciter's nonlinearity bounds it);
-        //  * otherwise driven (a body, a blown/coupled resonator) → filter, so
-        //    its Q colours the drive instead of amplifying it into a blow-up.
+        //  * fed by an exciter (Strike/Hammer/Breath/Reed/Bow/Voice) → struck:
+        //    it is the instrument's voice and resonates (a plucked string, a
+        //    blown bore);
+        //  * fed by another *resonator* → filter, so its Q colours that drive
+        //    instead of amplifying it into a blow-up (a body, a coupled head).
+        // (Self-oscillating reed/bow loops fall out of the first case — their
+        // bore is exciter-fed — so they keep the high Q the oscillation needs.)
         let n = comps.len();
-        let self_osc = |i: usize| -> bool {
-            (0..n).any(|j| {
-                matches!(comps[j], Comp::Reed { .. } | Comp::Bow { .. })
-                    && self.edges.iter().any(|e| e.from == j && e.to == i)
-                    && self.edges.iter().any(|e| e.from == i && e.to == j)
-            })
-        };
         let driven: Vec<bool> = (0..n)
             .map(|i| {
-                let mut has_input = false;
-                let mut all_impulse = true;
-                for e in &self.edges {
-                    if e.to == i && e.from < n {
-                        has_input = true;
-                        if !comps[e.from].is_impulse_exciter() {
-                            all_impulse = false;
-                        }
-                    }
-                }
-                has_input && !all_impulse && !self_osc(i)
+                self.edges
+                    .iter()
+                    .any(|e| e.to == i && e.from < n && !comps[e.from].is_exciter())
             })
             .collect();
         let nodes: Vec<Box<dyn Node>> = comps
