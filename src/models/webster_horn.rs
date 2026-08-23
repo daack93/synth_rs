@@ -56,7 +56,7 @@ pub enum PlayMode {
 /// (preferring the shortest tube on ties — the conventional fingering), then
 /// return the scale to apply to `res` so that harmonic lands *exactly* on the
 /// key (the fingering choice plus a small lip/tuning-slide nudge).
-fn overblow_fingering(target: f64, res: &[f64], tune: f64, valve_steps: u32) -> f64 {
+fn overblow_fingering(target: f64, res: &[f64], tune: f64, valve_steps: u32, microtune: bool) -> f64 {
     let lt = target.max(1.0).ln();
     let mut best_dist = f64::INFINITY;
     let mut best_scale = tune;
@@ -70,7 +70,9 @@ fn overblow_fingering(target: f64, res: &[f64], tune: f64, valve_steps: u32) -> 
             let d = (f.ln() - lt).abs();
             if d < best_dist - 1e-9 {
                 best_dist = d;
-                best_scale = len * (target / f); // micro-tune this bore onto the key
+                // Micro-tune: nudge this bore so the harmonic hits the key exactly.
+                // Otherwise leave it at the natural harmonic pitch (authentic).
+                best_scale = if microtune { len * (target / f) } else { len };
             }
         }
     }
@@ -147,6 +149,10 @@ pub struct WebsterHorn {
     /// tuning anchor. For a Bb trumpet this is concert E2 (82.41), which makes
     /// the open bore's fundamental the pedal Bb2 a tritone above.
     pub overblow_anchor_hz: f32,
+    /// Key-tracked overblow: nudge the chosen bore so the note is exactly in
+    /// tune (true), or play the natural harmonic pitch — authentic, slightly
+    /// off equal-temperament (false).
+    pub overblow_microtune: bool,
 }
 
 fn default_wavefront() -> Wavefront {
@@ -180,6 +186,7 @@ impl Default for WebsterHorn {
             play_mode: PlayMode::Chromatic,
             valve_steps: 6,
             overblow_anchor_hz: 82.41, // concert E2 — longest-bore fundamental
+            overblow_microtune: true,
         }
     }
 }
@@ -304,7 +311,20 @@ impl FtmModel for WebsterHorn {
             return;
         }
         lambdas.sort_by(|a, b| b.partial_cmp(a).unwrap()); // descending λ ⇒ ascending k
-        let take = self.depth.clamp(1, super::MAX_MODES).min(lambdas.len());
+        // A finite-difference eigensolve on `n` grid points only resolves its
+        // lowest ~n/3 eigenvalues accurately; higher ones saturate against the
+        // operator's largest eigenvalue and pile up into a dense, spurious,
+        // *buzzy* cluster (measured: on a 512 grid the mode ratios flatten near
+        // index ~240). Cap the modes we keep to that resolvable count so a large
+        // DEPTH can never sound that numerical garbage. Chromatic sounds these
+        // directly; the Overblow paths only use them as a resonance ladder, so
+        // for those this just trims an inaudible tail.
+        let resolvable = (n / 3).max(1);
+        let take = self
+            .depth
+            .clamp(1, super::MAX_MODES)
+            .min(lambdas.len())
+            .min(resolvable);
         let mut modes: Vec<(f64, f64)> = Vec::with_capacity(take);
         for &lambda in lambdas.iter().take(take) {
             let k = (-lambda).sqrt();
@@ -369,7 +389,7 @@ impl FtmModel for WebsterHorn {
                 let steps = self.valve_steps as f64;
                 let open_fundamental = self.overblow_anchor_hz as f64 * 2f64.powf(steps / 12.0);
                 let tune = open_fundamental / res[0].max(1e-9);
-                let scale = overblow_fingering(target, &res, tune, self.valve_steps);
+                let scale = overblow_fingering(target, &res, tune, self.valve_steps, self.overblow_microtune);
                 let scaled: Vec<f64> = res.iter().map(|&f| f * scale).collect();
                 (target, scaled)
             } else {
@@ -518,11 +538,17 @@ impl FtmModel for WebsterHorn {
                     .on_hover_text("Semitones of valve/slide tubing available → this many bore lengths beyond the open tube (a Bb trumpet = 6).")
                     .changed();
                 ui.label("Anchor");
-                changed |= ui
-                    .add(egui::DragValue::new(&mut self.overblow_anchor_hz).range(20.0..=500.0).suffix(" Hz"))
-                    .on_hover_text("Fundamental of the longest bore (the tuning anchor). Bb trumpet = 82.41 Hz (concert E2).")
-                    .changed();
+                // Anchor as a concert pitch (longest bore's fundamental).
+                let mut note = super::freq_to_midi(self.overblow_anchor_hz);
+                if super::note_field(ui, "horn_anchor", &mut note) {
+                    self.overblow_anchor_hz = super::midi_freq(note);
+                    changed = true;
+                }
             });
+            changed |= ui
+                .checkbox(&mut self.overblow_microtune, "Micro-tune to key (in-tune)")
+                .on_hover_text("On: nudge the bore so each note is exactly in tune. Off: play the natural harmonic pitch — authentic brass intonation (5th/7th harmonics sit flat).")
+                .changed();
         }
         ui.add_space(4.0);
         ui.strong("Bore  r(x) = r1 + r2·x + r3·x²");
@@ -768,9 +794,17 @@ mod tests {
     fn overblow_fingering_lands_a_harmonic_on_the_key() {
         let res = vec![100.0, 200.0, 300.0, 400.0, 500.0, 600.0];
         for &target in &[175.0_f64, 210.0, 250.0, 333.0, 512.0] {
-            let scale = overblow_fingering(target, &res, 1.0, 6);
+            // Micro-tuned: a fingering's harmonic lands exactly on the key.
+            let scale = overblow_fingering(target, &res, 1.0, 6, true);
             let landed = res.iter().any(|&r| (r * scale - target).abs() < 1e-6);
-            assert!(landed, "a fingering's harmonic lands exactly on {target} (scale {scale})");
+            assert!(landed, "micro-tuned harmonic lands on {target} (scale {scale})");
+            // Authentic (no micro-tune): closest harmonic, within a semitone.
+            let raw = overblow_fingering(target, &res, 1.0, 6, false);
+            let nearest = res.iter().map(|&r| r * raw).fold(f64::INFINITY, |b, f| {
+                if (f / target).ln().abs() < (b / target).ln().abs() { f } else { b }
+            });
+            let cents = 1200.0 * (nearest / target).log2();
+            assert!(cents.abs() < 60.0, "authentic pitch within a semitone of {target}: {cents} cents");
         }
     }
 
@@ -938,3 +972,6 @@ mod tests {
         assert!(buf.amp[..buf.n].iter().all(|a| a.is_finite()));
     }
 }
+
+
+
