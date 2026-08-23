@@ -499,14 +499,20 @@ impl Node for BowExciter {
         let rate = if self.env < self.env_target { self.atk_rate } else { self.rel_rate };
         self.env += (self.env_target - self.env) * rate;
         let x: f32 = inputs.iter().sum();
-        // String velocity ≈ derivative of the fed-back displacement.
-        let v_string = (x - self.last) * 0.05;
+        // String velocity at the bow ≈ the derivative of the fed-back
+        // displacement, scaled so it lands on the same (bow-speed) scale — the
+        // fix for the old model, where it was ~30× too small so the relative
+        // velocity was dominated by the bow's DC push and stick-slip never
+        // engaged (you just heard the string's modes slowly accumulating).
+        const VSCALE: f32 = 25.0;
+        let v_string = (x - self.last) * VSCALE;
         self.last = x;
         let v_bow = self.speed * self.env;
         let v_rel = v_string - v_bow;
-        // Stribeck friction: high near sticking (v_rel → 0), falling off as the
-        // string slips faster. The force opposes the slip (pulls toward v_bow).
-        let mu = 0.2 + 0.8 * (-(v_rel / self.slip).abs()).exp();
+        // Stribeck friction: high near sticking (v_rel → 0), falling off sharply
+        // as the string slips faster. The negative slope past the peak is the
+        // "negative resistance" that sustains the Helmholtz stick-slip motion.
+        let mu = 0.15 + 0.85 * (-(v_rel / self.slip).powi(2)).exp();
         let friction = -self.force * self.env * v_rel.signum() * mu;
         friction.tanh()
     }
@@ -929,3 +935,4 @@ mod new_exciter_tests {
         assert!(end.iter().all(|s| s.abs() < 1e-2), "voice goes silent after note-off");
     }
 }
+
