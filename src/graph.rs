@@ -21,10 +21,23 @@ use crate::models::ModeBuffer;
 const TAU: f32 = std::f32::consts::TAU;
 const PI: f32 = std::f32::consts::PI;
 
+/// A control message broadcast to every node in a voice's graph (not audio —
+/// these arrive at control rate, on a bend move or a key-up).
+#[derive(Clone, Copy)]
+pub enum Control {
+    /// Pitch-bend ratio (1.0 = no bend): resonators retune, exciters ignore it.
+    Bend(f32),
+    /// Key gate: `false` on note-off — driven exciters stop so the resonator
+    /// rings out. Struck/one-shot exciters ignore it.
+    Gate(bool),
+}
+
 /// A per-voice, per-sample DSP block. `tick` advances one sample: it reads its
 /// input signals (empty for a source like an exciter) and returns its output.
 pub trait Node: Send {
     fn tick(&mut self, inputs: &[f32]) -> f32;
+    /// Receive a control message. Default: ignore.
+    fn control(&mut self, _c: Control) {}
 }
 
 /// One resonant mode as a two-pole resonator. Its impulse response is
@@ -37,6 +50,8 @@ struct Mode {
     b0: f32,
     y1: f32,
     y2: f32,
+    theta0: f32, // base resonant angle (for retuning under pitch bend)
+    r: f32,      // pole radius
 }
 
 impl Mode {
@@ -50,7 +65,16 @@ impl Mode {
             b0: amp * theta.sin(),
             y1: 0.0,
             y2: 0.0,
+            theta0: theta,
+            r,
         }
+    }
+
+    /// Retune the pole to `bend`× the base frequency (pitch wheel).
+    #[inline]
+    fn retune(&mut self, bend: f32) {
+        let theta = (self.theta0 * bend).clamp(0.0, PI * 0.9);
+        self.a1 = 2.0 * self.r * theta.cos();
     }
 
     #[inline]
@@ -88,6 +112,13 @@ impl Node for ModalResonator {
             s += m.tick(x);
         }
         s
+    }
+    fn control(&mut self, c: Control) {
+        if let Control::Bend(b) = c {
+            for m in &mut self.modes {
+                m.retune(b);
+            }
+        }
     }
 }
 
@@ -186,6 +217,11 @@ impl Node for Graph {
         std::mem::swap(&mut self.last, &mut self.cur);
         self.last[self.output]
     }
+    fn control(&mut self, c: Control) {
+        for n in &mut self.nodes {
+            n.control(c);
+        }
+    }
 }
 
 /// A one-shot strike: emits `amp` on the first sample, then silence. A struck
@@ -225,8 +261,10 @@ pub struct DriveExciter {
     hp_s: f32,
     lp_s: f32,
     level: f32,
-    atk: f32,
+    env: f32,
+    env_target: f32,
     atk_rate: f32,
+    rel_rate: f32,
 }
 
 impl DriveExciter {
@@ -239,8 +277,10 @@ impl DriveExciter {
             hp_s: 0.0,
             lp_s: 0.0,
             level,
-            atk: 0.0,
-            atk_rate: 1.0 - (-1.0 / (0.01 * sr)).exp(), // ~10 ms breath onset
+            env: 0.0,
+            env_target: 1.0, // driving while the note is held
+            atk_rate: 1.0 - (-1.0 / (0.01 * sr)).exp(), // ~10 ms onset
+            rel_rate: 1.0 - (-1.0 / (0.03 * sr)).exp(), // ~30 ms stop on key-up
         }
     }
 }
@@ -248,7 +288,8 @@ impl DriveExciter {
 impl Node for DriveExciter {
     #[inline]
     fn tick(&mut self, _inputs: &[f32]) -> f32 {
-        self.atk += (1.0 - self.atk) * self.atk_rate;
+        let rate = if self.env < self.env_target { self.atk_rate } else { self.rel_rate };
+        self.env += (self.env_target - self.env) * rate;
         self.rng ^= self.rng << 13;
         self.rng ^= self.rng >> 17;
         self.rng ^= self.rng << 5;
@@ -256,7 +297,13 @@ impl Node for DriveExciter {
         self.hp_s += self.hp_a * (white - self.hp_s);
         let hp = white - self.hp_s;
         self.lp_s += self.lp_a * (hp - self.lp_s);
-        self.lp_s * self.level * self.atk
+        self.lp_s * self.level * self.env
+    }
+    fn control(&mut self, c: Control) {
+        // Key-up stops the breath, so the resonator rings out on its own.
+        if let Control::Gate(on) = c {
+            self.env_target = if on { 1.0 } else { 0.0 };
+        }
     }
 }
 
@@ -290,6 +337,9 @@ impl Node for FormantResonator {
     fn tick(&mut self, inputs: &[f32]) -> f32 {
         self.inner.tick(inputs)
     }
+    fn control(&mut self, c: Control) {
+        self.inner.control(c);
+    }
 }
 
 /// The simplest complete voice graph: a one-shot strike driving a modal
@@ -316,6 +366,9 @@ impl Node for StruckVoice {
     fn tick(&mut self, _inputs: &[f32]) -> f32 {
         let e = self.exciter.tick(&[]);
         self.resonator.tick(&[e])
+    }
+    fn control(&mut self, c: Control) {
+        self.resonator.control(c); // retune on bend
     }
 }
 
@@ -481,5 +534,30 @@ mod graph_tests {
             ratio(&bodied_y),
             ratio(&bare_y)
         );
+    }
+    #[test]
+    fn bend_retunes_a_mode() {
+        let sr = 48_000.0;
+        let mut bank = ModeBuffer::default();
+        bank.push(440.0, 1.0, 2.0);
+        let zcr = |y: &[f32]| y.windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count();
+        let mut base = StruckVoice::new(&bank, sr);
+        let a: Vec<f32> = (0..24_000).map(|_| base.tick(&[])).collect();
+        let mut up = StruckVoice::new(&bank, sr);
+        up.control(Control::Bend(2.0)); // an octave up
+        let b: Vec<f32> = (0..24_000).map(|_| up.tick(&[])).collect();
+        assert!(zcr(&b) > zcr(&a) * 3 / 2, "bend up raises pitch ({} vs {})", zcr(&b), zcr(&a));
+    }
+
+    #[test]
+    fn drive_stops_on_gate_off() {
+        let sr = 48_000.0;
+        let mut d = DriveExciter::new(1.0, 300.0, 3_000.0, sr);
+        for _ in 0..2_400 { d.tick(&[]); } // ramp up
+        let on: f32 = (0..2_400).map(|_| d.tick(&[]).abs()).sum::<f32>() / 2_400.0;
+        d.control(Control::Gate(false));
+        for _ in 0..4_800 { d.tick(&[]); } // ~30 ms release
+        let off: f32 = (0..2_400).map(|_| d.tick(&[]).abs()).sum::<f32>() / 2_400.0;
+        assert!(off < on * 0.1, "breath stops after key-up (on={on:.4} off={off:.4})");
     }
 }
