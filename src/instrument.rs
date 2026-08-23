@@ -84,6 +84,11 @@ struct Voice {
     noise_hp_s: f32,
     noise_lp_s: f32,
     rng: u32,
+    // Per-sample graph render path (`Some` = this voice renders through the
+    // voice graph instead of the mode bank). `graph_env` is an amplitude
+    // follower used to free the voice once it has rung out.
+    graph: Option<Box<dyn crate::graph::Node>>,
+    graph_env: f32,
 }
 
 impl Voice {
@@ -113,6 +118,8 @@ impl Voice {
             noise_hp_s: 0.0,
             noise_lp_s: 0.0,
             rng: 1,
+            graph: None,
+            graph_env: 0.0,
         }
     }
 }
@@ -253,7 +260,7 @@ impl Instrument {
             v.vel = vel;
         }
         self.build_voice(idx, true);
-        if self.voices[idx].n_modes == 0 {
+        if self.voices[idx].n_modes == 0 && self.voices[idx].graph.is_none() {
             self.voices[idx].active = false;
         }
     }
@@ -296,6 +303,9 @@ impl Instrument {
         };
         let mut buf = std::mem::take(&mut self.scratch);
         self.model.excite(f0, vel, sr, &mut buf);
+        // Graph instruments render their bank per-sample instead of as a free
+        // oscillator bank; build the per-voice graph before borrowing the voice.
+        let graph = self.model.build_graph(&buf, sr);
 
         let atk_ms = self.engine.attack_ms;
         let rel_ms = self.engine.release_ms;
@@ -310,6 +320,19 @@ impl Instrument {
         }
         v.atk_inc = 1.0 / (atk_ms * 0.001 * sr).max(1.0);
         v.rel_mul = (0.001f32).powf(1.0 / (rel_ms * 0.001 * sr).max(1.0));
+
+        // Per-sample graph path: this voice ticks the graph each sample; the
+        // mode-bank arrays below are unused. The voice gate (attack/release)
+        // still applies.
+        if graph.is_some() {
+            v.graph = graph;
+            v.graph_env = 0.0;
+            v.n_modes = 0;
+            v.noise_level = 0.0;
+            self.scratch = buf;
+            return;
+        }
+        v.graph = None;
 
         let n = buf.n.min(MAX_MODES);
         for i in 0..n {
@@ -387,6 +410,9 @@ impl Instrument {
 
     #[inline]
     fn render_voice(&mut self, vi: usize) -> f32 {
+        if self.voices[vi].graph.is_some() {
+            return self.render_graph_voice(vi);
+        }
         let n = self.voices[vi].n_modes;
         let mut acc = 0.0f32;
         for i in 0..n {
@@ -445,6 +471,39 @@ impl Instrument {
             }
         }
         acc * v.gate
+    }
+
+    /// Render one sample of a per-sample graph voice. The graph produces the raw
+    /// sample; the same attack/release gate and an amplitude-follower liveness
+    /// check (free the voice once it has rung out) apply as on the bank path.
+    /// (Pitch bend isn't applied to graph voices yet — struck instruments.)
+    #[inline]
+    fn render_graph_voice(&mut self, vi: usize) -> f32 {
+        let sr = self.sr;
+        let follow = (-1.0 / (0.05 * sr)).exp(); // ~50 ms amplitude follower
+        let v = &mut self.voices[vi];
+        let raw = v.graph.as_mut().expect("graph voice").tick(&[]);
+        v.elapsed += 1.0 / sr;
+        v.graph_env = raw.abs().max(v.graph_env * follow);
+        // Rung out? Keep a short grace period so a slow onset isn't cut.
+        let alive = v.graph_env > 1e-4 || v.elapsed < 0.05;
+        if v.releasing {
+            v.gate *= v.rel_mul;
+            if v.gate < 1e-4 {
+                v.active = false;
+            }
+        } else {
+            if v.gate < 1.0 {
+                v.gate += v.atk_inc;
+                if v.gate > 1.0 {
+                    v.gate = 1.0;
+                }
+            }
+            if !alive {
+                v.active = false;
+            }
+        }
+        raw * v.gate
     }
 }
 

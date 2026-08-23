@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::models::basic_wave::{BasicWave, Waveform};
 use crate::models::cymbal::Cymbal;
 use crate::models::drum_membrane::DrumMembrane;
+use crate::models::graph_voice::{GraphDrum, GraphPlate, GraphString};
 use crate::models::metal_bell::MetalBell;
 use crate::models::musical_string::MusicalString;
 use crate::models::pure_plate::PurePlate;
@@ -368,6 +369,14 @@ pub fn factory() -> Vec<Preset> {
             PurePlate { poisson: 0.30, decay_time: 8.0, hf_damp: 0.2, strike_pos: 0.45, modes: 120, key_tracks_pitch: true },
             eng(0.5, 1.0, 400.0),
         ),
+        // ---- Graph-rendered A/B versions (per-sample voice graph) ----
+        make(
+            "Plate (graph)",
+            GraphPlate { inner: PurePlate { poisson: 0.33, decay_time: 4.0, hf_damp: 0.5, strike_pos: 0.75, modes: 90, key_tracks_pitch: true } },
+            eng(0.5, 1.0, 250.0),
+        ),
+        make("String (graph)", GraphString::default(), eng(0.6, 3.0, 120.0)),
+        make("Drum (graph)", GraphDrum::default(), eng(0.7, 1.0, 200.0)),
         // ---- Basic Wave (reference oscillators) ----
         make("Triangle Lead", BasicWave { waveform: Waveform::Triangle, harmonics: 16, decay_time: 1.5 }, eng(0.5, 3.0, 120.0)),
         make("Saw Lead", BasicWave { waveform: Waveform::Saw, harmonics: 40, decay_time: 1.2 }, eng(0.45, 3.0, 120.0)),

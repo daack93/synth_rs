@@ -23,6 +23,7 @@ pub mod pure_plate;
 pub mod pure_string;
 pub mod snare;
 pub mod webster_horn;
+pub mod graph_voice;
 
 /// Maximum partials a single voice can hold (hard array bound).
 pub const MAX_MODES: usize = 512;
@@ -169,6 +170,19 @@ pub trait FtmModel: Send {
 
     /// Serialize this model's parameters (for presets).
     fn to_json(&self) -> serde_json::Value;
+
+    /// If this model renders through the **per-sample voice graph**, build the
+    /// graph for one note from its just-computed mode `bank`. Returning `None`
+    /// (the default) means "render via the classic free-oscillator mode bank" —
+    /// so every existing model is unchanged. The graph instruments override this
+    /// to run their modes as driven resonators instead.
+    fn build_graph(
+        &self,
+        _bank: &ModeBuffer,
+        _sr: f32,
+    ) -> Option<Box<dyn crate::graph::Node>> {
+        None
+    }
 }
 
 /// Rebuild a model from its `id` and serialized parameters (the inverse of
@@ -193,6 +207,9 @@ pub fn model_from_id(id: &str, params: &serde_json::Value) -> Option<Box<dyn Ftm
         "snare" => boxed::<snare::Snare>(params),
         "cymbal" => boxed::<cymbal::Cymbal>(params),
         "pure_plate" => boxed::<pure_plate::PurePlate>(params),
+        "graph_string" => boxed::<graph_voice::GraphString>(params),
+        "graph_plate" => boxed::<graph_voice::GraphPlate>(params),
+        "graph_drum" => boxed::<graph_voice::GraphDrum>(params),
         _ => None,
     }
 }
@@ -214,6 +231,9 @@ pub fn registry() -> Vec<Box<dyn FtmModel>> {
         Box::new(snare::Snare::default()),
         Box::new(cymbal::Cymbal::default()),
         Box::new(pure_plate::PurePlate::default()),
+        Box::new(graph_voice::GraphString::default()),
+        Box::new(graph_voice::GraphPlate::default()),
+        Box::new(graph_voice::GraphDrum::default()),
         Box::new(basic_wave::BasicWave::default()),
     ]
 }

@@ -75,10 +75,6 @@ impl ModalResonator {
             .collect();
         ModalResonator { modes }
     }
-
-    pub fn mode_count(&self) -> usize {
-        self.modes.len()
-    }
 }
 
 impl Node for ModalResonator {
@@ -115,6 +111,33 @@ impl Node for ImpulseExciter {
             self.fired = true;
             self.amp
         }
+    }
+}
+
+/// The simplest complete voice graph: a one-shot strike driving a modal
+/// resonator. This is what the struck graph instruments play per note —
+/// `ImpulseExciter → ModalResonator`.
+pub struct StruckVoice {
+    exciter: ImpulseExciter,
+    resonator: ModalResonator,
+}
+
+impl StruckVoice {
+    /// Build from a model's mode bank (velocity is already baked into the bank's
+    /// amplitudes, so the strike impulse is unit).
+    pub fn new(bank: &ModeBuffer, sr: f32) -> Self {
+        StruckVoice {
+            exciter: ImpulseExciter::new(1.0),
+            resonator: ModalResonator::from_bank(bank, sr),
+        }
+    }
+}
+
+impl Node for StruckVoice {
+    #[inline]
+    fn tick(&mut self, _inputs: &[f32]) -> f32 {
+        let e = self.exciter.tick(&[]);
+        self.resonator.tick(&[e])
     }
 }
 
