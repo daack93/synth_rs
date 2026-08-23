@@ -237,6 +237,297 @@ pub fn factory() -> Vec<Preset> {
             },
             eng(0.5, 20.0, 200.0),
         ),
+        // ---- Self-oscillating reed into a bore (feedback graph) ----
+        make(
+            "Reed (graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Reed { pressure: 0.6, stiffness: 1.5 },
+                    Comp::Horn(WebsterHorn {
+                        boundary: Boundary::Brass,
+                        r1: 0.0073,
+                        r2: 0.0,
+                        r3: 0.002,
+                        length: 0.66,
+                        blow_pos: 0.0,
+                        depth: 18,
+                        resolution: 300,
+                        damping: 4.0,
+                        freq_dep_damping: -0.08,
+                        visco_loss: 0.8,
+                        radiation: 0.6,
+                        ..WebsterHorn::default()
+                    }),
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 0.12 }, // reed drives the bore
+                    Edge { from: 1, to: 0, gain: 0.4 },  // bore pressure feeds back to the reed
+                    Edge { from: 1, to: 2, gain: 1.0 },  // bore → out
+                ],
+                output: 2,
+                key_map: Vec::new(),
+            },
+            eng(0.5, 20.0, 200.0),
+        ),
+        // ============================================================
+        //  InstrumentGraph showcase — instruments built purely as a graph
+        //  of exciter + resonator components, with secondary resonators
+        //  (bodies/soundboards/shells/tract) and physical drivers
+        //  (strike / breath / reed·lip). A/B against the classic models.
+        // ============================================================
+        // -- Plucked string + resonating body/soundboard --
+        make(
+            "Acoustic Bass + Body (graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Strike,
+                    Comp::String(string(1.5, 5.0, -5.0, 6.0, 24, 0.15)),
+                    Comp::Body { ring: 1.4, tone: 0.7 }, // big, low, boomy body
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                    Edge { from: 1, to: 3, gain: 1.0 },  // dry string
+                    Edge { from: 2, to: 3, gain: 0.06 }, // body colour
+                ],
+                output: 3,
+                key_map: Vec::new(),
+            },
+            eng(0.75, 4.0, 120.0),
+        ),
+        make(
+            "Piano + Board (graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Strike,
+                    Comp::String(string(6.0, 3.0, -1.8, 12.0, 36, 0.12)),
+                    Comp::Body { ring: 1.6, tone: 1.3 }, // bright, long soundboard
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                    Edge { from: 1, to: 3, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.05 },
+                ],
+                output: 3,
+                key_map: Vec::new(),
+            },
+            eng(0.6, 2.0, 150.0),
+        ),
+        // Banjo: the "body" is literally a drumhead (the pot) — string → membrane.
+        make(
+            "Banjo + Head (graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Strike,
+                    Comp::String(string(3.0, 13.0, -6.0, 20.0, 36, 0.08)),
+                    Comp::Membrane(DrumMembrane { prop_speed: 700.0, stiffness: 0.3, damping: 18.0, freq_dep_damping: -3.0, radius: 5.0, depth: 20, strike_pos: 0.5, key_tracks_pitch: true, ..DrumMembrane::default() }),
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 1, to: 2, gain: 1.0 },  // bridge drives the head
+                    Edge { from: 1, to: 3, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.12 }, // head resonance
+                ],
+                output: 3,
+                key_map: Vec::new(),
+            },
+            eng(0.6, 2.0, 80.0),
+        ),
+        // -- Musical string + body --
+        make(
+            "Nylon + Body (graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Strike,
+                    Comp::MusicalString(MusicalString { pluck_pos: 0.14, inharmonicity: 0.0004, decay_time: 1.6, hf_damping: 1.4, num_modes: 32 }),
+                    Comp::Body { ring: 1.2, tone: 0.9 },
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                    Edge { from: 1, to: 3, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.06 },
+                ],
+                output: 3,
+                key_map: Vec::new(),
+            },
+            eng(0.6, 3.0, 130.0),
+        ),
+        // -- Drum + shell body --
+        make(
+            "Tom + Shell (graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Strike,
+                    Comp::Membrane(DrumMembrane { strike_pos: 0.5, damping: 9.0, freq_dep_damping: -3.5, radius: 10.0, depth: 40, stiffness: 0.5, ..DrumMembrane::default() }),
+                    Comp::Body { ring: 0.5, tone: 0.6 }, // short, low shell
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                    Edge { from: 1, to: 3, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.08 },
+                ],
+                output: 3,
+                key_map: Vec::new(),
+            },
+            eng(0.7, 1.0, 90.0),
+        ),
+        // -- Idiophones (struck metal) --
+        make(
+            "Cowbell (graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Strike,
+                    Comp::Bell(MetalBell { partials: 3, spread: 0.48, inharmonicity: 0.06, brightness: 0.4, decay_time: 0.35, strike_noise: 0.3, key_tracks_pitch: true }),
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                ],
+                output: 2,
+                key_map: Vec::new(),
+            },
+            eng(0.6, 1.0, 40.0),
+        ),
+        make(
+            "Crash (graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Strike,
+                    Comp::Cymbal(Cymbal { size: 17.0, stiffness: 9.0, damping: 1.0, brightness: -0.5, strike_pos: 0.8, modes: 160, shimmer: 0.4, key_tracks_pitch: true }),
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                ],
+                output: 2,
+                key_map: Vec::new(),
+            },
+            eng(0.5, 1.0, 300.0),
+        ),
+        // -- Winds: breath jet into an air column --
+        make(
+            "Flute (graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Breath { level: 0.12, tone: 1.2 },
+                    Comp::Horn(WebsterHorn { boundary: Boundary::Open, r1: 0.0095, r2: 0.0, r3: 0.001, length: 0.6, blow_pos: 0.15, depth: 12, resolution: 300, damping: 3.0, freq_dep_damping: -0.10, visco_loss: 0.3, radiation: 0.5, ..WebsterHorn::default() }),
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                ],
+                output: 2,
+                key_map: Vec::new(),
+            },
+            eng(0.55, 40.0, 80.0),
+        ),
+        // Didgeridoo: breath drone into a long bore, coloured by a vocal-tract body.
+        make(
+            "Didgeridoo (graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Breath { level: 0.2, tone: 0.6 },
+                    Comp::Horn(WebsterHorn { boundary: Boundary::Open, blow_pos: 0.10, r2: 0.5, r3: 0.5, length: 3.0, damping: 0.6, freq_dep_damping: -0.03, visco_loss: 0.6, radiation: 0.15, depth: 20, ..WebsterHorn::default() }),
+                    Comp::Body { ring: 0.8, tone: 1.0 }, // vocal-tract "wah"
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 1, to: 2, gain: 1.0 },  // bore → tract
+                    Edge { from: 1, to: 3, gain: 1.0 },  // dry bore
+                    Edge { from: 2, to: 3, gain: 0.15 }, // tract colour
+                ],
+                output: 3,
+                key_map: Vec::new(),
+            },
+            eng(0.6, 20.0, 400.0),
+        ),
+        // -- Reeds: a self-oscillating reed driving its bore (feedback loop) --
+        make(
+            "Clarinet (graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Reed { pressure: 0.6, stiffness: 1.5 },
+                    Comp::Horn(WebsterHorn { boundary: Boundary::Brass, r1: 0.0073, r2: 0.0, r3: 0.002, length: 0.66, blow_pos: 0.0, depth: 18, resolution: 300, damping: 4.0, freq_dep_damping: -0.08, visco_loss: 0.8, radiation: 0.6, ..WebsterHorn::default() }),
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 0.12 },
+                    Edge { from: 1, to: 0, gain: 0.4 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                ],
+                output: 2,
+                key_map: Vec::new(),
+            },
+            eng(0.5, 20.0, 70.0),
+        ),
+        make(
+            "Alto Sax (graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Reed { pressure: 0.7, stiffness: 1.3 },
+                    Comp::Horn(WebsterHorn { boundary: Boundary::Brass, r1: 0.005, r2: 0.030, r3: 0.002, length: 1.0, blow_pos: 0.0, depth: 28, resolution: 400, damping: 5.0, freq_dep_damping: -0.08, visco_loss: 1.0, radiation: 1.2, wavefront: Wavefront::Spherical, ..WebsterHorn::default() }),
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 0.12 },
+                    Edge { from: 1, to: 0, gain: 0.4 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                ],
+                output: 2,
+                key_map: Vec::new(),
+            },
+            eng(0.55, 25.0, 80.0),
+        ),
+        // -- Brass: buzzing lips (a reed) driving a flaring bore (feedback loop) --
+        make(
+            "Trumpet (graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Reed { pressure: 0.8, stiffness: 1.1 }, // buzzing lips
+                    Comp::Horn(WebsterHorn { boundary: Boundary::Brass, r1: 0.0058, r2: 0.0150, r3: 0.1550, length: 0.6, blow_pos: 0.0, depth: 32, resolution: 512, damping: 10.0, freq_dep_damping: -0.08, visco_loss: 1.5, radiation: 1.6, wavefront: Wavefront::Spherical, ..WebsterHorn::default() }),
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 0.15 },
+                    Edge { from: 1, to: 0, gain: 0.4 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                ],
+                output: 2,
+                key_map: Vec::new(),
+            },
+            eng(0.6, 30.0, 45.0),
+        ),
+        make(
+            "Trombone (graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Reed { pressure: 0.8, stiffness: 1.1 },
+                    Comp::Horn(WebsterHorn { boundary: Boundary::Brass, r1: 0.0067, r2: 0.0220, r3: 0.1450, length: 0.8, blow_pos: 0.0, depth: 30, resolution: 400, damping: 8.0, freq_dep_damping: -0.08, visco_loss: 1.8, radiation: 1.4, wavefront: Wavefront::Spherical, ..WebsterHorn::default() }),
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 0.14 },
+                    Edge { from: 1, to: 0, gain: 0.4 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                ],
+                output: 2,
+                key_map: Vec::new(),
+            },
+            eng(0.6, 25.0, 60.0),
+        ),
         // ---- Bowed strings (driven → sustain; bow near the bridge = bright/saw) ----
         make("Violin", bowed(0.5, 2.5, -1.2, 4.0, 44, 0.12), eng(0.55, 60.0, 150.0)),
         make("Viola", bowed(0.6, 2.5, -1.5, 5.0, 40, 0.14), eng(0.55, 65.0, 160.0)),
@@ -629,6 +920,31 @@ mod graph_twin_tests {
         assert_eq!(g.model_id, "graph_string");
         assert!(g.params.get("inner").is_some(), "params re-homed under inner");
         assert!(g.build_model().is_some(), "twin rebuilds via model_from_id");
+    }
+
+    #[test]
+    fn every_instrument_graph_preset_renders_stably() {
+        let sr = 48_000.0;
+        let mut checked = 0;
+        for p in factory() {
+            if p.model_id != "instrument_graph" {
+                continue;
+            }
+            let m = p.build_model().unwrap_or_else(|| panic!("{} rebuilds", p.name));
+            let mut n = m
+                .build_graph(220.0, 1.0, sr)
+                .unwrap_or_else(|| panic!("{} builds a graph", p.name));
+            let mut worst = 0.0f32;
+            for _ in 0..sr as usize {
+                let y = n.tick(&[]);
+                assert!(y.is_finite(), "{} produced non-finite output", p.name);
+                worst = worst.max(y.abs());
+            }
+            // tanh-bounded loops + damped modal drives must stay well-behaved.
+            assert!(worst < 20.0, "{} blew up to {}", p.name, worst);
+            checked += 1;
+        }
+        assert!(checked >= 15, "expected the graph showcase presets, saw {checked}");
     }
 }
 

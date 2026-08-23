@@ -307,6 +307,52 @@ impl Node for DriveExciter {
     }
 }
 
+/// A self-oscillating reed/lip — a nonlinear exciter that reads the resonator's
+/// pressure back (a feedback edge) and produces flow through a reed valve. Wired
+/// `Reed → Resonator` and `Resonator → Reed`, the nonlinearity + the resonator's
+/// feedback form a limit cycle: it oscillates on its own (a reed/brass tone)
+/// rather than just ringing a struck/breathed resonance. `tanh` bounds the loop.
+pub struct ReedExciter {
+    pressure: f32,
+    stiffness: f32,
+    env: f32,
+    env_target: f32,
+    atk_rate: f32,
+    rel_rate: f32,
+}
+
+impl ReedExciter {
+    pub fn new(pressure: f32, stiffness: f32, sr: f32) -> Self {
+        ReedExciter {
+            pressure,
+            stiffness,
+            env: 0.0,
+            env_target: 1.0,
+            atk_rate: 1.0 - (-1.0 / (0.02 * sr)).exp(), // ~20 ms onset
+            rel_rate: 1.0 - (-1.0 / (0.03 * sr)).exp(),
+        }
+    }
+}
+
+impl Node for ReedExciter {
+    #[inline]
+    fn tick(&mut self, inputs: &[f32]) -> f32 {
+        let rate = if self.env < self.env_target { self.atk_rate } else { self.rel_rate };
+        self.env += (self.env_target - self.env) * rate;
+        let bore: f32 = inputs.iter().sum(); // resonator pressure fed back
+        let p = self.pressure * self.env; // gated mouth pressure
+        let delta = p - bore; // pressure across the reed
+        // Reed opening closes as the pressure difference rises (nonlinear valve).
+        let opening = (1.0 - self.stiffness * delta).clamp(0.0, 1.0);
+        (delta * opening).tanh() // flow into the bore, bounded
+    }
+    fn control(&mut self, c: Control) {
+        if let Control::Gate(on) = c {
+            self.env_target = if on { 1.0 } else { 0.0 };
+        }
+    }
+}
+
 /// A passthrough mixer: outputs the (already edge-scaled) sum of its inputs.
 /// Used as a graph's output node so several components (e.g. a dry primary and a
 /// wet body) can be blended by their edge gains.

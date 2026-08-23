@@ -12,14 +12,17 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::cymbal::Cymbal;
 use super::drum_membrane::DrumMembrane;
+use super::metal_bell::MetalBell;
+use super::musical_string::MusicalString;
 use super::pure_plate::PurePlate;
 use super::pure_string::PureString;
 use super::webster_horn::WebsterHorn;
 use super::{unbounded_slider, FtmModel, ModeBuffer};
 use crate::graph::{
-    DriveExciter, FormantResonator, Graph, ImpulseExciter, ModalResonator, Node, SnareWires,
-    Sum,
+    DriveExciter, FormantResonator, Graph, ImpulseExciter, ModalResonator, Node, ReedExciter,
+    SnareWires, Sum,
 };
 
 /// One node in an instrument graph. Each variant is a physics component with
@@ -35,6 +38,12 @@ pub enum Comp {
     Membrane(DrumMembrane),
     /// A free-plate resonator.
     Plate(PurePlate),
+    /// A music-friendly plucked string (inharmonicity + decay controls).
+    MusicalString(MusicalString),
+    /// A struck metal bell / cowbell resonator.
+    Bell(MetalBell),
+    /// A struck cymbal / gong plate resonator (dense inharmonic modes).
+    Cymbal(Cymbal),
     /// A body / oral-cavity resonator: fixed formants, `ring` = how long it
     /// rings, `tone` = formant-frequency scale.
     Body { ring: f32, tone: f32 },
@@ -43,6 +52,8 @@ pub enum Comp {
     Wires { level: f32, tone: f32 },
     /// A continuous breath drive (band-passed noise) — sustains a resonator.
     Breath { level: f32, tone: f32 },
+    /// A self-oscillating reed/lip (needs a feedback edge from its resonator).
+    Reed { pressure: f32, stiffness: f32 },
     /// A flaring air column (Webster horn) resonator.
     Horn(WebsterHorn),
     /// A mixer / output node: the (edge-scaled) sum of its inputs.
@@ -56,9 +67,13 @@ impl Comp {
             Comp::String(_) => "String (resonator)",
             Comp::Membrane(_) => "Membrane (resonator)",
             Comp::Plate(_) => "Plate (resonator)",
+            Comp::MusicalString(_) => "Musical string (resonator)",
+            Comp::Bell(_) => "Bell / cowbell (resonator)",
+            Comp::Cymbal(_) => "Cymbal / gong (resonator)",
             Comp::Body { .. } => "Body (resonator)",
             Comp::Wires { .. } => "Snare wires",
             Comp::Breath { .. } => "Breath (exciter)",
+            Comp::Reed { .. } => "Reed / lip (exciter)",
             Comp::Horn(_) => "Air column (resonator)",
             Comp::Mix => "Mix / output",
         }
@@ -77,6 +92,9 @@ impl Comp {
             Comp::String(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
             Comp::Membrane(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
             Comp::Plate(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
+            Comp::MusicalString(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
+            Comp::Bell(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
+            Comp::Cymbal(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
             Comp::Body { ring, tone } => {
                 Box::new(FormantResonator::new(&body_bank(*ring, *tone), sr))
             }
@@ -89,6 +107,7 @@ impl Comp {
                 Box::new(DriveExciter::new(*level, 300.0 * t, 3_000.0 * t, sr))
             }
             Comp::Horn(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
+            Comp::Reed { pressure, stiffness } => Box::new(ReedExciter::new(*pressure, *stiffness, sr)),
             Comp::Mix => Box::new(Sum),
         }
     }
@@ -106,6 +125,9 @@ impl Comp {
             Comp::String(m) => m.params_ui(ui),
             Comp::Membrane(m) => m.params_ui(ui),
             Comp::Plate(m) => m.params_ui(ui),
+            Comp::MusicalString(m) => m.params_ui(ui),
+            Comp::Bell(m) => m.params_ui(ui),
+            Comp::Cymbal(m) => m.params_ui(ui),
             Comp::Body { ring, tone } => {
                 let mut c = false;
                 c |= ui
@@ -131,6 +153,12 @@ impl Comp {
                 c
             }
             Comp::Horn(m) => m.params_ui(ui),
+            Comp::Reed { pressure, stiffness } => {
+                let mut c = false;
+                c |= ui.add(unbounded_slider(pressure, 0.0..=2.0, "Mouth pressure")).changed();
+                c |= ui.add(unbounded_slider(stiffness, 0.0..=3.0, "Reed stiffness")).changed();
+                c
+            }
             Comp::Mix => {
                 ui.label(egui::RichText::new("Sums its inputs (see edge strengths).").weak().small());
                 false
@@ -160,7 +188,8 @@ impl Comp {
             Comp::Plate(_) => &["ring"],
             Comp::Body { .. } => &["ring", "tone"],
             Comp::Horn(_) => &["length"],
-            Comp::Strike | Comp::Mix | Comp::Wires { .. } | Comp::Breath { .. } => &[],
+            Comp::MusicalString(_) | Comp::Bell(_) | Comp::Cymbal(_) | Comp::Strike | Comp::Mix
+            | Comp::Wires { .. } | Comp::Breath { .. } | Comp::Reed { .. } => &[],
         }
     }
 
@@ -301,6 +330,9 @@ impl FtmModel for InstrumentGraph {
                 Comp::String(m) => return m.excite(freq_hz, vel, sr, out),
                 Comp::Membrane(m) => return m.excite(freq_hz, vel, sr, out),
                 Comp::Plate(m) => return m.excite(freq_hz, vel, sr, out),
+                Comp::MusicalString(m) => return m.excite(freq_hz, vel, sr, out),
+                Comp::Bell(m) => return m.excite(freq_hz, vel, sr, out),
+                Comp::Cymbal(m) => return m.excite(freq_hz, vel, sr, out),
                 Comp::Horn(m) => return m.excite(freq_hz, vel, sr, out),
                 _ => {}
             }
@@ -376,8 +408,36 @@ impl FtmModel for InstrumentGraph {
                 self.components.push(Comp::Plate(PurePlate::default()));
                 changed = true;
             }
+            if ui.small_button("Musical string").clicked() {
+                self.components.push(Comp::MusicalString(MusicalString::default()));
+                changed = true;
+            }
+            if ui.small_button("Bell").clicked() {
+                self.components.push(Comp::Bell(MetalBell::default()));
+                changed = true;
+            }
+            if ui.small_button("Cymbal").clicked() {
+                self.components.push(Comp::Cymbal(Cymbal::default()));
+                changed = true;
+            }
             if ui.small_button("Body").clicked() {
                 self.components.push(Comp::Body { ring: 1.0, tone: 1.0 });
+                changed = true;
+            }
+            if ui.small_button("Wires").clicked() {
+                self.components.push(Comp::Wires { level: 0.6, tone: 1.0 });
+                changed = true;
+            }
+            if ui.small_button("Breath").clicked() {
+                self.components.push(Comp::Breath { level: 0.15, tone: 1.0 });
+                changed = true;
+            }
+            if ui.small_button("Reed / lip").clicked() {
+                self.components.push(Comp::Reed { pressure: 0.6, stiffness: 1.5 });
+                changed = true;
+            }
+            if ui.small_button("Air column").clicked() {
+                self.components.push(Comp::Horn(WebsterHorn::default()));
                 changed = true;
             }
             if ui.small_button("Mix").clicked() {
@@ -657,5 +717,31 @@ mod tests {
         let early = rms(&y[4_800..9_600]); // 0.1–0.2 s
         let late = rms(&y[38_400..43_200]); // 0.8–0.9 s
         assert!(late > early * 0.5, "driven voice sustains (early={early:.4} late={late:.4})");
+    }
+    #[test]
+    fn reed_feedback_is_stable_and_sounds() {
+        use crate::models::webster_horn::{Boundary, WebsterHorn};
+        let sr = 48_000.0;
+        let g = InstrumentGraph {
+            components: vec![
+                Comp::Reed { pressure: 0.6, stiffness: 1.5 },
+                Comp::Horn(WebsterHorn { boundary: Boundary::Brass, r1: 0.0073, r3: 0.002, length: 0.66, depth: 18, resolution: 300, damping: 4.0, ..WebsterHorn::default() }),
+                Comp::Mix,
+            ],
+            edges: vec![
+                Edge { from: 0, to: 1, gain: 0.12 },
+                Edge { from: 1, to: 0, gain: 0.4 },
+                Edge { from: 1, to: 2, gain: 1.0 },
+            ],
+            output: 2,
+            key_map: Vec::new(),
+        };
+        let mut n = g.build_graph(220.0, 1.0, sr).unwrap();
+        let y: Vec<f32> = (0..48_000).map(|_| n.tick(&[])).collect();
+        // The reed's tanh nonlinearity must bound the feedback loop (a real reed clips).
+        assert!(y.iter().all(|v| v.is_finite() && v.abs() < 10.0), "reed loop is stable");
+        let rms = |a: &[f32]| (a.iter().map(|v| v * v).sum::<f32>() / a.len() as f32).sqrt();
+        eprintln!("REED rms(settled) = {}", rms(&y[24_000..48_000]));
+        assert!(rms(&y[24_000..48_000]) > 1e-4, "reed drives the bore (makes sound)");
     }
 }
