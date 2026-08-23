@@ -192,8 +192,8 @@ pub fn factory() -> Vec<Preset> {
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
-                    Comp::Membrane(DrumMembrane { prop_speed: 700.0, stiffness: 0.3, damping: 12.0, freq_dep_damping: -3.0, radius: 7.0, depth: 24, strike_pos: 0.4, key_tracks_pitch: true, ..DrumMembrane::default() }),
-                    Comp::Membrane(DrumMembrane { prop_speed: 520.0, stiffness: 0.2, damping: 20.0, freq_dep_damping: -3.5, radius: 7.0, depth: 20, strike_pos: 0.5, key_tracks_pitch: true, ..DrumMembrane::default() }),
+                    Comp::Membrane(DrumMembrane { radius_m: 0.165, tension_nm: 2000.0, areal_density_kgm2: 0.26, bending_nm: 0.02, decay_time: 0.18, hf_damping: 6.0, num_modes: 24, strike_pos: 0.4, ..DrumMembrane::default() }),
+                    Comp::Membrane(DrumMembrane { radius_m: 0.165, tension_nm: 2600.0, areal_density_kgm2: 0.24, bending_nm: 0.02, decay_time: 0.12, hf_damping: 7.0, num_modes: 20, strike_pos: 0.5, ..DrumMembrane::default() }),
                     Comp::Wires { level: 0.6, tone: 1.0 },
                     Comp::Mix,
                 ],
@@ -330,7 +330,7 @@ pub fn factory() -> Vec<Preset> {
                 components: vec![
                     Comp::Strike,
                     Comp::String(string(0.670, 55.0, 0.40, STEEL, 0.8, 1.2, 0.08)),
-                    Comp::Membrane(DrumMembrane { prop_speed: 700.0, stiffness: 0.3, damping: 18.0, freq_dep_damping: -3.0, radius: 5.0, depth: 20, strike_pos: 0.5, key_tracks_pitch: true, ..DrumMembrane::default() }),
+                    Comp::Membrane(DrumMembrane { radius_m: 0.14, tension_nm: 3200.0, areal_density_kgm2: 0.22, bending_nm: 0.02, decay_time: 0.15, hf_damping: 8.0, num_modes: 20, strike_pos: 0.5, ..DrumMembrane::default() }),
                     Comp::Mix,
                 ],
                 edges: vec![
@@ -371,7 +371,7 @@ pub fn factory() -> Vec<Preset> {
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
-                    Comp::Membrane(DrumMembrane { strike_pos: 0.5, damping: 9.0, freq_dep_damping: -3.5, radius: 10.0, depth: 40, stiffness: 0.5, ..DrumMembrane::default() }),
+                    Comp::Membrane(DrumMembrane { radius_m: 0.165, tension_nm: 1500.0, areal_density_kgm2: 0.26, bending_nm: 0.0, decay_time: 0.4, hf_damping: 4.0, num_modes: 32, strike_pos: 0.5, ..DrumMembrane::default() }),
                     Comp::Body { cavity_litres: 6.0, soundhole_cm: 12.0, top_hz: 90.0, decay_s: 0.10 }, // shell air
                     Comp::Mix,
                 ],
@@ -553,17 +553,17 @@ pub fn factory() -> Vec<Preset> {
         // ---- Drum (2D membrane) ----
         make(
             "Tom",
-            DrumMembrane { strike_pos: 0.5, damping: 9.0, freq_dep_damping: -3.5, radius: 10.0, depth: 40, stiffness: 0.5, ..DrumMembrane::default() },
+            DrumMembrane { radius_m: 0.165, tension_nm: 1500.0, areal_density_kgm2: 0.26, bending_nm: 0.0, decay_time: 0.4, hf_damping: 4.0, num_modes: 32, strike_pos: 0.5, ..DrumMembrane::default() },
             eng(0.7, 1.0, 90.0),
         ),
         make(
             "Kick",
-            DrumMembrane { strike_pos: 0.35, damping: 28.0, freq_dep_damping: -4.0, radius: 14.0, depth: 28, stiffness: 0.2, ..DrumMembrane::default() },
+            DrumMembrane { radius_m: 0.28, tension_nm: 800.0, areal_density_kgm2: 0.42, bending_nm: 0.0, decay_time: 0.18, hf_damping: 5.0, num_modes: 24, strike_pos: 0.35, ..DrumMembrane::default() },
             eng(0.85, 1.0, 60.0),
         ),
         make(
             "Timpani",
-            DrumMembrane { strike_pos: 0.7, damping: 2.5, freq_dep_damping: -1.5, radius: 9.0, depth: 48, stiffness: 1.0, ..DrumMembrane::default() },
+            DrumMembrane { radius_m: 0.32, tension_nm: 2500.0, areal_density_kgm2: 0.3, bending_nm: 0.0, decay_time: 1.4, hf_damping: 1.5, num_modes: 48, strike_pos: 0.25, ..DrumMembrane::default() },
             eng(0.6, 2.0, 200.0),
         ),
         // ---- Webster Horn ----
@@ -870,7 +870,7 @@ pub fn factory() -> Vec<Preset> {
                 components: vec![
                     Comp::Strike,
                     Comp::String(PureString { length_m: 0.67, tension_n: 55.0, diameter_mm: 0.23, density_kgm3: 7850.0, youngs_gpa: 210.0, pluck_pos: 0.1, decay_time: 1.2, hf_damping: 0.05, num_modes: 30, ..PureString::default() }),
-                    Comp::Membrane(DrumMembrane { prop_speed: 280.0, stiffness: 0.05, damping: 0.008, freq_dep_damping: 0.01, radius: 0.14, strike_pos: 0.0, depth: 15, damp_period: 1.0, time_scale: 1.0, ..DrumMembrane::default() }),
+                    Comp::Membrane(DrumMembrane { radius_m: 0.14, tension_nm: 3200.0, areal_density_kgm2: 0.22, bending_nm: 0.02, decay_time: 0.15, hf_damping: 8.0, num_modes: 20, strike_pos: 0.5, ..DrumMembrane::default() }),
                     Comp::Mix,
                 ],
                 edges: vec![
@@ -1135,7 +1135,7 @@ pub fn factory() -> Vec<Preset> {
             InstrumentGraph {
                 components: vec![
                     Comp::Hammer { hardness: 0.2, felt: 3.2 },
-                    Comp::Membrane(DrumMembrane { prop_speed: 95.0, stiffness: 0.0, damping: 0.04, freq_dep_damping: 0.06, radius: 0.28, strike_pos: 0.35, depth: 20, damp_period: 1.0, time_scale: 1.0, ..DrumMembrane::default() }),
+                    Comp::Membrane(DrumMembrane { radius_m: 0.28, tension_nm: 800.0, areal_density_kgm2: 0.42, bending_nm: 0.0, decay_time: 0.18, hf_damping: 5.0, num_modes: 24, strike_pos: 0.35, ..DrumMembrane::default() }),
                     Comp::Body { cavity_litres: 140.0, soundhole_cm: 12.0, top_hz: 52.0, decay_s: 0.18 },
                     Comp::Mix,
                 ],
@@ -1155,7 +1155,7 @@ pub fn factory() -> Vec<Preset> {
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
-                    Comp::Membrane(DrumMembrane { prop_speed: 140.0, stiffness: 0.01, damping: 0.015, freq_dep_damping: 0.02, radius: 0.16, strike_pos: 0.45, depth: 25, damp_period: 1.0, time_scale: 1.0, ..DrumMembrane::default() }),
+                    Comp::Membrane(DrumMembrane { radius_m: 0.165, tension_nm: 1500.0, areal_density_kgm2: 0.26, bending_nm: 0.0, decay_time: 0.4, hf_damping: 4.0, num_modes: 32, strike_pos: 0.45, ..DrumMembrane::default() }),
                     Comp::Body { cavity_litres: 22.0, soundhole_cm: 0.0, top_hz: 110.0, decay_s: 0.35 },
                     Comp::Mix,
                 ],
@@ -1175,7 +1175,7 @@ pub fn factory() -> Vec<Preset> {
             InstrumentGraph {
                 components: vec![
                     Comp::Hammer { hardness: 0.25, felt: 2.8 },
-                    Comp::Membrane(DrumMembrane { prop_speed: 112.0, stiffness: 0.0, damping: 0.005, freq_dep_damping: 0.003, radius: 0.36, strike_pos: 0.25, depth: 40, damp_period: 1.0, time_scale: 1.0, ..DrumMembrane::default() }),
+                    Comp::Membrane(DrumMembrane { radius_m: 0.32, tension_nm: 2500.0, areal_density_kgm2: 0.3, bending_nm: 0.0, decay_time: 1.4, hf_damping: 1.5, num_modes: 48, strike_pos: 0.25, ..DrumMembrane::default() }),
                     Comp::Body { cavity_litres: 240.0, soundhole_cm: 0.0, top_hz: 98.0, decay_s: 1.4 },
                     Comp::Mix,
                 ],
@@ -1194,7 +1194,7 @@ pub fn factory() -> Vec<Preset> {
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
-                    Comp::Membrane(DrumMembrane { prop_speed: 210.0, stiffness: 0.02, damping: 0.025, freq_dep_damping: 0.03, radius: 0.17, strike_pos: 0.3, depth: 30, damp_period: 1.0, time_scale: 1.0, ..DrumMembrane::default() }),
+                    Comp::Membrane(DrumMembrane { radius_m: 0.165, tension_nm: 2000.0, areal_density_kgm2: 0.26, bending_nm: 0.02, decay_time: 0.18, hf_damping: 6.0, num_modes: 30, strike_pos: 0.3, ..DrumMembrane::default() }),
                     Comp::Wires { level: 0.85, tone: 1.2 },
                     Comp::Mix,
                 ],
@@ -1787,6 +1787,7 @@ mod tests {
         assert!(!file_stem("a/b\\c").contains(['/', '\\']));
     }
 }
+
 
 
 

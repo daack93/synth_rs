@@ -63,14 +63,14 @@ impl FtmModel for Snare {
     fn excite(&self, freq_hz: f32, vel: f32, sr: f32, out: &mut ModeBuffer) {
         // Build the head from a small, damped membrane (clears `out`).
         let head = DrumMembrane {
-            prop_speed: self.tension,
-            stiffness: 0.3,
-            damping: self.damping,
-            freq_dep_damping: -3.0,
-            radius: 7.0,
-            depth: self.depth,
+            radius_m: 0.165, // 14" snare head
+            tension_nm: (self.tension * 2.5).max(100.0), // "tension" knob → N/m
+            areal_density_kgm2: 0.26,
+            bending_nm: 0.02,
+            decay_time: (2.0 / self.damping.max(0.1)).clamp(0.05, 2.0),
+            hf_damping: 5.0,
+            num_modes: self.depth,
             strike_pos: self.strike_pos,
-            key_tracks_pitch: self.key_tracks_pitch,
             ..DrumMembrane::default()
         };
         head.excite(freq_hz, vel, sr, out);

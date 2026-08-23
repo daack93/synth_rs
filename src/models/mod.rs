@@ -39,24 +39,6 @@ pub const TICK_RATE: f32 = 10_000.0;
 #[allow(dead_code)] // reserved for physical-pitch models
 pub const REF_PITCH_HZ: f32 = 261.625_57;
 
-/// How pitch is realized for a played note.
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum PitchMode {
-    /// Transpose a fixed modal template to the note — uniform timbre across the
-    /// keyboard.
-    Transpose,
-    /// Modulate the geometry (string length / drum size) with pitch, so higher
-    /// notes are physically more inharmonic and decay faster.
-    Physical,
-}
-
-impl Default for PitchMode {
-    fn default() -> Self {
-        // Physical (size tracks pitch) is the standard for the geometric models.
-        PitchMode::Physical
-    }
-}
-
 /// How a resonator is excited.
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Excitation {
