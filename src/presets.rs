@@ -96,43 +96,49 @@ impl Preset {
 /// seeded into the presets folder on first run. Each synth plugin contributes
 /// its own presets here as it is added.
 pub fn factory() -> Vec<Preset> {
-    // Common firmware baselines; only the expressive fields vary per instrument.
+    // Real string materials: (density kg/m³, Young's modulus GPa).
+    const STEEL: (f32, f32) = (7850.0, 200.0);
+    const NICKEL: (f32, f32) = (8900.0, 200.0);
+    const BRONZE: (f32, f32) = (8740.0, 105.0);
+    const NYLON: (f32, f32) = (1150.0, 4.0);
+    const GUT: (f32, f32) = (1300.0, 6.0);
+    // A physical string from real specs: speaking length (m), tension (N),
+    // gauge (mm), material, −60 dB decay (s), HF damping, pluck position.
     fn string(
-        stiffness: f32,
-        damping: f32,
-        freq_dep_damping: f32,
-        string_length: f32,
-        depth: usize,
+        length_m: f32,
+        tension_n: f32,
+        diameter_mm: f32,
+        mat: (f32, f32),
+        decay_time: f32,
+        hf_damping: f32,
         pluck_pos: f32,
     ) -> PureString {
         PureString {
-            stiffness,
-            prop_speed: 500.0,
-            damping,
-            freq_dep_damping,
-            string_length,
-            depth,
+            length_m,
+            tension_n,
+            diameter_mm,
+            density_kgm3: mat.0,
+            youngs_gpa: mat.1,
+            decay_time,
+            hf_damping,
             pluck_pos,
-            damp_period: 100.0,
-            time_scale: 10_000.0,
-            play_magnitude: 0.0,
-            max_magnitude: 2500.0,
-            key_tracks_pitch: true,
+            num_modes: 40,
             ..PureString::default()
         }
     }
-    // Same bore as `string`, but bowed (driven → sustains while played).
+    // Same string, but bowed (driven → sustains while played).
     fn bowed(
-        stiffness: f32,
-        damping: f32,
-        freq_dep_damping: f32,
-        string_length: f32,
-        depth: usize,
+        length_m: f32,
+        tension_n: f32,
+        diameter_mm: f32,
+        mat: (f32, f32),
+        decay_time: f32,
+        hf_damping: f32,
         pluck_pos: f32,
     ) -> PureString {
         PureString {
             excitation: Excitation::Bowed,
-            ..string(stiffness, damping, freq_dep_damping, string_length, depth, pluck_pos)
+            ..string(length_m, tension_n, diameter_mm, mat, decay_time, hf_damping, pluck_pos)
         }
     }
     fn eng(gain: f32, attack_ms: f32, release_ms: f32) -> EngineParams {
@@ -149,22 +155,22 @@ pub fn factory() -> Vec<Preset> {
 
     let base = vec![
         // ---- Pure String (feedback: pluck toward saw, stronger HF damping) ----
-        make("Acoustic Bass", string(1.5, 5.0, -5.0, 6.0, 24, 0.15), eng(0.75, 4.0, 120.0)),
-        make("Electric Bass", string(2.0, 4.0, -3.0, 8.0, 22, 0.12), eng(0.75, 4.0, 140.0)),
-        make("Acoustic Guitar", string(1.0, 7.0, -4.5, 12.0, 28, 0.10), eng(0.6, 3.0, 120.0)),
-        make("Electric Guitar", string(1.2, 2.5, -2.5, 16.0, 32, 0.10), eng(0.6, 3.0, 200.0)),
+        make("Acoustic Bass", string(0.864, 60.0, 1.30, NICKEL, 2.0, 0.5, 0.15), eng(0.75, 4.0, 120.0)),
+        make("Electric Bass", string(0.864, 55.0, 1.25, NICKEL, 2.6, 0.4, 0.12), eng(0.75, 4.0, 140.0)),
+        make("Acoustic Guitar", string(0.648, 90.0, 1.10, BRONZE, 2.5, 0.6, 0.12), eng(0.6, 3.0, 120.0)),
+        make("Electric Guitar", string(0.648, 78.0, 1.00, NICKEL, 3.0, 0.4, 0.10), eng(0.6, 3.0, 200.0)),
         // Less bass-heavy: brighter (more modes) with the highs allowed to sustain.
-        make("Piano", string(6.0, 3.0, -1.8, 12.0, 36, 0.12), eng(0.6, 2.0, 150.0)),
-        make("Banjo", string(3.0, 13.0, -6.0, 20.0, 36, 0.08), eng(0.6, 2.0, 80.0)),
+        make("Piano", string(0.600, 700.0, 1.10, STEEL, 3.5, 0.3, 0.12), eng(0.6, 2.0, 150.0)),
+        make("Banjo", string(0.670, 55.0, 0.40, STEEL, 0.8, 1.2, 0.08), eng(0.6, 2.0, 80.0)),
         // Rounder pluck + more HF damping to tame the "electric" low end.
-        make("Harp", string(0.8, 3.5, -4.0, 14.0, 28, 0.18), eng(0.6, 3.0, 180.0)),
+        make("Harp", string(0.900, 55.0, 0.80, NYLON, 2.5, 0.5, 0.16), eng(0.6, 3.0, 180.0)),
         // ---- Multi-component graph: Strike → String → Body (A/B vs Acoustic Guitar) ----
         make(
             "Guitar + Body (graph)",
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
-                    Comp::String(string(1.0, 7.0, -4.5, 12.0, 28, 0.10)),
+                    Comp::String(string(0.648, 90.0, 1.10, BRONZE, 2.5, 0.6, 0.12)),
                     Comp::Body { ring: 1.0, tone: 1.0 },
                     Comp::Mix,
                 ],
@@ -282,7 +288,7 @@ pub fn factory() -> Vec<Preset> {
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
-                    Comp::String(string(1.5, 5.0, -5.0, 6.0, 24, 0.15)),
+                    Comp::String(string(0.864, 60.0, 1.30, NICKEL, 2.0, 0.5, 0.15)),
                     Comp::Body { ring: 1.4, tone: 0.7 }, // big, low, boomy body
                     Comp::Mix,
                 ],
@@ -302,7 +308,7 @@ pub fn factory() -> Vec<Preset> {
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
-                    Comp::String(string(6.0, 3.0, -1.8, 12.0, 36, 0.12)),
+                    Comp::String(string(0.600, 700.0, 1.10, STEEL, 3.5, 0.3, 0.12)),
                     Comp::Body { ring: 1.6, tone: 1.3 }, // bright, long soundboard
                     Comp::Mix,
                 ],
@@ -323,7 +329,7 @@ pub fn factory() -> Vec<Preset> {
             InstrumentGraph {
                 components: vec![
                     Comp::Strike,
-                    Comp::String(string(3.0, 13.0, -6.0, 20.0, 36, 0.08)),
+                    Comp::String(string(0.670, 55.0, 0.40, STEEL, 0.8, 1.2, 0.08)),
                     Comp::Membrane(DrumMembrane { prop_speed: 700.0, stiffness: 0.3, damping: 18.0, freq_dep_damping: -3.0, radius: 5.0, depth: 20, strike_pos: 0.5, key_tracks_pitch: true, ..DrumMembrane::default() }),
                     Comp::Mix,
                 ],
@@ -529,10 +535,10 @@ pub fn factory() -> Vec<Preset> {
             eng(0.6, 25.0, 60.0),
         ),
         // ---- Bowed strings (driven → sustain; bow near the bridge = bright/saw) ----
-        make("Violin", bowed(0.5, 2.5, -1.2, 4.0, 44, 0.12), eng(0.55, 60.0, 150.0)),
-        make("Viola", bowed(0.6, 2.5, -1.5, 5.0, 40, 0.14), eng(0.55, 65.0, 160.0)),
-        make("Cello", bowed(0.8, 2.2, -1.3, 7.0, 44, 0.13), eng(0.6, 70.0, 180.0)),
-        make("Bowed Bass", bowed(1.0, 2.0, -1.6, 10.0, 36, 0.12), eng(0.65, 80.0, 200.0)),
+        make("Violin", bowed(0.330, 44.0, 1.60, GUT, 1.8, 0.6, 0.12), eng(0.55, 60.0, 150.0)),
+        make("Viola", bowed(0.380, 55.0, 2.40, GUT, 2.0, 0.5, 0.14), eng(0.55, 65.0, 160.0)),
+        make("Cello", bowed(0.690, 90.0, 3.60, GUT, 2.2, 0.5, 0.13), eng(0.6, 70.0, 180.0)),
+        make("Bowed Bass", bowed(1.060, 250.0, 5.50, GUT, 2.5, 0.5, 0.12), eng(0.65, 80.0, 200.0)),
         // ---- Musical String (music-friendly controls) ----
         make(
             "Soft Nylon",
@@ -946,6 +952,25 @@ mod graph_twin_tests {
         }
         assert!(checked >= 15, "expected the graph showcase presets, saw {checked}");
     }
+
+    #[test]
+    fn string_presets_have_realistic_open_pitches() {
+        // Grounded strings derive their open pitch from real geometry; guard that
+        // every string preset lands in a sane instrument range (≈ E0 .. C8).
+        use crate::models::pure_string::PureString;
+        for p in factory() {
+            if p.model_id != "pure_string" {
+                continue;
+            }
+            let s: PureString = serde_json::from_value(p.params.clone()).unwrap();
+            let f = s.open_pitch_hz();
+            assert!(
+                f.is_finite() && (20.0..=4200.0).contains(&f),
+                "{} open pitch {f} Hz is out of the instrument range",
+                p.name
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1080,3 +1105,4 @@ mod tests {
         assert!(!file_stem("a/b\\c").contains(['/', '\\']));
     }
 }
+

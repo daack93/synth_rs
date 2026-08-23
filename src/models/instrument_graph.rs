@@ -183,7 +183,7 @@ impl Comp {
     /// The numeric parameters of this component that a key can drive, by name.
     fn mappable(&self) -> &'static [&'static str] {
         match self {
-            Comp::String(_) => &["length", "stiffness"],
+            Comp::String(_) => &["length", "tension", "decay"],
             Comp::Membrane(_) => &["radius"],
             Comp::Plate(_) => &["ring"],
             Comp::Body { .. } => &["ring", "tone"],
@@ -196,8 +196,9 @@ impl Comp {
     /// Read a mappable parameter's current (base) value.
     fn get_param(&self, name: &str) -> Option<f32> {
         match (self, name) {
-            (Comp::String(m), "length") => Some(m.string_length),
-            (Comp::String(m), "stiffness") => Some(m.stiffness),
+            (Comp::String(m), "length") => Some(m.length_m),
+            (Comp::String(m), "tension") => Some(m.tension_n),
+            (Comp::String(m), "decay") => Some(m.decay_time),
             (Comp::Membrane(m), "radius") => Some(m.radius),
             (Comp::Plate(m), "ring") => Some(m.decay_time),
             (Comp::Body { ring, .. }, "ring") => Some(*ring),
@@ -210,8 +211,9 @@ impl Comp {
     /// Set a mappable parameter (used by the key map at note-on).
     fn set_param(&mut self, name: &str, v: f32) {
         match (self, name) {
-            (Comp::String(m), "length") => m.string_length = v,
-            (Comp::String(m), "stiffness") => m.stiffness = v,
+            (Comp::String(m), "length") => m.length_m = v,
+            (Comp::String(m), "tension") => m.tension_n = v,
+            (Comp::String(m), "decay") => m.decay_time = v,
             (Comp::Membrane(m), "radius") => m.radius = v,
             (Comp::Plate(m), "ring") => m.decay_time = v,
             (Comp::Body { ring, .. }, "ring") => *ring = v,
@@ -605,14 +607,14 @@ mod tests {
     }
     #[test]
     fn key_map_drives_a_param() {
-        // Map the string's length inversely to pitch (shorter = higher). With the
-        // string's own pitch-tracking off, the key map is the only thing setting
-        // pitch, so a higher note must land more energy in a high band.
+        // The grounded string tracks pitch itself, so the key map drives a
+        // non-pitch parameter: map decay time inversely to pitch (higher notes
+        // decay faster), then a high note must carry less late-window energy.
         let sr = 48_000.0;
         let g = InstrumentGraph {
             components: vec![
                 Comp::Strike,
-                Comp::String(PureString { key_tracks_pitch: false, ..Default::default() }),
+                Comp::String(PureString { decay_time: 3.0, hf_damping: 0.0, ..Default::default() }),
                 Comp::Mix,
             ],
             edges: vec![
@@ -620,19 +622,19 @@ mod tests {
                 Edge { from: 1, to: 2, gain: 1.0 },
             ],
             output: 2,
-            key_map: vec![KeyTarget { component: 1, param: "length".into(), amount: -1.0 }],
+            key_map: vec![KeyTarget { component: 1, param: "decay".into(), amount: -2.0 }],
         };
-        // Zero-crossing rate as a renderer-agnostic pitch proxy.
-        let zcr = |note: f32| -> usize {
+        // Energy in a late window (0.3–0.5 s) — a proxy for how long it rings.
+        let late_energy = |note: f32| -> f32 {
             let mut n = g.build_graph(note, 1.0, sr).unwrap();
             let y: Vec<f32> = (0..24_000).map(|_| n.tick(&[])).collect();
-            y.windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count()
+            y[14_400..].iter().map(|s| s * s).sum::<f32>()
         };
-        let low = zcr(220.0);
-        let high = zcr(660.0); // amount=-1 → shorter string → higher pitch
+        let low = late_energy(220.0);
+        let high = late_energy(880.0); // amount=-2 → much shorter decay up high
         assert!(
-            high > low * 3 / 2,
-            "the length key-map raises pitch on higher notes (high={high} low={low})"
+            low > high * 2.0,
+            "the decay key-map makes high notes ring shorter (low={low} high={high})"
         );
     }
     #[test]
