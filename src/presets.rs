@@ -1168,7 +1168,7 @@ pub fn factory() -> Vec<Preset> {
             "Base: Bassoon",
             InstrumentGraph {
                 components: vec![
-                    Comp::Reed { pressure: 0.65, stiffness: 1.6 },
+                    Comp::Reed { pressure: 0.65, stiffness: 1.2 },
                     Comp::Horn(WebsterHorn { length: 2.5, wave_speed: 343.0, r1: 0.004, r2: 0.008, r3: 0.001, blow_pos: 0.0, depth: 28, resolution: 300, damping: 6.0, freq_dep_damping: -0.1, visco_loss: 2.0, radiation: 0.5, boundary: Boundary::Brass, ..WebsterHorn::default() }),
                     Comp::Mix,
                 ],
@@ -1813,6 +1813,7 @@ mod tests {
         assert!(!file_stem("a/b\\c").contains(['/', '\\']));
     }
 }
+
 
 
 
