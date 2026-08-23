@@ -12,7 +12,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::cymbal::Cymbal;
 use super::drum_membrane::DrumMembrane;
+use super::metal_bell::MetalBell;
+use super::musical_string::MusicalString;
 use super::pure_plate::PurePlate;
 use super::pure_string::PureString;
 use super::webster_horn::WebsterHorn;
@@ -35,6 +38,12 @@ pub enum Comp {
     Membrane(DrumMembrane),
     /// A free-plate resonator.
     Plate(PurePlate),
+    /// A music-friendly plucked string (inharmonicity + decay controls).
+    MusicalString(MusicalString),
+    /// A struck metal bell / cowbell resonator.
+    Bell(MetalBell),
+    /// A struck cymbal / gong plate resonator (dense inharmonic modes).
+    Cymbal(Cymbal),
     /// A body / oral-cavity resonator: fixed formants, `ring` = how long it
     /// rings, `tone` = formant-frequency scale.
     Body { ring: f32, tone: f32 },
@@ -58,6 +67,9 @@ impl Comp {
             Comp::String(_) => "String (resonator)",
             Comp::Membrane(_) => "Membrane (resonator)",
             Comp::Plate(_) => "Plate (resonator)",
+            Comp::MusicalString(_) => "Musical string (resonator)",
+            Comp::Bell(_) => "Bell / cowbell (resonator)",
+            Comp::Cymbal(_) => "Cymbal / gong (resonator)",
             Comp::Body { .. } => "Body (resonator)",
             Comp::Wires { .. } => "Snare wires",
             Comp::Breath { .. } => "Breath (exciter)",
@@ -80,6 +92,9 @@ impl Comp {
             Comp::String(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
             Comp::Membrane(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
             Comp::Plate(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
+            Comp::MusicalString(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
+            Comp::Bell(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
+            Comp::Cymbal(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
             Comp::Body { ring, tone } => {
                 Box::new(FormantResonator::new(&body_bank(*ring, *tone), sr))
             }
@@ -110,6 +125,9 @@ impl Comp {
             Comp::String(m) => m.params_ui(ui),
             Comp::Membrane(m) => m.params_ui(ui),
             Comp::Plate(m) => m.params_ui(ui),
+            Comp::MusicalString(m) => m.params_ui(ui),
+            Comp::Bell(m) => m.params_ui(ui),
+            Comp::Cymbal(m) => m.params_ui(ui),
             Comp::Body { ring, tone } => {
                 let mut c = false;
                 c |= ui
@@ -170,7 +188,8 @@ impl Comp {
             Comp::Plate(_) => &["ring"],
             Comp::Body { .. } => &["ring", "tone"],
             Comp::Horn(_) => &["length"],
-            Comp::Strike | Comp::Mix | Comp::Wires { .. } | Comp::Breath { .. } | Comp::Reed { .. } => &[],
+            Comp::MusicalString(_) | Comp::Bell(_) | Comp::Cymbal(_) | Comp::Strike | Comp::Mix
+            | Comp::Wires { .. } | Comp::Breath { .. } | Comp::Reed { .. } => &[],
         }
     }
 
@@ -311,6 +330,9 @@ impl FtmModel for InstrumentGraph {
                 Comp::String(m) => return m.excite(freq_hz, vel, sr, out),
                 Comp::Membrane(m) => return m.excite(freq_hz, vel, sr, out),
                 Comp::Plate(m) => return m.excite(freq_hz, vel, sr, out),
+                Comp::MusicalString(m) => return m.excite(freq_hz, vel, sr, out),
+                Comp::Bell(m) => return m.excite(freq_hz, vel, sr, out),
+                Comp::Cymbal(m) => return m.excite(freq_hz, vel, sr, out),
                 Comp::Horn(m) => return m.excite(freq_hz, vel, sr, out),
                 _ => {}
             }
@@ -386,8 +408,36 @@ impl FtmModel for InstrumentGraph {
                 self.components.push(Comp::Plate(PurePlate::default()));
                 changed = true;
             }
+            if ui.small_button("Musical string").clicked() {
+                self.components.push(Comp::MusicalString(MusicalString::default()));
+                changed = true;
+            }
+            if ui.small_button("Bell").clicked() {
+                self.components.push(Comp::Bell(MetalBell::default()));
+                changed = true;
+            }
+            if ui.small_button("Cymbal").clicked() {
+                self.components.push(Comp::Cymbal(Cymbal::default()));
+                changed = true;
+            }
             if ui.small_button("Body").clicked() {
                 self.components.push(Comp::Body { ring: 1.0, tone: 1.0 });
+                changed = true;
+            }
+            if ui.small_button("Wires").clicked() {
+                self.components.push(Comp::Wires { level: 0.6, tone: 1.0 });
+                changed = true;
+            }
+            if ui.small_button("Breath").clicked() {
+                self.components.push(Comp::Breath { level: 0.15, tone: 1.0 });
+                changed = true;
+            }
+            if ui.small_button("Reed / lip").clicked() {
+                self.components.push(Comp::Reed { pressure: 0.6, stiffness: 1.5 });
+                changed = true;
+            }
+            if ui.small_button("Air column").clicked() {
+                self.components.push(Comp::Horn(WebsterHorn::default()));
                 changed = true;
             }
             if ui.small_button("Mix").clicked() {
