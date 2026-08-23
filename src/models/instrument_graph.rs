@@ -317,13 +317,17 @@ impl FtmModel for InstrumentGraph {
         let mut remove_comp: Option<usize> = None;
         for (i, c) in self.components.iter_mut().enumerate() {
             ui.separator();
-            ui.horizontal(|ui| {
-                ui.strong(format!("{i}. {}", labels[i]));
-                if ncomp > 1 && ui.small_button("✕").on_hover_text("remove component").clicked() {
-                    remove_comp = Some(i);
-                }
+            // Namespace each component's widgets so repeated types (e.g. two
+            // Strings) or identical slider labels don't collide on egui ids.
+            ui.push_id(i, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong(format!("{i}. {}", labels[i]));
+                    if ncomp > 1 && ui.small_button("✕").on_hover_text("remove component").clicked() {
+                        remove_comp = Some(i);
+                    }
+                });
+                changed |= c.params_ui(ui);
             });
-            changed |= c.params_ui(ui);
         }
         if let Some(r) = remove_comp {
             self.remove_component(r);
@@ -362,6 +366,7 @@ impl FtmModel for InstrumentGraph {
         ui.label(egui::RichText::new("Edges — coupling strength").strong());
         let mut remove_edge: Option<usize> = None;
         for (ei, e) in self.edges.iter_mut().enumerate() {
+            ui.push_id(("edge", ei), |ui| {
             ui.horizontal(|ui| {
                 let f = egui::ComboBox::from_id_salt(("e_from", ei))
                     .width(96.0)
@@ -390,6 +395,7 @@ impl FtmModel for InstrumentGraph {
                 if ui.small_button("✕").clicked() {
                     remove_edge = Some(ei);
                 }
+            });
             });
         }
         if let Some(ei) = remove_edge {
@@ -422,6 +428,7 @@ impl FtmModel for InstrumentGraph {
             self.components.iter().map(|c| c.mappable()).collect();
         let mut remove: Option<usize> = None;
         for (t, kt) in self.key_map.iter_mut().enumerate() {
+            ui.push_id(("kt", t), |ui| {
             ui.horizontal(|ui| {
                 let c = egui::ComboBox::from_id_salt(("kt_c", t))
                     .selected_text(labels.get(kt.component).copied().unwrap_or("?"))
@@ -450,6 +457,7 @@ impl FtmModel for InstrumentGraph {
                 if ui.button("✕").clicked() {
                     remove = Some(t);
                 }
+            });
             });
         }
         if let Some(t) = remove {
