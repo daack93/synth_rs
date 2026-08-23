@@ -15,13 +15,61 @@
 //! decay rates of its partials and register it in [`registry`].
 
 pub mod basic_wave;
+pub mod cymbal;
+pub mod drum_membrane;
+pub mod metal_bell;
+pub mod musical_string;
+pub mod pure_plate;
+pub mod pure_string;
+pub mod snare;
+pub mod webster_horn;
 
 /// Maximum partials a single voice can hold (hard array bound).
 pub const MAX_MODES: usize = 512;
 
-// NOTE: shared modal-synthesis helpers (`TICK_RATE`, `REF_PITCH_HZ`,
-// `PitchMode`, `Excitation`, `strike_amplitude`) live with the models that use
-// them, introduced in the plugin PR — nothing in this framework PR needs them.
+/// The modeling tick rate (~10 kHz) that the per-mode decay is expressed in.
+/// `DAMP_PERIOD` and `TIME_SCALE` are counted in these ticks, so this constant
+/// converts them onto real seconds.
+pub const TICK_RATE: f32 = 10_000.0;
+
+/// Reference pitch (C4). Physical-pitch mode scales the geometry so it matches
+/// transpose mode at this note and diverges from there.
+#[allow(dead_code)] // reserved for physical-pitch models
+pub const REF_PITCH_HZ: f32 = 261.625_57;
+
+/// How pitch is realized for a played note.
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PitchMode {
+    /// Transpose a fixed modal template to the note — uniform timbre across the
+    /// keyboard.
+    Transpose,
+    /// Modulate the geometry (string length / drum size) with pitch, so higher
+    /// notes are physically more inharmonic and decay faster.
+    Physical,
+}
+
+impl Default for PitchMode {
+    fn default() -> Self {
+        // Physical (size tracks pitch) is the standard for the geometric models.
+        PitchMode::Physical
+    }
+}
+
+/// How a resonator is excited.
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Excitation {
+    /// A one-shot pluck/strike: the modes ring and decay.
+    Struck,
+    /// Continuously driven (bowed): the modes are sustained while the note is
+    /// played and only fade on release, and loss shapes the steady-state tone.
+    Bowed,
+}
+
+impl Default for Excitation {
+    fn default() -> Self {
+        Excitation::Struck
+    }
+}
 
 /// A bank of modes: parallel arrays of frequency (Hz), linear amplitude, and
 /// per-second decay rate. `env(t) = amp * exp(-decay * t)`; a negative `decay`
@@ -137,6 +185,14 @@ pub fn model_from_id(id: &str, params: &serde_json::Value) -> Option<Box<dyn Ftm
     }
     match id {
         "basic_wave" => boxed::<basic_wave::BasicWave>(params),
+        "musical_string" => boxed::<musical_string::MusicalString>(params),
+        "pure_string" => boxed::<pure_string::PureString>(params),
+        "drum_membrane" => boxed::<drum_membrane::DrumMembrane>(params),
+        "webster_horn" => boxed::<webster_horn::WebsterHorn>(params),
+        "metal_bell" => boxed::<metal_bell::MetalBell>(params),
+        "snare" => boxed::<snare::Snare>(params),
+        "cymbal" => boxed::<cymbal::Cymbal>(params),
+        "pure_plate" => boxed::<pure_plate::PurePlate>(params),
         _ => None,
     }
 }
@@ -150,6 +206,14 @@ impl Clone for Box<dyn FtmModel> {
 /// All available models, in picker order. Add new plugins here.
 pub fn registry() -> Vec<Box<dyn FtmModel>> {
     vec![
+        Box::new(musical_string::MusicalString::default()),
+        Box::new(pure_string::PureString::default()),
+        Box::new(drum_membrane::DrumMembrane::default()),
+        Box::new(webster_horn::WebsterHorn::default()),
+        Box::new(metal_bell::MetalBell::default()),
+        Box::new(snare::Snare::default()),
+        Box::new(cymbal::Cymbal::default()),
+        Box::new(pure_plate::PurePlate::default()),
         Box::new(basic_wave::BasicWave::default()),
     ]
 }
@@ -160,6 +224,21 @@ pub fn default_model() -> Box<dyn FtmModel> {
         .into_iter()
         .next()
         .expect("model registry is empty")
+}
+
+/// Maps note velocity to a strike level, shared by the struck/plucked models:
+/// velocity sets the strike magnitude, and
+/// `(mag - play_magnitude)/(max_magnitude - play_magnitude)` sets the level.
+#[inline]
+pub fn strike_amplitude(vel: f32, play_magnitude: f32, max_magnitude: f32) -> f32 {
+    let mag = vel * max_magnitude;
+    let span = max_magnitude - play_magnitude;
+    let a = if span.abs() < 1e-6 {
+        vel
+    } else {
+        (mag - play_magnitude) / span
+    };
+    a.clamp(0.0, 1.0)
 }
 
 /// An egui slider with range clamping disabled, so any value can be typed in.
