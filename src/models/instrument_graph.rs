@@ -21,8 +21,8 @@ use super::pure_string::PureString;
 use super::webster_horn::WebsterHorn;
 use super::{freq_to_midi, midi_name, unbounded_slider, FtmModel, ModeBuffer};
 use crate::graph::{
-    DriveExciter, FormantResonator, Graph, ImpulseExciter, ModalResonator, Node, ReedExciter,
-    SnareWires, Sum,
+    BowExciter, DriveExciter, FormantResonator, Graph, HammerExciter, ImpulseExciter,
+    ModalResonator, Node, ReedExciter, SnareWires, Sum, VoiceExciter,
 };
 
 const PI: f32 = std::f32::consts::PI;
@@ -63,6 +63,16 @@ pub enum Comp {
     Breath { level: f32, tone: f32 },
     /// A self-oscillating reed/lip (needs a feedback edge from its resonator).
     Reed { pressure: f32, stiffness: f32 },
+    /// A piano/dulcimer hammer: a nonlinear felt mass (needs a feedback edge from
+    /// the string). `hardness` 0..1 sets the felt stiffness (dark→bright, long→
+    /// short contact), `felt` is the compression nonlinearity.
+    Hammer { hardness: f32, felt: f32 },
+    /// A bow: stick-slip friction (needs a feedback edge from the string).
+    /// `speed` = bow velocity, `force` = bow pressure.
+    Bow { speed: f32, force: f32 },
+    /// A vocal-fold (glottal) source, pitched at the played note. `open_quotient`
+    /// = how long the folds stay open (breathy → pressed), `level` = drive.
+    Voice { open_quotient: f32, level: f32 },
     /// A flaring air column (Webster horn) resonator.
     Horn(WebsterHorn),
     /// A mixer / output node: the (edge-scaled) sum of its inputs.
@@ -83,6 +93,9 @@ impl Comp {
             Comp::Wires { .. } => "Snare wires",
             Comp::Breath { .. } => "Breath (exciter)",
             Comp::Reed { .. } => "Reed / lip (exciter)",
+            Comp::Hammer { .. } => "Hammer (exciter)",
+            Comp::Bow { .. } => "Bow (exciter)",
+            Comp::Voice { .. } => "Voice / glottis (exciter)",
             Comp::Horn(_) => "Air column (resonator)",
             Comp::Mix => "Mix / output",
         }
@@ -120,6 +133,13 @@ impl Comp {
             }
             Comp::Horn(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
             Comp::Reed { pressure, stiffness } => Box::new(ReedExciter::new(*pressure, *stiffness, sr)),
+            Comp::Hammer { hardness, felt } => {
+                Box::new(HammerExciter::new(vel, *hardness, *felt, sr))
+            }
+            Comp::Bow { speed, force } => Box::new(BowExciter::new(*speed, *force, sr)),
+            Comp::Voice { open_quotient, level } => {
+                Box::new(VoiceExciter::new(freq_hz, *open_quotient, *level, sr))
+            }
             Comp::Mix => Box::new(Sum),
         }
     }
@@ -190,6 +210,39 @@ impl Comp {
                 c |= ui.add(unbounded_slider(stiffness, 0.0..=3.0, "Reed stiffness")).changed();
                 c
             }
+            Comp::Hammer { hardness, felt } => {
+                let mut c = false;
+                c |= ui
+                    .add(unbounded_slider(hardness, 0.0..=1.0, "Felt hardness"))
+                    .on_hover_text("Soft (0) = dark, long contact; hard (1) = bright, ~1 ms contact.")
+                    .changed();
+                c |= ui
+                    .add(unbounded_slider(felt, 1.8..=3.5, "Felt nonlinearity"))
+                    .on_hover_text("Compression exponent p (piano felt ≈ 2.2–3.5). Higher = more velocity-dependent brightness.")
+                    .changed();
+                c
+            }
+            Comp::Bow { speed, force } => {
+                let mut c = false;
+                c |= ui
+                    .add(unbounded_slider(speed, 0.0..=2.0, "Bow speed"))
+                    .on_hover_text("How fast the bow travels — louder/brighter with more.")
+                    .changed();
+                c |= ui
+                    .add(unbounded_slider(force, 0.0..=3.0, "Bow force"))
+                    .on_hover_text("Bow pressure. Too little slips (whistle), too much chokes.")
+                    .changed();
+                c
+            }
+            Comp::Voice { open_quotient, level } => {
+                let mut c = false;
+                c |= ui
+                    .add(unbounded_slider(open_quotient, 0.1..=0.95, "Open quotient"))
+                    .on_hover_text("How long the vocal folds stay open — low = pressed/buzzy, high = breathy.")
+                    .changed();
+                c |= ui.add(unbounded_slider(level, 0.0..=1.0, "Voice level")).changed();
+                c
+            }
             Comp::Mix => {
                 ui.label(egui::RichText::new("Sums its inputs (see edge strengths).").weak().small());
                 false
@@ -245,7 +298,8 @@ impl Comp {
             Comp::Body { .. } => &["top_hz", "decay"],
             Comp::Horn(_) => &["length"],
             Comp::MusicalString(_) | Comp::Bell(_) | Comp::Cymbal(_) | Comp::Strike | Comp::Mix
-            | Comp::Wires { .. } | Comp::Breath { .. } | Comp::Reed { .. } => &[],
+            | Comp::Wires { .. } | Comp::Breath { .. } | Comp::Reed { .. } | Comp::Hammer { .. }
+            | Comp::Bow { .. } | Comp::Voice { .. } => &[],
         }
     }
 
@@ -492,6 +546,18 @@ impl FtmModel for InstrumentGraph {
             }
             if ui.small_button("Reed / lip").clicked() {
                 self.components.push(Comp::Reed { pressure: 0.6, stiffness: 1.5 });
+                changed = true;
+            }
+            if ui.small_button("Hammer").clicked() {
+                self.components.push(Comp::Hammer { hardness: 0.6, felt: 2.5 });
+                changed = true;
+            }
+            if ui.small_button("Bow").clicked() {
+                self.components.push(Comp::Bow { speed: 0.6, force: 1.0 });
+                changed = true;
+            }
+            if ui.small_button("Voice").clicked() {
+                self.components.push(Comp::Voice { open_quotient: 0.6, level: 0.4 });
                 changed = true;
             }
             if ui.small_button("Air column").clicked() {

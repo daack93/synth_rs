@@ -353,6 +353,201 @@ impl Node for ReedExciter {
     }
 }
 
+/// A piano / dulcimer **hammer**: a felt-covered mass making nonlinear Hertzian
+/// contact with the string. The hammer flies in at the key's velocity; while the
+/// felt is compressed it pushes back with `F = K·δ^p` (δ = compression, `p` the
+/// felt nonlinearity ≈ 2.5), which decelerates it until it rebounds and
+/// separates. It reads the string surface over a feedback edge, so a harder
+/// strike compresses the felt deeper, leaves *sooner*, and sounds brighter — the
+/// hallmark of real piano dynamics. A one-shot: silent once the hammer departs.
+pub struct HammerExciter {
+    pos: f32,       // hammer position (internal, well-scaled units)
+    vel: f32,       // hammer velocity (from key velocity)
+    stiffness: f32, // felt stiffness K
+    exponent: f32,  // felt nonlinearity p
+    mass: f32,      // hammer mass
+    inv_sr: f32,
+    done: bool,
+}
+
+impl HammerExciter {
+    // The string's fed-back signal is read at this scale (a real string barely
+    // moves compared to the hammer's travel) and the felt force is emitted at
+    // this scale — so a graph can wire the hammer with ordinary ~1.0 edges.
+    const READ: f32 = 0.02;
+    const OUT: f32 = 0.003;
+
+    /// `hardness` 0..1 maps to felt stiffness K = 10^(5.5 + 1.5·hardness), i.e.
+    /// ~3×10⁵ (soft/dark, long contact) to ~10⁷ (hard/bright, ~1 ms contact).
+    /// `felt` is the compression exponent p (piano felt ≈ 2.2–3.5). Mass is fixed
+    /// so the contact lands in the real ~1–9 ms range across the hardness sweep.
+    pub fn new(velocity: f32, hardness: f32, felt: f32, sr: f32) -> Self {
+        let k = 10f32.powf(5.5 + 1.5 * hardness.clamp(0.0, 1.0));
+        HammerExciter {
+            pos: 0.0,
+            // Key velocity → approach speed; ×8 puts the contact and the felt
+            // compression in a well-conditioned numeric range.
+            vel: velocity.clamp(0.02, 1.0) * 8.0,
+            stiffness: k,
+            exponent: felt.clamp(1.0, 4.0),
+            mass: 2.0e-4,
+            inv_sr: 1.0 / sr,
+            done: false,
+        }
+    }
+}
+
+impl Node for HammerExciter {
+    #[inline]
+    fn tick(&mut self, inputs: &[f32]) -> f32 {
+        if self.done {
+            return 0.0;
+        }
+        let x: f32 = inputs.iter().sum::<f32>() * Self::READ; // string surface, fed back
+        let compression = self.pos - x;
+        let force = if compression > 0.0 {
+            self.stiffness * compression.powf(self.exponent)
+        } else {
+            0.0
+        };
+        // Semi-implicit Euler: the felt reaction decelerates the hammer.
+        self.vel -= force / self.mass * self.inv_sr;
+        self.pos += self.vel * self.inv_sr;
+        // The hammer has left once it is clear of the string and moving away.
+        if compression <= 0.0 && self.vel <= 0.0 {
+            self.done = true;
+        }
+        force * Self::OUT
+    }
+}
+
+/// A **bow**: the classic stick-slip friction drive. The hair moves across the
+/// string at a steady `speed` under a `force`; the friction it applies depends
+/// nonlinearly on the slip velocity (string velocity − bow velocity). Near
+/// sticking, friction is high and the string travels with the bow; past a
+/// threshold it breaks away and slips back — the Helmholtz motion of a bowed
+/// string. It reads the string velocity over a feedback edge; `tanh` bounds the
+/// friction so the loop is stable. Continuous — gated off on note-off.
+pub struct BowExciter {
+    speed: f32,      // bow velocity
+    force: f32,      // bow pressure
+    slip: f32,       // Stribeck slip-velocity scale
+    last: f32,       // previous fed-back sample (to estimate string velocity)
+    env: f32,
+    env_target: f32,
+    atk_rate: f32,
+    rel_rate: f32,
+}
+
+impl BowExciter {
+    pub fn new(speed: f32, force: f32, sr: f32) -> Self {
+        BowExciter {
+            speed,
+            force,
+            slip: 0.12,
+            last: 0.0,
+            env: 0.0,
+            env_target: 1.0,
+            atk_rate: 1.0 - (-1.0 / (0.05 * sr)).exp(), // ~50 ms bow onset
+            rel_rate: 1.0 - (-1.0 / (0.08 * sr)).exp(), // ~80 ms release
+        }
+    }
+}
+
+impl Node for BowExciter {
+    #[inline]
+    fn tick(&mut self, inputs: &[f32]) -> f32 {
+        let rate = if self.env < self.env_target { self.atk_rate } else { self.rel_rate };
+        self.env += (self.env_target - self.env) * rate;
+        let x: f32 = inputs.iter().sum();
+        // String velocity ≈ derivative of the fed-back displacement.
+        let v_string = (x - self.last) * 0.05;
+        self.last = x;
+        let v_bow = self.speed * self.env;
+        let v_rel = v_string - v_bow;
+        // Stribeck friction: high near sticking (v_rel → 0), falling off as the
+        // string slips faster. The force opposes the slip (pulls toward v_bow).
+        let mu = 0.2 + 0.8 * (-(v_rel / self.slip).abs()).exp();
+        let friction = -self.force * self.env * v_rel.signum() * mu;
+        friction.tanh()
+    }
+    fn control(&mut self, c: Control) {
+        if let Control::Gate(on) = c {
+            self.env_target = if on { 1.0 } else { 0.0 };
+        }
+    }
+}
+
+/// A **voice**: a vocal-fold (glottal) source for singing or growling into an
+/// instrument (a didgeridoo, a sax growl) or for playing a vocal-tract resonator
+/// directly. It generates a train of glottal-flow pulses (a Rosenberg-style
+/// model) at the played pitch — a smooth open phase, a sharper closing, then a
+/// closed rest — whose harmonic-rich buzz the following resonator (a body/tract
+/// or horn) filters, source-filter style. Continuous; gated on note-off.
+pub struct VoiceExciter {
+    phase: f32,   // 0..1 within the glottal cycle
+    f0: f32,      // phonation frequency (Hz)
+    incr: f32,    // phase increment per sample
+    open_q: f32,  // open quotient — fraction of the cycle the folds are open
+    level: f32,
+    inv_sr: f32,
+    env: f32,
+    env_target: f32,
+    atk_rate: f32,
+    rel_rate: f32,
+}
+
+impl VoiceExciter {
+    pub fn new(f0: f32, open_q: f32, level: f32, sr: f32) -> Self {
+        let f0 = f0.max(1.0);
+        VoiceExciter {
+            phase: 0.0,
+            f0,
+            incr: f0 / sr,
+            open_q: open_q.clamp(0.1, 0.95),
+            level,
+            inv_sr: 1.0 / sr,
+            env: 0.0,
+            env_target: 1.0,
+            atk_rate: 1.0 - (-1.0 / (0.03 * sr)).exp(), // ~30 ms onset
+            rel_rate: 1.0 - (-1.0 / (0.04 * sr)).exp(),
+        }
+    }
+}
+
+impl Node for VoiceExciter {
+    #[inline]
+    fn tick(&mut self, _inputs: &[f32]) -> f32 {
+        let rate = if self.env < self.env_target { self.atk_rate } else { self.rel_rate };
+        self.env += (self.env_target - self.env) * rate;
+        self.phase += self.incr;
+        if self.phase >= 1.0 {
+            self.phase -= 1.0;
+        }
+        let oq = self.open_q;
+        // Rosenberg glottal flow: smooth rise over the first 60% of the open
+        // phase, sharper fall over the last 40%, then closed (zero).
+        let g = if self.phase < oq {
+            let t = self.phase / oq;
+            if t < 0.6 {
+                0.5 * (1.0 - (PI * (t / 0.6)).cos()) // rise 0 → 1
+            } else {
+                (PI * 0.5 * ((t - 0.6) / 0.4)).cos() // fall 1 → 0 (sharp close)
+            }
+        } else {
+            0.0
+        };
+        // Centre out the DC of the pulse train so it drives the resonator cleanly.
+        (g - oq * 0.5) * self.level * self.env
+    }
+    fn control(&mut self, c: Control) {
+        match c {
+            Control::Gate(on) => self.env_target = if on { 1.0 } else { 0.0 },
+            Control::Bend(r) => self.incr = (self.f0 * r.max(0.01)) * self.inv_sr,
+        }
+    }
+}
+
 /// A passthrough mixer: outputs the (already edge-scaled) sum of its inputs.
 /// Used as a graph's output node so several components (e.g. a dry primary and a
 /// wet body) can be blended by their edge gains.
@@ -605,5 +800,89 @@ mod graph_tests {
         for _ in 0..4_800 { d.tick(&[]); } // ~30 ms release
         let off: f32 = (0..2_400).map(|_| d.tick(&[]).abs()).sum::<f32>() / 2_400.0;
         assert!(off < on * 0.1, "breath stops after key-up (on={on:.4} off={off:.4})");
+    }
+}
+
+#[cfg(test)]
+mod new_exciter_tests {
+    use super::*;
+    use crate::models::{pure_string::PureString, FtmModel, ModeBuffer};
+
+    fn string_res(sr: f32) -> ModalResonator {
+        let mut b = ModeBuffer::default();
+        PureString::default().excite(220.0, 1.0, sr, &mut b);
+        ModalResonator::from_bank(&b, sr)
+    }
+
+    // Hammer(0) → String(1) → Mix(2), with String(1) → Hammer(0) feedback.
+    fn hammer_rig(vel: f32, output: usize, sr: f32) -> Graph {
+        let nodes: Vec<Box<dyn Node>> = vec![
+            Box::new(HammerExciter::new(vel, 0.6, 2.5, sr)),
+            Box::new(string_res(sr)),
+            Box::new(Sum),
+        ];
+        let inputs = vec![vec![(1usize, 1.0f32)], vec![(0usize, 1.0f32)], vec![(1usize, 1.0f32)]];
+        Graph::new(nodes, inputs, output)
+    }
+
+    #[test]
+    fn hammer_has_a_finite_velocity_dependent_contact_window() {
+        let sr = 48_000.0;
+        // Sound out (output = Mix): stable, bounded, and audible.
+        let mut g = hammer_rig(1.0, 2, sr);
+        let mut peak = 0.0f32;
+        let mut energy = 0.0f32;
+        for _ in 0..48_000 {
+            let y = g.tick(&[]);
+            assert!(y.is_finite() && y.abs() < 10.0, "hammer loop stays bounded");
+            peak = peak.max(y.abs());
+            energy += y * y;
+        }
+        assert!(energy > 1e-4, "the hammer excites the string");
+
+        // Contact window (output = the hammer force): finite, and a harder hit
+        // stays in contact no longer than a soft one (felt gets stiffer).
+        let contact = |vel: f32| -> usize {
+            let mut g = hammer_rig(vel, 0, sr);
+            (0..8000).filter(|_| g.tick(&[]).abs() > 1e-7).count()
+        };
+        let soft = contact(0.3);
+        let hard = contact(1.0);
+        let ms = |n: usize| n as f32 / sr * 1000.0;
+        assert!((0.3..=12.0).contains(&ms(soft)), "soft contact {} ms in piano range", ms(soft));
+        assert!(hard <= soft + 48, "harder strike is not a longer contact (soft={soft} hard={hard})");
+    }
+
+    #[test]
+    fn bow_sustains_and_stays_bounded() {
+        let sr = 48_000.0;
+        let nodes: Vec<Box<dyn Node>> = vec![
+            Box::new(BowExciter::new(0.6, 1.0, sr)),
+            Box::new(string_res(sr)),
+            Box::new(Sum),
+        ];
+        let inputs = vec![vec![(1usize, 1.0f32)], vec![(0usize, 1.0f32)], vec![(1usize, 1.0f32)]];
+        let mut g = Graph::new(nodes, inputs, 2);
+        let y: Vec<f32> = (0..48_000).map(|_| g.tick(&[])).collect();
+        assert!(y.iter().all(|v| v.is_finite() && v.abs() < 10.0), "bow loop stays bounded");
+        let rms = |a: &[f32]| (a.iter().map(|s| s * s).sum::<f32>() / a.len() as f32).sqrt();
+        assert!(rms(&y[24_000..]) > 1e-3, "the bow sustains a tone while held");
+    }
+
+    #[test]
+    fn voice_is_pitched_and_gates_off() {
+        let sr = 48_000.0;
+        let mut v = VoiceExciter::new(110.0, 0.6, 0.4, sr);
+        let y: Vec<f32> = (0..48_000).map(|_| v.tick(&[])).collect();
+        assert!(y.iter().all(|s| s.is_finite()));
+        // Zero-crossings over a second ≈ 2·f0 for a pitched buzz (period-accurate).
+        let zc = y[9600..].windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count();
+        let approx_f0 = zc as f32 / 2.0 / ((48_000 - 9600) as f32 / sr);
+        assert!((approx_f0 - 110.0).abs() < 12.0, "voice pitched near 110 Hz (got {approx_f0})");
+        // Note-off: the glottis stops and the source falls silent.
+        v.control(Control::Gate(false));
+        let tail: Vec<f32> = (0..12_000).map(|_| v.tick(&[])).collect();
+        let end = &tail[8_000..];
+        assert!(end.iter().all(|s| s.abs() < 1e-2), "voice goes silent after note-off");
     }
 }
