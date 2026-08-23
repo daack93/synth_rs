@@ -1,7 +1,7 @@
-//! FTM string based on the original `set_triangle/saw_string_params` equations
-//! and the exact `#define`s from the 2014 `main.h`. The firmware exposed only
-//! two pluck geometries (center = triangle, end = saw); here the pluck position
-//! is a continuous control, which those two are just special cases of.
+//! An FTM string model driven by the Kirchhoff string equation. The two
+//! classic pluck geometries are just endpoints of one continuous control: a
+//! centred pluck gives a triangle-like spectrum (odd modes), a near-end pluck a
+//! saw-like one (all modes). Here the pluck position slides freely between them.
 
 use serde::{Deserialize, Serialize};
 
@@ -20,13 +20,13 @@ pub struct PureString {
     pub string_length: f32,     // STRING_LENGTH (l)
     pub depth: usize,           // DEPTH
     /// Pluck position along the string, 0..1. 0.5 = center (triangle, odd modes);
-    /// near an end = saw-like (all modes). The firmware's two modes are the ends.
+    /// near an end = saw-like (all modes). The two classic plucks are the ends.
     pub pluck_pos: f32,
     pub damp_period: f32,       // DAMP_PERIOD
     pub time_scale: f32,        // TIME_SCALE
     pub play_magnitude: f32,    // PLAY_MAGNITUDE
     pub max_magnitude: f32,     // MAX_MAGNITUDE
-    /// If true the key sets pitch; if false, c/2l does (original air-guitar).
+    /// If true the key sets pitch; if false, c/2l does and the key transposes.
     pub key_tracks_pitch: bool,
     /// How the key sets pitch: transpose a fixed string, or shorten the string
     /// for higher notes (note-dependent inharmonicity + decay).
@@ -39,7 +39,7 @@ pub struct PureString {
 
 impl Default for PureString {
     fn default() -> Self {
-        // Straight from main.h (pluck at center = the old MODE_TRIANGLE_STRING).
+        // Classic defaults; pluck at centre gives the triangle-string spectrum.
         Self {
             stiffness: 1.0,
             prop_speed: 500.0,
@@ -50,7 +50,7 @@ impl Default for PureString {
             pluck_pos: 0.5,
             damp_period: 100.0,
             time_scale: 10_000.0,
-            play_magnitude: 0.0, // orig 2000; 0 keeps soft keypresses audible
+            play_magnitude: 0.0, // 0 keeps soft keypresses audible (raise to gate)
             max_magnitude: 2500.0,
             key_tracks_pitch: true,
             pitch_mode: PitchMode::Physical,
@@ -69,7 +69,7 @@ impl FtmModel for PureString {
     }
 
     fn description(&self) -> &'static str {
-        "The original FTM string equations and main.h #defines, with a continuous pluck position."
+        "An FTM string model with a continuous pluck position from triangle to saw."
     }
 
     fn excite(&self, freq_hz: f32, vel: f32, sr: f32, out: &mut ModeBuffer) {
@@ -111,8 +111,8 @@ impl FtmModel for PureString {
 
         // Pluck weight: Fourier coefficient of a triangular initial displacement
         // plucked at fraction p of the length, K[m] = 2 sin(mπp) / (m²π² p(1-p)).
-        // At p = 0.5 the even modes vanish (the firmware's triangle); as p → 0
-        // it fills in as ~1/m (the firmware's saw). Guarded away from the poles.
+        // At p = 0.5 the even modes vanish (triangle spectrum); as p → 0 it fills
+        // in as ~1/m (saw spectrum). Guarded away from the poles.
         let p = self.pluck_pos.clamp(1e-3, 1.0 - 1e-3);
         let pq = p * (1.0 - p);
 
@@ -127,7 +127,7 @@ impl FtmModel for PureString {
             let m2 = m * m;
             let m4 = m2 * m2;
             let sigma = om_m * m2 + om_c;
-            let o_lin = (sigma / damp_per).exp(); // firmware O[i], ~1
+            let o_lin = (sigma / damp_per).exp(); // per-tick decay factor O[i], ~1
             let w2 = (wm_a * m4 + wm_b * m2 - o_lin * o_lin).max(0.0);
             let k = (2.0 / (m2 * PI * PI * pq)) * (m * PI * p).sin();
             w[count] = w2.sqrt();
@@ -148,14 +148,14 @@ impl FtmModel for PureString {
             let freq = if self.key_tracks_pitch {
                 freq_hz * (w[i] / w0)
             } else {
-                // Absolute firmware mapping W*TICK_RATE/(TIME_SCALE*2pi).
+                // Absolute physical mapping W*TICK_RATE/(TIME_SCALE*2pi).
                 w[i] * TICK_RATE / (ts * TWO_PI)
             };
             if freq >= sr * 0.45 {
                 break; // near Nyquist: drop the rest (ascending order)
             }
-            // The firmware multiplied D by O = exp(sigma/DAMP_PERIOD) every
-            // DAMP_PERIOD board-ticks; over a second that is a per-second rate of
+            // Each mode's amplitude is multiplied by O = exp(sigma/DAMP_PERIOD)
+            // every DAMP_PERIOD ticks; over a second that is a per-second rate of
             // sigma*TICK_RATE/DAMP_PERIOD^2. decay = -that (sigma <= 0 => decay >= 0).
             let decay = -sig[i] * TICK_RATE / (damp_per * damp_per) * decay_scale;
             out.push(freq, kk[i] * norm, decay);
@@ -193,7 +193,7 @@ impl FtmModel for PureString {
             .changed();
         changed |= ui
             .add(unbounded_slider(&mut self.damping, -50.0..=200.0, "STRING_DAMPING (d1)"))
-            .on_hover_text("Uniform decay of every mode. (Firmware required >= 0.)")
+            .on_hover_text("Uniform decay of every mode. (Best kept >= 0.)")
             .changed();
         changed |= ui
             .add(unbounded_slider(
@@ -201,7 +201,7 @@ impl FtmModel for PureString {
                 -100.0..=20.0,
                 "STRING_FREQ_DEP_DAMPING (d3)",
             ))
-            .on_hover_text("Extra decay on high modes (negative in the original).")
+            .on_hover_text("Extra decay on high modes (typically negative).")
             .changed();
         changed |= ui
             .add(unbounded_slider(&mut self.string_length, 0.1..=100.0, "STRING_LENGTH (l)"))
@@ -215,7 +215,7 @@ impl FtmModel for PureString {
         ui.strong("Timing / velocity");
         changed |= ui
             .add(unbounded_slider(&mut self.damp_period, 1.0..=1000.0, "DAMP_PERIOD"))
-            .on_hover_text("How often damping is applied (board ticks). Larger = longer sustain.")
+            .on_hover_text("How often damping is applied (in ticks). Larger = longer sustain.")
             .changed();
         changed |= ui
             .add(
@@ -226,16 +226,16 @@ impl FtmModel for PureString {
             .changed();
         changed |= ui
             .add(unbounded_slider(&mut self.play_magnitude, 0.0..=2500.0, "PLAY_MAGNITUDE"))
-            .on_hover_text("Velocity threshold; below it a strike is silent. Firmware: 2000.")
+            .on_hover_text("Velocity threshold; below it a strike is silent.")
             .changed();
         changed |= ui
             .add(unbounded_slider(&mut self.max_magnitude, 1.0..=5000.0, "MAX_MAGNITUDE"))
-            .on_hover_text("Velocity mapped to full amplitude. Firmware: 2500.")
+            .on_hover_text("Velocity mapped to full amplitude.")
             .changed();
 
         changed |= ui
             .checkbox(&mut self.key_tracks_pitch, "Key tracks pitch")
-            .on_hover_text("Off: c/2l sets the pitch and the key transposes — the original air-guitar behavior.")
+            .on_hover_text("Off: c/2l sets the pitch and the key transposes a fixed string.")
             .changed();
         ui.add_enabled_ui(self.key_tracks_pitch, |ui| {
             egui::ComboBox::from_label("Pitch mode")

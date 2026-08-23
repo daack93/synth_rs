@@ -25,9 +25,9 @@ pub mod webster_horn;
 /// Maximum partials a single voice can hold (hard array bound).
 pub const MAX_MODES: usize = 512;
 
-/// The 2014 board's timer ran at ~10 kHz ("100 msTicks = 10 ms"), which is also
-/// the firmware `TIME_SCALE`. Named so `DAMP_PERIOD` / `TIME_SCALE` map from
-/// board-ticks onto real seconds the way they did on hardware.
+/// The modeling tick rate (~10 kHz) that the per-mode decay is expressed in.
+/// `DAMP_PERIOD` and `TIME_SCALE` are counted in these ticks, so this constant
+/// converts them onto real seconds.
 #[allow(dead_code)] // used by the geometric/physical plugins added in later PRs
 pub const TICK_RATE: f32 = 10_000.0;
 
@@ -227,11 +227,11 @@ pub fn default_model() -> Box<dyn FtmModel> {
         .expect("model registry is empty")
 }
 
-/// Firmware accelerometer→amplitude mapping, shared by the firmware models:
-/// key velocity stands in for the accelerometer magnitude, and
+/// Maps note velocity to a strike level, shared by the struck/plucked models:
+/// velocity sets the strike magnitude, and
 /// `(mag - PLAY_MAGNITUDE)/(MAX_MAGNITUDE - PLAY_MAGNITUDE)` sets the level.
 #[inline]
-#[allow(dead_code)] // used by the firmware/geometric plugins added in later PRs
+#[allow(dead_code)] // used by the geometric/physical plugins added in later PRs
 pub fn strike_amplitude(vel: f32, play_magnitude: f32, max_magnitude: f32) -> f32 {
     let mag = vel * max_magnitude;
     let span = max_magnitude - play_magnitude;
