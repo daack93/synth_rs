@@ -5,7 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{strike_amplitude, unbounded_slider, Excitation, FtmModel, ModeBuffer, PitchMode, TICK_RATE};
+use super::voice::{Excitation as Wave, ExcitationKind, Exciter, PluckExciter, Resonator};
+use super::{unbounded_slider, Excitation, FtmModel, ModeBuffer, PitchMode, TICK_RATE};
 
 const PI: f32 = std::f32::consts::PI;
 const TWO_PI: f32 = std::f32::consts::TAU;
@@ -73,93 +74,17 @@ impl FtmModel for PureString {
     }
 
     fn excite(&self, freq_hz: f32, vel: f32, sr: f32, out: &mut ModeBuffer) {
-        out.clear();
-        out.sustain = self.excitation == Excitation::Bowed; // bowed = driven/sustained
-        let amp_strike = strike_amplitude(vel, self.play_magnitude, self.max_magnitude);
-        if amp_strike <= 0.0 {
-            return; // below play threshold — silent, like a gentle shake
+        // Decomposed: a pluck (or bow) at `pluck_pos` drives the string
+        // resonator. The physics lives in `StringResonator`; this stays a plain
+        // model for the registry/presets by delegating to it.
+        let exc = PluckExciter {
+            position: self.pluck_pos,
+            play_magnitude: self.play_magnitude,
+            max_magnitude: self.max_magnitude,
+            bowed: self.excitation == Excitation::Bowed,
         }
-
-        // Reference length; in Physical mode the string shortens for higher
-        // notes so it matches Transpose at C4 and gets more inharmonic above it.
-        let l_ref = self.string_length;
-        let l_ref_safe = if l_ref.abs() < 1e-3 { 1e-3 } else { l_ref };
-        let (l_freq, decay_scale) =
-            if self.key_tracks_pitch && self.pitch_mode == PitchMode::Physical {
-                let ratio = (super::REF_PITCH_HZ / freq_hz.max(1.0)).clamp(0.02, 50.0);
-                // Full length scaling for pitch/inharmonicity; a gentler power for
-                // the decay so highs speed up without vanishing (the raw 1/l² is
-                // too aggressive).
-                (l_ref_safe * ratio, (freq_hz.max(1.0) / super::REF_PITCH_HZ).powf(0.6))
-            } else {
-                (l_ref_safe, 1.0)
-            };
-
-        // Frequency (inharmonicity) terms use the note's length.
-        let c = self.prop_speed / l_freq;
-        let s = self.stiffness / l_freq;
-        let wm_a = (PI * s).powi(4); // W^2 = wm_a*m^4 + wm_b*m^2 - O^2
-        let wm_b = (c * PI).powi(2);
-        // Decay terms use the reference length; Physical mode scales the whole
-        // decay by `decay_scale` instead.
-        let d3 = self.freq_dep_damping / (l_ref_safe * l_ref_safe);
-        let om_m = PI * PI * d3 / 2.0; // sigma[m] = om_m*m^2 + om_c
-        let om_c = -self.damping / 2.0;
-
-        let damp_per = self.damp_period.max(1e-3);
-        let n_req = self.depth.clamp(1, super::MAX_MODES);
-
-        // Pluck weight: Fourier coefficient of a triangular initial displacement
-        // plucked at fraction p of the length, K[m] = 2 sin(mπp) / (m²π² p(1-p)).
-        // At p = 0.5 the even modes vanish (triangle spectrum); as p → 0 it fills
-        // in as ~1/m (saw spectrum). Guarded away from the poles.
-        let p = self.pluck_pos.clamp(1e-3, 1.0 - 1e-3);
-        let pq = p * (1.0 - p);
-
-        // Precompute W, sigma, K per mode (also gives W[0] for key normalization).
-        let mut w = [0.0f32; super::MAX_MODES];
-        let mut sig = [0.0f32; super::MAX_MODES];
-        let mut kk = [0.0f32; super::MAX_MODES];
-        let mut amp_sum = 0.0f32;
-        let mut count = 0usize;
-        for i in 0..n_req {
-            let m = (i + 1) as f32;
-            let m2 = m * m;
-            let m4 = m2 * m2;
-            let sigma = om_m * m2 + om_c;
-            let o_lin = (sigma / damp_per).exp(); // per-tick decay factor O[i], ~1
-            let w2 = (wm_a * m4 + wm_b * m2 - o_lin * o_lin).max(0.0);
-            let k = (2.0 / (m2 * PI * PI * pq)) * (m * PI * p).sin();
-            w[count] = w2.sqrt();
-            sig[count] = sigma;
-            kk[count] = k;
-            amp_sum += k.abs();
-            count += 1;
-        }
-        if count == 0 {
-            return;
-        }
-
-        let w0 = if w[0] > 1e-6 { w[0] } else { 1.0 };
-        let ts = self.time_scale.max(1.0);
-        let norm = if amp_sum > 1e-6 { amp_strike / amp_sum } else { amp_strike };
-
-        for i in 0..count {
-            let freq = if self.key_tracks_pitch {
-                freq_hz * (w[i] / w0)
-            } else {
-                // Absolute physical mapping W*TICK_RATE/(TIME_SCALE*2pi).
-                w[i] * TICK_RATE / (ts * TWO_PI)
-            };
-            if freq >= sr * 0.45 {
-                break; // near Nyquist: drop the rest (ascending order)
-            }
-            // Each mode's amplitude is multiplied by O = exp(sigma/DAMP_PERIOD)
-            // every DAMP_PERIOD ticks; over a second that is a per-second rate of
-            // sigma*TICK_RATE/DAMP_PERIOD^2. decay = -that (sigma <= 0 => decay >= 0).
-            let decay = -sig[i] * TICK_RATE / (damp_per * damp_per) * decay_scale;
-            out.push(freq, kk[i] * norm, decay);
-        }
+        .excite(freq_hz, vel);
+        self.resonator().resonate(freq_hz, sr, &exc, out);
     }
 
     fn params_ui(&mut self, ui: &mut egui::Ui) -> bool {
@@ -278,6 +203,127 @@ impl FtmModel for PureString {
 
     fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+impl PureString {
+    /// The string resonator this model's parameters describe.
+    fn resonator(&self) -> StringResonator {
+        StringResonator {
+            stiffness: self.stiffness,
+            prop_speed: self.prop_speed,
+            damping: self.damping,
+            freq_dep_damping: self.freq_dep_damping,
+            string_length: self.string_length,
+            depth: self.depth,
+            damp_period: self.damp_period,
+            time_scale: self.time_scale,
+            key_tracks_pitch: self.key_tracks_pitch,
+            pitch_mode: self.pitch_mode,
+        }
+    }
+}
+
+/// A Kirchhoff string as a reusable [`Resonator`]: its (stiff, damped) mode
+/// frequencies and decays, and per-mode amplitudes from the excitation's pluck
+/// position (the triangular-pluck Fourier weights). [`PureString`] is the
+/// plain-model face of a [`PluckExciter`] driving it.
+pub struct StringResonator {
+    pub stiffness: f32,
+    pub prop_speed: f32,
+    pub damping: f32,
+    pub freq_dep_damping: f32,
+    pub string_length: f32,
+    pub depth: usize,
+    pub damp_period: f32,
+    pub time_scale: f32,
+    pub key_tracks_pitch: bool,
+    pub pitch_mode: PitchMode,
+}
+
+impl Resonator for StringResonator {
+    fn resonate(&self, note_hz: f32, sr: f32, exc: &Wave, out: &mut ModeBuffer) {
+        out.clear();
+        out.sustain = exc.kind == ExcitationKind::Bowed; // bowed = driven/sustained
+        let amp_strike = exc.strength;
+        if amp_strike <= 0.0 {
+            return; // below play threshold — silent, like a gentle shake
+        }
+
+        // Reference length; in Physical mode the string shortens for higher
+        // notes so it matches Transpose at C4 and gets more inharmonic above it.
+        let l_ref = self.string_length;
+        let l_ref_safe = if l_ref.abs() < 1e-3 { 1e-3 } else { l_ref };
+        let (l_freq, decay_scale) =
+            if self.key_tracks_pitch && self.pitch_mode == PitchMode::Physical {
+                let ratio = (super::REF_PITCH_HZ / note_hz.max(1.0)).clamp(0.02, 50.0);
+                (l_ref_safe * ratio, (note_hz.max(1.0) / super::REF_PITCH_HZ).powf(0.6))
+            } else {
+                (l_ref_safe, 1.0)
+            };
+
+        // Frequency (inharmonicity) terms use the note's length.
+        let c = self.prop_speed / l_freq;
+        let s = self.stiffness / l_freq;
+        let wm_a = (PI * s).powi(4); // W^2 = wm_a*m^4 + wm_b*m^2 - O^2
+        let wm_b = (c * PI).powi(2);
+        // Decay terms use the reference length; Physical mode scales the whole
+        // decay by `decay_scale` instead.
+        let d3 = self.freq_dep_damping / (l_ref_safe * l_ref_safe);
+        let om_m = PI * PI * d3 / 2.0; // sigma[m] = om_m*m^2 + om_c
+        let om_c = -self.damping / 2.0;
+
+        let damp_per = self.damp_period.max(1e-3);
+        let n_req = self.depth.clamp(1, super::MAX_MODES);
+
+        // Pluck weight: Fourier coefficient of a triangular initial displacement
+        // plucked at fraction p of the length, K[m] = 2 sin(mπp) / (m²π² p(1-p)).
+        // At p = 0.5 the even modes vanish (triangle); as p → 0 it fills in as
+        // ~1/m (saw). `p` comes from the excitation. Guarded away from the poles.
+        let p = exc.position.clamp(1e-3, 1.0 - 1e-3);
+        let pq = p * (1.0 - p);
+
+        // Precompute W, sigma, K per mode (also gives W[0] for key normalization).
+        let mut w = [0.0f32; super::MAX_MODES];
+        let mut sig = [0.0f32; super::MAX_MODES];
+        let mut kk = [0.0f32; super::MAX_MODES];
+        let mut amp_sum = 0.0f32;
+        let mut count = 0usize;
+        for i in 0..n_req {
+            let m = (i + 1) as f32;
+            let m2 = m * m;
+            let m4 = m2 * m2;
+            let sigma = om_m * m2 + om_c;
+            let o_lin = (sigma / damp_per).exp(); // per-tick decay factor O[i], ~1
+            let w2 = (wm_a * m4 + wm_b * m2 - o_lin * o_lin).max(0.0);
+            let k = (2.0 / (m2 * PI * PI * pq)) * (m * PI * p).sin();
+            w[count] = w2.sqrt();
+            sig[count] = sigma;
+            kk[count] = k;
+            amp_sum += k.abs();
+            count += 1;
+        }
+        if count == 0 {
+            return;
+        }
+
+        let w0 = if w[0] > 1e-6 { w[0] } else { 1.0 };
+        let ts = self.time_scale.max(1.0);
+        let norm = if amp_sum > 1e-6 { amp_strike / amp_sum } else { amp_strike };
+
+        for i in 0..count {
+            let freq = if self.key_tracks_pitch {
+                note_hz * (w[i] / w0)
+            } else {
+                // Absolute physical mapping W*TICK_RATE/(TIME_SCALE*2pi).
+                w[i] * TICK_RATE / (ts * TWO_PI)
+            };
+            if freq >= sr * 0.45 {
+                break; // near Nyquist: drop the rest (ascending order)
+            }
+            let decay = -sig[i] * TICK_RATE / (damp_per * damp_per) * decay_scale;
+            out.push(freq, kk[i] * norm, decay);
+        }
     }
 }
 

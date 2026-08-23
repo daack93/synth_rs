@@ -32,7 +32,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{FtmModel, ModeBuffer, MAX_MODES, REF_PITCH_HZ};
+use super::voice::{Excitation, ExcitationKind, Exciter, Resonator, StrikeExciter};
+use super::{unbounded_slider, FtmModel, ModeBuffer, MAX_MODES, REF_PITCH_HZ};
 
 /// Nodal-diameter orders to search (0 = breathing, 1 = rocking, …).
 const N_MAX: usize = 18;
@@ -89,55 +90,14 @@ impl FtmModel for PurePlate {
     }
 
     fn excite(&self, freq_hz: f32, vel: f32, sr: f32, out: &mut ModeBuffer) {
-        out.clear();
-        let nu = self.poisson.clamp(-0.9, 0.49) as f64;
-
-        // Solve the free-plate eigenvalues λ (geometry-independent).
-        let roots = plate_eigenvalues(nu);
-        if roots.is_empty() {
-            return;
-        }
-        let lam0 = roots[0].1; // fundamental = smallest λ
-
-        // The fundamental maps to the played note (or a fixed reference).
-        let played = if self.key_tracks_pitch { freq_hz } else { REF_PITCH_HZ };
-        let nyquist = 0.45 * sr;
-        let base_rate = 1.0 / self.decay_time.max(0.05);
-        let want = self.modes.clamp(1, MAX_MODES);
-        let rho_s = self.strike_pos.clamp(0.0, 1.0) as f64;
-
-        let mut weights: Vec<f32> = Vec::with_capacity(want);
-        let mut max_w = 0.0f32;
-
-        for &(n, lam) in &roots {
-            if out.n >= want {
-                break;
-            }
-            let f = played * (lam * lam / (lam0 * lam0)) as f32;
-            if f >= nyquist || !f.is_finite() {
-                continue;
-            }
-            // Modal excitation weight: the mode shape sampled at the strike
-            // radius, normalized by its own peak so each mode couples in [0,1].
-            let w = strike_weight(nu, n, lam, rho_s) as f32;
-            if !w.is_finite() {
-                continue;
-            }
-            // Highs decay faster: decay grows with the frequency ratio.
-            let decay = (base_rate * (1.0 + self.hf_damp * (f / played - 1.0))).max(0.02);
-            out.push(f, w, decay);
-            weights.push(w);
-            max_w = max_w.max(w.abs());
-        }
-
-        // Normalize the loudest mode to unit amplitude, then apply velocity.
-        if max_w > 1e-9 {
-            out.scale_amps(vel / max_w);
-        }
+        // Decomposed: a strike at `strike_pos` drives the plate resonator. The
+        // physics lives in `PlateResonator`; this stays a plain model for the
+        // registry/presets by delegating to it.
+        let exc = StrikeExciter { position: self.strike_pos }.excite(freq_hz, vel);
+        self.resonator().resonate(freq_hz, sr, &exc, out);
     }
 
     fn params_ui(&mut self, ui: &mut egui::Ui) -> bool {
-        use super::unbounded_slider;
         let mut changed = false;
         ui.strong("Plate (free circular, Kirchhoff)");
         changed |= ui
@@ -168,6 +128,80 @@ impl FtmModel for PurePlate {
 
     fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+impl PurePlate {
+    /// The plate resonator this model's parameters describe.
+    fn resonator(&self) -> PlateResonator {
+        PlateResonator {
+            poisson: self.poisson,
+            decay_time: self.decay_time,
+            hf_damp: self.hf_damp,
+            modes: self.modes,
+            key_tracks_pitch: self.key_tracks_pitch,
+        }
+    }
+}
+
+/// A free circular plate as a reusable [`Resonator`]: its Kirchhoff modes,
+/// frequencies and decays, and per-mode amplitudes from the excitation's strike
+/// position (via the mode shapes). An exciter's `noise` (e.g. a cymbal wash) is
+/// passed straight through to the buffer. This is the physics; [`PurePlate`] is
+/// the plain-model face of a `StrikeExciter` driving it.
+pub struct PlateResonator {
+    pub poisson: f32,
+    pub decay_time: f32,
+    pub hf_damp: f32,
+    pub modes: usize,
+    pub key_tracks_pitch: bool,
+}
+
+impl Resonator for PlateResonator {
+    fn resonate(&self, note_hz: f32, sr: f32, exc: &Excitation, out: &mut ModeBuffer) {
+        out.clear();
+        out.sustain = exc.kind == ExcitationKind::Bowed; // a plate is struck
+        let nu = self.poisson.clamp(-0.9, 0.49) as f64;
+
+        // Solve the free-plate eigenvalues λ (geometry-independent).
+        let roots = plate_eigenvalues(nu);
+        if roots.is_empty() {
+            return;
+        }
+        let lam0 = roots[0].1; // fundamental = smallest λ
+
+        // The fundamental maps to the played note (or a fixed reference).
+        let played = if self.key_tracks_pitch { note_hz } else { REF_PITCH_HZ };
+        let nyquist = 0.45 * sr;
+        let base_rate = 1.0 / self.decay_time.max(0.05);
+        let want = self.modes.clamp(1, MAX_MODES);
+        let rho_s = exc.position.clamp(0.0, 1.0) as f64;
+
+        let mut max_w = 0.0f32;
+        for &(n, lam) in &roots {
+            if out.n >= want {
+                break;
+            }
+            let f = played * (lam * lam / (lam0 * lam0)) as f32;
+            if f >= nyquist || !f.is_finite() {
+                continue;
+            }
+            // Modal excitation weight: the mode shape sampled at the strike
+            // radius, normalized by its own peak so each mode couples in [0,1].
+            let w = strike_weight(nu, n, lam, rho_s) as f32;
+            if !w.is_finite() {
+                continue;
+            }
+            // Highs decay faster: decay grows with the frequency ratio.
+            let decay = (base_rate * (1.0 + self.hf_damp * (f / played - 1.0))).max(0.02);
+            out.push(f, w, decay);
+            max_w = max_w.max(w.abs());
+        }
+
+        // Normalize the loudest mode to unit amplitude, then apply strength.
+        if max_w > 1e-9 {
+            out.scale_amps(exc.strength / max_w);
+        }
     }
 }
 

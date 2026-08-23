@@ -15,6 +15,7 @@
 //! decay rates of its partials and register it in [`registry`].
 
 pub mod basic_wave;
+pub mod voice;
 pub mod cymbal;
 pub mod drum_membrane;
 pub mod metal_bell;
