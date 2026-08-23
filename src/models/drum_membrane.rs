@@ -149,12 +149,11 @@ impl FtmModel for DrumMembrane {
         let mut tmp: Vec<(f32, f32, f32)> = Vec::with_capacity(cands.len()); // freq, weight, decay
         for &(alpha, nu) in &cands {
             let ratio = omega_of(alpha) / w0; // geometry-derived inharmonic ratio
-            let freq = (f_play * ratio) as f32;
+            let freq = (f_play * ratio) as f32; // fundamental lands on the played note
             if freq >= sr * 0.45 {
                 continue;
             }
             let k_weight = bessel_jn(nu, alpha * rho);
-            // Higher modes decay faster (∝ how far above the fundamental they sit).
             let decay = a0 + self.hf_damping * ((ratio * ratio) as f32 - 1.0);
             amp_sum += k_weight.abs();
             tmp.push((freq, k_weight as f32, decay));

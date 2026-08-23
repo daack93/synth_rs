@@ -117,6 +117,18 @@ impl Comp {
         )
     }
 
+    /// The resting (fixed-geometry) pitch of a geometric resonator, Hz — the
+    /// pitch it sounds at when it is *not* tracking the key (a coupling body/pot,
+    /// a sympathetic string). `None` for components that don't set an absolute
+    /// pitch from geometry (exciters, fixed-formant bodies, note-tracked models).
+    fn natural_pitch(&self) -> Option<f32> {
+        match self {
+            Comp::String(m) => Some(m.open_pitch_hz()),
+            Comp::Membrane(m) => Some(m.open_pitch_hz()),
+            _ => None,
+        }
+    }
+
     /// Instantiate this component's per-voice DSP node for a played note.
     /// `driven` selects the resonator normalization: `false` = struck (a unit
     /// impulse rings out at the modal amplitudes), `true` = a constant-peak-gain
@@ -513,10 +525,19 @@ impl FtmModel for InstrumentGraph {
                     .any(|e| e.to == i && e.from < n && !comps[e.from].is_exciter())
             })
             .collect();
+        // Pitch mapping: a *voice* resonator (exciter-fed, not `driven`) tracks the
+        // played key; a *coupling* resonator (`driven` — a body, a banjo pot, a
+        // shell) stays at its own fixed geometry and colours whatever drives it.
+        // So the tom head tracks the key but the banjo pot does not, purely from
+        // how each is wired. (A key_map can still override a coupling resonator's
+        // param to make it track.)
         let nodes: Vec<Box<dyn Node>> = comps
             .iter()
             .enumerate()
-            .map(|(i, c)| c.instantiate(freq_hz, vel, sr, driven[i]))
+            .map(|(i, c)| {
+                let fq = if driven[i] { c.natural_pitch().unwrap_or(freq_hz) } else { freq_hz };
+                c.instantiate(fq, vel, sr, driven[i])
+            })
             .collect();
         let mut inputs: Vec<Vec<(usize, f32)>> = vec![Vec::new(); nodes.len()];
         for e in &self.edges {
