@@ -333,6 +333,14 @@ impl Instrument {
                     v.env[i] = (-buf.decay[i] * elapsed).exp().min(ENV_CAP);
                 }
             }
+            // Band-limit: a mode at or above Nyquist can't be represented at
+            // this sample rate and would alias down to a buzzy, inharmonic
+            // tone, so mute it. This is why adding high modes to a horn buzzes
+            // at 48 kHz but stays clean in a 96/192 kHz export — the higher
+            // rate raises Nyquist and admits those modes for real.
+            if buf.freq[i] >= sr * 0.5 {
+                v.amp[i] = 0.0;
+            }
         }
         v.n_modes = n;
 

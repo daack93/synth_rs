@@ -19,7 +19,7 @@ use crate::models::musical_string::MusicalString;
 use crate::models::pure_plate::PurePlate;
 use crate::models::pure_string::PureString;
 use crate::models::snare::Snare;
-use crate::models::webster_horn::{Boundary, Wavefront, WebsterHorn};
+use crate::models::webster_horn::{Boundary, PlayMode as HornPlay, Wavefront, WebsterHorn};
 use crate::models::{model_from_id, Excitation, FtmModel};
 use crate::instrument::EngineParams;
 use crate::project::ZoneData;
@@ -43,6 +43,12 @@ pub struct Preset {
     /// Kit zones. Empty ⇒ a single instrument; non-empty ⇒ a kit.
     #[serde(default)]
     pub zones: Vec<ZoneData>,
+    /// Provenance: `Some(true)` = a built-in factory preset (code-owned, so it
+    /// is refreshed from [`factory`] on launch); `Some(false)` = user-saved
+    /// (never overwritten); `None` = a legacy file from before this field, which
+    /// [`load_library`] treats as refreshable so old factory copies update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<bool>,
 }
 
 impl Preset {
@@ -54,6 +60,7 @@ impl Preset {
             params: model.to_json(),
             engine: engine.clone(),
             zones: Vec::new(),
+            builtin: Some(false),
         }
     }
 
@@ -65,6 +72,7 @@ impl Preset {
             params: serde_json::Value::Null,
             engine: EngineParams::default(),
             zones,
+            builtin: Some(false),
         }
     }
 
@@ -188,10 +196,12 @@ pub fn factory() -> Vec<Preset> {
             "Trumpet",
             WebsterHorn {
                 boundary: Boundary::Brass,
-                r1: 0.0045,
-                r2: -0.0030,
-                r3: 0.0320,
-                length: 1.4,
+                // Bell-flare quadratic over its final 0.6 m (Bb trumpet). Base
+                // resonance 116.5 Hz = open bore → longest bore anchored at E2.
+                r1: 0.0058,
+                r2: 0.0150,
+                r3: 0.1550,
+                length: 0.6,
                 wave_speed: 343.0,
                 blow_pos: 0.0,
                 depth: 32,
@@ -201,19 +211,26 @@ pub fn factory() -> Vec<Preset> {
                 visco_loss: 1.5,             // narrow leadpipe = warm boundary-layer loss
                 radiation: 1.6,              // bright, open bell
                 wavefront: Wavefront::Spherical, // real bore: curved wavefronts at the bell
+                // Proof of concept: play like a real Bb trumpet — overblow onto
+                // one of the 7 valve bore lengths (0..6 semitones) and land it on
+                // the key. Longest bore's fundamental = concert E2 (open bore =
+                // pedal Bb2 a tritone above).
+                play_mode: HornPlay::OverblowTracked,
+                valve_steps: 6,
+                overblow_anchor_hz: 82.41,
                 ..WebsterHorn::default()
             },
             eng(0.6, 30.0, 45.0),
         ),
         // French Horn: same bore idea, longer + darker (more HF damping).
         make(
-            "French Horn",
+            "French Horn (F)",
             WebsterHorn {
                 boundary: Boundary::Brass,
-                r1: 0.0045,
-                r2: -0.0020,
-                r3: 0.0250,
-                length: 2.4,
+                r1: 0.0090,
+                r2: 0.0350,
+                r3: 0.1110,
+                length: 1.0,
                 blow_pos: 0.0,
                 depth: 30,
                 resolution: 400,
@@ -222,6 +239,40 @@ pub fn factory() -> Vec<Preset> {
                 visco_loss: 2.5,             // long narrow tubing = mellow, stuffed
                 radiation: 0.5,              // dark, backward-facing bell
                 wavefront: Wavefront::Spherical,
+                // Key-tracked: 3 valves (0..6 semitones). Horn "in F" → the open
+                // bore's fundamental is concert F1 (43.65 Hz), so the LONGEST bore
+                // (−6 semitones) is anchored at B0 = 30.87 Hz. Mid-range notes fall
+                // on high harmonics (8th–16th) — the mellow, "living high" horn
+                // character.
+                play_mode: HornPlay::OverblowTracked,
+                valve_steps: 6,
+                overblow_anchor_hz: 30.87,
+                ..WebsterHorn::default()
+            },
+            eng(0.55, 30.0, 150.0),
+        ),
+        make(
+            "French Horn (Bb)",
+            WebsterHorn {
+                boundary: Boundary::Brass,
+                r1: 0.0090,
+                r2: 0.0350,
+                r3: 0.1110,
+                length: 1.0,
+                blow_pos: 0.0,
+                depth: 30,
+                resolution: 400,
+                damping: 8.0,
+                freq_dep_damping: -0.10,
+                visco_loss: 2.5,
+                radiation: 0.5,
+                wavefront: Wavefront::Spherical,
+                // The Bb side of a double horn: shorter, so a given note sits on a
+                // lower harmonic — more secure/brighter. Open fundamental concert
+                // Bb1 (58.27 Hz) → longest bore anchored at E1 = 41.20 Hz.
+                play_mode: HornPlay::OverblowTracked,
+                valve_steps: 6,
+                overblow_anchor_hz: 41.20,
                 ..WebsterHorn::default()
             },
             eng(0.55, 30.0, 150.0),
@@ -236,7 +287,28 @@ pub fn factory() -> Vec<Preset> {
         // Trombone: long cylindrical brass with a bell flare.
         make(
             "Trombone",
-            WebsterHorn { boundary: Boundary::Brass, r1: 0.0068, r2: -0.001, r3: 0.030, length: 2.7, blow_pos: 0.0, depth: 30, resolution: 400, damping: 8.0, freq_dep_damping: -0.08, visco_loss: 1.8, radiation: 1.4, wavefront: Wavefront::Spherical, ..WebsterHorn::default() },
+            WebsterHorn {
+                boundary: Boundary::Brass,
+                // Bell-flare quadratic over its final 0.8 m (tenor Bb trombone).
+                // Base resonance 58.3 Hz = open bore → longest position anchored
+                // at E1. The slide's 7 positions map to the 0..6 semitone steps.
+                r1: 0.0067,
+                r2: 0.0220,
+                r3: 0.1450,
+                length: 0.8,
+                blow_pos: 0.0,
+                depth: 30,
+                resolution: 400,
+                damping: 8.0,
+                freq_dep_damping: -0.08,
+                visco_loss: 1.8,
+                radiation: 1.4,
+                wavefront: Wavefront::Spherical,
+                play_mode: HornPlay::OverblowTracked,
+                valve_steps: 6,
+                overblow_anchor_hz: 41.20,
+                ..WebsterHorn::default()
+            },
             eng(0.6, 25.0, 60.0),
         ),
         // ---- Woodwinds (bore shape + end condition set the character) ----
@@ -300,21 +372,36 @@ pub fn factory() -> Vec<Preset> {
         make("Triangle Lead", BasicWave { waveform: Waveform::Triangle, harmonics: 16, decay_time: 1.5 }, eng(0.5, 3.0, 120.0)),
         make("Saw Lead", BasicWave { waveform: Waveform::Saw, harmonics: 40, decay_time: 1.2 }, eng(0.45, 3.0, 120.0)),
     ]
+    // Stamp every factory preset as built-in so the launch refresh keeps them
+    // in sync with this code (user-saved presets are left untouched).
+    .into_iter()
+    .map(|mut p| {
+        p.builtin = Some(true);
+        p
+    })
+    .collect()
 }
 
 /// Seed the folder with the factory presets if it currently has none (first run).
 /// Returns the resulting list.
-pub fn seed_if_empty() -> Vec<Preset> {
+/// Load the on-disk library, refreshing built-in presets from [`factory`] so
+/// code changes to them take effect on launch. A same-named file is overwritten
+/// only when it is a built-in (`builtin == Some(true)`) or a legacy file from
+/// before the `builtin` field (`None`); a user-saved preset (`Some(false)`) is
+/// never touched, and a brand-new factory preset is written for the first time.
+pub fn load_library() -> Vec<Preset> {
     let dir = presets_dir();
     let existing = list_in(&dir);
-    if existing.is_empty() {
-        for p in factory() {
+    for p in factory() {
+        let refresh = match existing.iter().find(|e| e.name == p.name) {
+            None => true,                        // new factory preset → seed it
+            Some(e) => e.builtin != Some(false), // built-in or legacy → refresh
+        };
+        if refresh {
             let _ = save_in(&dir, &p);
         }
-        list_in(&dir)
-    } else {
-        existing
     }
+    list_in(&dir)
 }
 
 /// (Re)write every factory preset, overwriting same-named files. Returns the list.
