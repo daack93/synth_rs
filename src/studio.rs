@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::instrument::{make_sine_table, EngineParams, Instrument};
-use crate::kit::{Kit, Playable};
+use crate::kit::Playable;
 use crate::models::{default_model, model_from_id, FtmModel};
 use crate::project::{AutoPoint, ClipData, SongData, NoteEvent, TrackData, TempoGrid, ZoneData};
 
@@ -490,7 +490,7 @@ impl Studio {
         Studio {
             sr: sample_rate,
             sine: sine.clone(),
-            live: Playable::Single(Instrument::new(sample_rate, sine)),
+            live: Playable::single(Instrument::new(sample_rate, sine)),
             tracks: Vec::new(),
             arrangement: Vec::new(),
             playlist: Vec::new(),
@@ -1134,10 +1134,10 @@ impl Studio {
         match cfg {
             LiveConfig::Single { model_id, params, engine } => {
                 let model = model_from_id(&model_id, &params).unwrap_or_else(default_model);
-                Playable::Single(Instrument::with_config(self.sr, self.sine.clone(), model, engine))
+                Playable::single(Instrument::with_config(self.sr, self.sine.clone(), model, engine))
             }
             LiveConfig::Kit { zones } => {
-                Playable::Kit(Kit::from_data(self.sr, self.sine.clone(), &zones))
+                Playable::from_zones(self.sr, self.sine.clone(), &zones)
             }
         }
     }
@@ -1147,14 +1147,14 @@ impl Studio {
     fn track_playable(&self, lt: &TrackData) -> Playable {
         if lt.zones.is_empty() {
             let model = model_from_id(&lt.model_id, &lt.params).unwrap_or_else(default_model);
-            Playable::Single(Instrument::with_config(
+            Playable::single(Instrument::with_config(
                 self.sr,
                 self.sine.clone(),
                 model,
                 lt.engine.clone(),
             ))
         } else {
-            Playable::Kit(Kit::from_data(self.sr, self.sine.clone(), &lt.zones))
+            Playable::from_zones(self.sr, self.sine.clone(), &lt.zones)
         }
     }
 
