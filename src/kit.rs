@@ -155,7 +155,7 @@ impl Kit {
         self.zones.iter().map(Zone::to_data).collect()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn active_voices(&self) -> usize {
         self.zones.iter().map(|z| z.inst.active_voices()).sum()
     }
@@ -225,7 +225,7 @@ impl Playable {
         }
     }
 
-    #[allow(dead_code)] // used in tests / a future voice meter
+    #[cfg(test)]
     pub fn active_voices(&self) -> usize {
         match self {
             Playable::Single(i) => i.active_voices(),
@@ -256,7 +256,7 @@ impl Playable {
     }
 
     /// A stable id used by the UI to key the track editor (`kit` for kits).
-    #[allow(dead_code)] // used in tests
+    #[cfg(test)]
     pub fn model_id(&self) -> String {
         match self {
             Playable::Single(i) => i.model_id().to_string(),

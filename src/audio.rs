@@ -1,5 +1,21 @@
-//! cpal audio-output wiring. Owns the [`Studio`] on the real-time thread and
-//! drains command messages from the UI / MIDI threads each callback.
+//! cpal audio-output wiring.
+//!
+//! The [`Studio`] is the synth/sequencer state. It is *moved into* the audio
+//! callback so it lives on the real-time thread — deliberately, not by
+//! accident. The callback mutates it every buffer (advancing the transport,
+//! firing notes, summing voices), and doing that from a real-time thread must be
+//! lock-free: it can't block on a mutex the UI might be holding without risking
+//! xruns. So the two threads don't *share* the Studio — they pass messages:
+//!
+//!   * the UI / MIDI threads send [`Command`]s down an mpsc channel, drained at
+//!     the top of each callback;
+//!   * the UI reads back a [`SharedView`] (atomics / lock-free snapshot) for
+//!     meters and playhead.
+//!
+//! So conceptually the app owns the Studio's *control surface* (the command
+//! sender + the view) while the real-time thread owns the *live instance*. The
+//! audio module is the thin layer that owns the device and pumps that instance;
+//! it is not "above" the studio in the architecture.
 
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;

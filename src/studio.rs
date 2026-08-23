@@ -1,22 +1,22 @@
-//! The studio: a multi-timbral host + looper.
+//! The studio: a multi-timbral, multi-track arrangement host.
 //!
-//! It owns one *live* instrument (what you play) plus one instrument per loop
-//! track, mixes them, and runs the looper transport. Each track remembers the
-//! instrument it was recorded with, so you can lay a bass line, switch presets,
-//! and overdub a guitar on top — they play back with their own sounds.
+//! It owns one *live* instrument (what you play) plus one instrument per track,
+//! mixes them, and runs the transport. Each track remembers the instrument it
+//! was recorded with, so you can lay a bass line, switch presets, and record a
+//! guitar on the next track — they play back with their own sounds.
 //!
 //! Timing is sample-accurate: the studio advances a sample clock and fires each
 //! track's recorded note events at the exact frame they land on.
 //!
-//! ## Transport (spacebar "pedal")
-//! * **Tap** — mode-specific primary action.
-//! * **Stop** — stop playback, keep the loops (spacebar hold ~0.5 s).
-//! * **Reset** — clear everything (spacebar hold ~1.5 s).
+//! ## Transport
+//! Play runs the arrangement; Record either counts in and captures a new clip at
+//! the seek cursor, or punches in a one-pass overdub while already playing.
+//! Repeat loops the arrangement instead of stopping at the end.
 //!
-//! ### Modes
-//! * **Pedal** — tap: Idle→Record→Play→Stop→Play… Extra tracks via [`Command::ArmOverdub`].
-//! * **Overdub** — tap: Record base, then each tap finalizes the current take and
-//!   starts a new track, layering hands-free.
+//! NOTE: a legacy spacebar-"pedal" loop machine ([`LooperMode`], [`tap`], the
+//! overdub-cycle transitions) still lives in this module but is not wired to the
+//! shipped UI. It is slated for removal into a dedicated pedal plugin — see the
+//! PR discussion. The arrangement transport above is the real interface.
 
 use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1800,14 +1800,17 @@ impl Studio {
     /// Render the currently-installed loop/song for `frames` samples (transport
     /// running), then let voices ring for `tail` more with the transport halted
     /// (no new events, no hard cutoff), into one mono buffer. For WAV export.
+    /// Render `frames` frames plus a `tail`-frame ring-out to an interleaved
+    /// **stereo** buffer (length `(frames + tail) * 2`). The arrangement's
+    /// per-track pan is baked into the two channels.
     pub fn render_offline(&mut self, frames: usize, tail: usize) -> Vec<f32> {
-        let mut buf = vec![0.0f32; frames];
-        self.render(&mut buf, 1);
+        let mut buf = vec![0.0f32; frames * 2];
+        self.render(&mut buf, 2);
         // Halt the transport but keep sounding voices so they decay naturally.
         self.playing = false;
         if tail > 0 {
-            let mut ring = vec![0.0f32; tail];
-            self.render(&mut ring, 1);
+            let mut ring = vec![0.0f32; tail * 2];
+            self.render(&mut ring, 2);
             buf.extend_from_slice(&ring);
         }
         buf
@@ -1871,10 +1874,40 @@ impl Studio {
         self.publish_scalars();
     }
 
+    /// Fire every clip's note events that land on the current sample.
+    ///
+    /// Four coordinate systems are in play; keeping them straight is the whole
+    /// job here:
+    ///
+    /// * `song_pos` — the transport playhead, in frames from the song's start.
+    /// * `clip_pos` — frames since *this clip* started (`song_pos - clip.start`).
+    /// * `cycle_pos` — position within the clip's current loop cycle
+    ///   (`clip_pos % loop_unit` when looping, else just `clip_pos`).
+    /// * `note_pos` — where to look in the clip's note timeline, after applying
+    ///   the clip's front `offset` and wrapping by `note_span`.
+    ///
+    /// Two lengths shape those:
+    ///
+    /// * `content_window` — how much of each cycle actually contains content;
+    ///   the rest of the cycle is silence.
+    /// * `loop_unit` — the repeat period when looping.
+    ///
+    /// **Worked example.** A 2 s clip (`content_window = 2 s`) with
+    /// `loop_unit = 3 s` and a 0.5 s front `offset`, playing at `clip_pos = 7 s`:
+    /// `cycle_pos = 7 % 3 = 1 s` (into the third cycle) → `1 < 2`, so we're in
+    /// the content portion; `note_pos = (0.5 + 1) % note_span = 1.5 s` into the
+    /// timeline. At `clip_pos = 8 s`, `cycle_pos = 2 s ≥ 2` → the 1 s silent
+    /// tail of the cycle: fire nothing, and release notes on the entry edge.
+    ///
+    /// Invariant: **clips on one track never overlap** (enforced when clips are
+    /// placed/edited). This code relies on it — `was_active` + `all_notes_off`
+    /// clean up one clip's ringing notes at its boundary, which would fight
+    /// another clip on the same track starting in the same span. Overlapping
+    /// layers are expressed as separate tracks instead.
     fn fire_events(&mut self) {
-        let pos = self.pos;
+        let song_pos = self.pos;
         let recording = self.recording;
-        let song = self.loop_len.unwrap_or(0);
+        let song_len = self.loop_len.unwrap_or(0);
         for k in 0..self.playlist.len() {
             let (ti, start, length, offset, content_len, loop_len, looping) = {
                 let c = &self.playlist[k];
@@ -1884,17 +1917,18 @@ impl Studio {
                 continue;
             }
             let period = self.tracks[ti].period.max(1);
-            // Note-space span: forked clips index their own events over
-            // `content_len`; linked clips index the track's recording over `period`.
-            let span = if self.playlist[k].own_events.is_some() {
+            // Note timeline length events index over: a forked clip indexes its
+            // own events over `content_len`; a linked clip indexes the track's
+            // recording over `period`.
+            let note_span = if self.playlist[k].own_events.is_some() {
                 content_len.max(1)
             } else {
                 period
             };
-            let s = if content_len > 0 { content_len } else { period }; // content window
-            let l = if loop_len > 0 { loop_len } else { s }; // loop unit
-            let end = start + if length > 0 { length } else { song.saturating_sub(start) };
-            let active = pos >= start && pos < end;
+            let content_window = if content_len > 0 { content_len } else { period };
+            let loop_unit = if loop_len > 0 { loop_len } else { content_window };
+            let end = start + if length > 0 { length } else { song_len.saturating_sub(start) };
+            let active = song_pos >= start && song_pos < end;
             if Some(ti) == recording {
                 // Don't play the take being recorded, but track its window state.
                 self.playlist[k].was_active = active;
@@ -1907,23 +1941,23 @@ impl Studio {
                 }
                 continue;
             }
-            let u = pos - start;
-            let phase = if looping { u % l } else { u };
-            // Silence portion of a cycle (loop unit longer than the content, or a
-            // one-shot that has finished): fire nothing; release at the boundary.
-            if phase >= s {
-                let prev = u.wrapping_sub(1);
-                let prev_phase = if looping { prev % l } else { prev };
-                if u > 0 && prev_phase < s {
+            let clip_pos = song_pos - start;
+            let cycle_pos = if looping { clip_pos % loop_unit } else { clip_pos };
+            // Silent tail of a cycle (loop unit longer than the content, or a
+            // one-shot that has finished): fire nothing; release on the edge in.
+            if cycle_pos >= content_window {
+                let prev = clip_pos.wrapping_sub(1);
+                let prev_cycle_pos = if looping { prev % loop_unit } else { prev };
+                if clip_pos > 0 && prev_cycle_pos < content_window {
                     self.tracks[ti].inst.all_notes_off(); // clean edge into silence
                 }
                 self.playlist[k].was_active = true;
                 continue;
             }
-            // Position within the content (front-trim / loop phase applied).
-            let local = (offset + phase) % span;
+            // Where to read the note timeline (front-trim + loop phase applied).
+            let note_pos = (offset + cycle_pos) % note_span;
             // At the top of each cycle rewind automation.
-            if phase == 0 {
+            if cycle_pos == 0 {
                 reset_track_automation(&mut self.tracks[ti]);
             }
             let to_fire: Vec<(bool, u8, f32)> = {
@@ -1931,10 +1965,10 @@ impl Studio {
                     Some(ev) => ev,
                     None => &self.tracks[ti].events,
                 };
-                let lo = events.partition_point(|e| e.pos < local);
+                let lo = events.partition_point(|e| e.pos < note_pos);
                 events[lo..]
                     .iter()
-                    .take_while(|e| e.pos == local)
+                    .take_while(|e| e.pos == note_pos)
                     .map(|e| match e.msg {
                         EvMsg::On { note, vel } => (true, note, vel),
                         EvMsg::Off { note } => (false, note, 0.0),
@@ -1949,7 +1983,7 @@ impl Studio {
                     inst.note_off(note);
                 }
             }
-            fire_track_auto(&mut self.tracks[ti], local);
+            fire_track_auto(&mut self.tracks[ti], note_pos);
             self.playlist[k].was_active = true;
         }
     }

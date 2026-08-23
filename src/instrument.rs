@@ -1,4 +1,5 @@
-//! One polyphonic instrument: a voice pool driven by an [`FtmModel`] plugin.
+//! One polyphonic instrument: a voice pool driven by a synthesizer model
+//! plugin (the [`FtmModel`] trait — modal or otherwise).
 //!
 //! This is the former `Synth` engine, now a reusable building block. A
 //! [`crate::studio::Studio`] hosts several instruments at once (the live one you
@@ -36,13 +37,13 @@ pub fn make_sine_table() -> Arc<[f32]> {
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct EngineParams {
-    /// Master output gain (the firmware's SPEAKER_GAIN).
+    /// Master output gain.
     pub gain: f32,
     /// Anti-click attack ramp (ms).
     pub attack_ms: f32,
     /// Release ramp on key-up (ms).
     pub release_ms: f32,
-    /// Minimum time between strikes (the firmware's PLAY_PERIOD); 0 = off.
+    /// Minimum time between strikes (retrigger lockout); 0 = off.
     pub retrigger_ms: f32,
 }
 
@@ -282,7 +283,7 @@ impl Instrument {
         }
     }
 
-    #[allow(dead_code)] // used in tests; handy for a future voice meter
+    #[cfg(test)]
     pub fn active_voices(&self) -> usize {
         self.voices.iter().filter(|v| v.active).count()
     }

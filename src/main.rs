@@ -1,6 +1,7 @@
-//! Synth.RS Studio — a MIDI synth / production-studio framework. Pluggable FTM
-//! (physical-model) instruments, played from an on-screen piano, the computer
-//! keyboard, or a MIDI controller, recorded and arranged into songs.
+//! Synth.RS Studio — a MIDI synth / production-studio framework. Pluggable
+//! synthesizer models (many use physical modeling, but the framework is
+//! method-agnostic), played from an on-screen piano, the computer keyboard, or a
+//! MIDI controller, recorded and arranged into songs.
 
 mod audio;
 mod export;
@@ -121,7 +122,8 @@ struct App {
     selected: usize,
     /// Engine-wide parameters (gain, envelope, retrigger).
     engine: EngineParams,
-    /// Live "kit mode": the keyboard is split/mapped across several instruments.
+    /// Whether the live keyboard is a multi-zone kit (split/mapped across several
+    /// instruments) rather than one instrument.
     live_is_kit: bool,
     /// Zones for the live kit (each an instrument mapped to a key range).
     kit_zones: Vec<ZoneData>,
@@ -176,6 +178,7 @@ struct App {
     // Export
     export_name: String,
     export_sr: u32,
+    export_bit: wav::BitDepth,
     export_hi_res: bool,
     export_status: String,
 
@@ -254,6 +257,7 @@ impl App {
             arr_seeking: false,
             export_name: "take".to_string(),
             export_sr: 48_000,
+            export_bit: wav::BitDepth::Int16,
             export_hi_res: false,
             export_status: String::new(),
             base_midi: 60, // C4
@@ -298,7 +302,7 @@ impl App {
 
     /// Load a preset onto the current target (the live instrument or a track).
     fn apply_preset(&mut self, preset: &Preset) {
-        // A kit preset always loads onto the live keyboard (kit mode). Kit tracks
+        // A kit preset always loads onto the live keyboard. Kit tracks
         // aren't editable in place yet — re-record from the live kit to place one.
         if preset.is_kit() {
             self.live_is_kit = true;
@@ -654,6 +658,14 @@ impl App {
                         ui.selectable_value(&mut self.export_sr, sr, format!("{sr} Hz"));
                     }
                 });
+            ui.label("Depth");
+            egui::ComboBox::from_id_salt("export_bit")
+                .selected_text(self.export_bit.label())
+                .show_ui(ui, |ui| {
+                    for d in [wav::BitDepth::Int16, wav::BitDepth::Int24, wav::BitDepth::Int32] {
+                        ui.selectable_value(&mut self.export_bit, d, d.label());
+                    }
+                });
             ui.checkbox(&mut self.export_hi_res, "Hi-res")
                 .on_hover_text("Max out the horn eigensolve resolution for the render (higher rate already admits more modes).");
             if ui
@@ -682,7 +694,7 @@ impl App {
         let path = export::export_path(&self.export_name);
         let sr = self.export_sr as f32;
         // Render the song once, with a fixed tail so trailing decays aren't cut.
-        match export::render_loop_to_wav(data, sr, 1, 3.0, self.export_hi_res, &path) {
+        match export::render_loop_to_wav(data, sr, 1, 3.0, self.export_hi_res, self.export_bit, &path) {
             Ok(()) => self.export_status = format!("Wrote {}", path.display()),
             Err(e) => self.export_status = format!("Export failed: {e}"),
         }
@@ -1307,7 +1319,7 @@ impl App {
         ui.label(egui::RichText::new(&self.midi_status).weak());
     }
 
-    /// Transport controls: looper mode, state, and pedal buttons.
+    /// Transport controls: play / record / repeat and the tempo grid.
     fn transport_bar(&mut self, ui: &mut egui::Ui) {
         let (state, loop_secs) = self
             .view
@@ -2380,7 +2392,7 @@ fn engine_sliders(ui: &mut egui::Ui, e: &mut EngineParams) -> bool {
     let unbounded = egui::SliderClamping::Never;
     let mut c = false;
     c |= ui
-        .add(egui::Slider::new(&mut e.gain, 0.0..=4.0).clamping(unbounded).text("Gain (SPEAKER_GAIN)"))
+        .add(egui::Slider::new(&mut e.gain, 0.0..=4.0).clamping(unbounded).text("Gain"))
         .changed();
     c |= ui
         .add(egui::Slider::new(&mut e.attack_ms, 0.0..=2000.0).clamping(unbounded).text("Attack (ms)"))
@@ -2389,8 +2401,8 @@ fn engine_sliders(ui: &mut egui::Ui, e: &mut EngineParams) -> bool {
         .add(egui::Slider::new(&mut e.release_ms, 1.0..=5000.0).clamping(unbounded).text("Release (ms)"))
         .changed();
     c |= ui
-        .add(egui::Slider::new(&mut e.retrigger_ms, 0.0..=2000.0).clamping(unbounded).text("Retrigger (PLAY_PERIOD)"))
-        .on_hover_text("Minimum time between strikes. Firmware: 2000 ms; 0 = off.")
+        .add(egui::Slider::new(&mut e.retrigger_ms, 0.0..=2000.0).clamping(unbounded).text("Retrigger (ms)"))
+        .on_hover_text("Minimum time between strikes; 0 = off.")
         .changed();
     c
 }

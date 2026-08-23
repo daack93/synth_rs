@@ -1,29 +1,32 @@
 # synth_rs
 
-A real-time physical-modeling synthesizer in Rust — a desktop re-imagining of a
-2014 embedded "electric air guitar" that generated audio from a plucked-string
-model (the **Function Transformation Method**, FTM). The original derived pitch
-and strike from an accelerometer; here a keyboard does.
+A real-time modeling synthesizer and mini production studio in Rust. Play
+pluggable instruments from an on-screen piano, the computer keyboard, or a MIDI
+controller, then record and arrange them into songs.
 
 ## Architecture
 
-The FTM represents any vibrating object — a string, a membrane, a solid — as a
-finite sum of exponentially-decaying sinusoids (*modes*). That is the seam the
-whole app is built on:
+Most instruments use **modal synthesis** — a vibrating object (a string, a
+membrane, a solid) represented as a finite sum of exponentially-decaying
+sinusoids, its *modes* — but the framework itself is method-agnostic: a model is
+free to generate its output however it likes. That plugin seam is what the app
+is built on:
 
-- **`synth`** — a generic polyphonic engine. It owns voices, phase accumulators,
-  the amplitude envelope, voice-stealing, and live parameter rebuilds. It knows
-  nothing about strings or drums.
-- **`models`** — pluggable synthesis "modes". Each plugin implements one trait,
+- **`instrument`** — a generic polyphonic engine. It owns voices, phase
+  accumulators, the amplitude envelope, voice-stealing, and live parameter
+  rebuilds. It knows nothing about strings or drums.
+- **`models`** — the pluggable synthesizer models. Each implements one trait,
   [`FtmModel`], whose only job is to fill a `ModeBuffer` with the
-  `(frequency, amplitude, decay)` of each mode for a struck note. The engine
-  plays whatever bank the active plugin produced.
+  `(frequency, amplitude, decay)` of each partial for a played note. The engine
+  plays whatever bank the active model produced.
 - **`audio`** / **`midi`** — `cpal` output and `midir` input.
+- **`studio`** — the multi-track host: transport, recording, and the
+  self-contained clips that make up an arrangement.
 - **`main`** — the `egui` UI: model picker, per-model parameters, an on-screen
   piano, and computer-keyboard / MIDI input.
 
-Adding a new mode (a 2-D drum head, a 3-D solid, a different excitation) is just
-a new file implementing `FtmModel` and one line in the registry.
+Adding a model (a 2-D drum head, a 3-D solid, a different excitation) is just a
+new file implementing `FtmModel` and one line in the registry.
 
 Models can be **struck** (an impulse rings and decays — strings, drums) or
 **sustained/driven** (a blown wind holds while the note is played and its loss
@@ -41,76 +44,57 @@ cargo run --release
 
 ## Tempo & grid
 
-The transport has a **Tempo** row: BPM, beats-per-bar, a **Loop** length in bars
-(or *Free*), a **Quantize** grid (Off / ¼ / ⅛ / ⅛T / 1⁄16), a metronome **🔔 Click**,
-and **Count-in**. With a fixed bar length, recording auto-closes exactly on the
-bar; quantize snaps recorded notes to the grid so takes lock together. Tempo
-settings save with the project.
+The transport has a **Tempo** row: BPM, beats-per-bar, a **Recording Duration**
+in bars (or *Free*), a **Quantize** grid (Off / ¼ / ⅛ / ⅛T / 1⁄16), a metronome
+**🔔 Click**, and **Count-in**. With a fixed recording length, a take auto-closes
+exactly on the bar; quantize snaps recorded notes to the grid so parts lock
+together. Tempo settings save with the project.
 
-## Looper
+## Recording & arranging
 
-Build up a jam from layered loops, shown as tracks below the keyboard. The
-**spacebar is the pedal**:
+Work is built up as **tracks** of **clips** shown below the keyboard. Each clip
+owns its own notes and its own loop settings, so it records and plays back with
+no per-event bookkeeping.
 
-- **Tap** — the mode's primary action.
-- **Hold ~0.4 s** — Stop (keep the loops).
-- **Hold ~1.5 s** — Reset (clear everything).
-
-Two modes (dropdown):
-
-- **Pedal cycle** — tap: record → close loop & play → stop → play… Add more
-  layers with **＋ Rec track** (records one pass into a new track).
-- **Overdub** — tap records the base loop; each later tap finalizes the current
-  take and starts a new track, so you can layer hands-free.
-
-It's **multi-timbral**: a track remembers the instrument it was recorded with,
-so you can lay a bass line, switch to the guitar preset, and overdub on top.
-Each track row has mute, a note timeline with a moving playhead, delete, and an
-**✎ edit** button — pick a track and the right-hand panel edits *that track's*
-instrument (model, parameters, engine, or load a preset onto it) live while the
-loop keeps playing.
+- **▶ Play / ⏺ Record** — Record before playing counts in, then captures a clip
+  at the seek cursor; Record while playing punches in. **🔁 Repeat** loops the
+  arrangement (off = play through once).
+- It's **multi-timbral** — a track remembers the instrument it was recorded
+  with, so you can lay a bass line, switch to a guitar preset for the next
+  track, and they play back with their own sounds.
+- Each track row has mute, a note timeline with a moving playhead, delete, and
+  an **✎ edit** button — pick a track and the right-hand panel edits *that
+  track's* instrument (model, parameters, engine, or load a preset onto it) live
+  while playback continues.
+- Select a region of a clip to **crop / delete / reverse / loop** it; every edit
+  forks the clip so clips never share content.
 
 ## Projects
 
-The **Project** bar along the bottom saves your work. Record a loop, give it a
-name, and **＋ Add loop** captures it (all tracks — their note events *and*
-instruments) into the project. Build up several loops, then **💾 Save** the
-project to a JSON file (in `projects/`, or `$FTM_SYNTH_PROJECTS`). **Open…**
-reloads a project; **▶** loads a saved loop back into the tracks to keep playing
-or editing. Loop timings are stored in seconds, so projects are portable across
-sample rates.
-
-### Song arrangement
-
-The **Song** row builds a linear arrangement: pick a loop, set a repeat count,
-and **＋ Section** adds it to the timeline (reorder with ← →, remove with ✕).
-**▶ Play song** runs the sections straight through — loop A, then loop B ×4, then
-loop C ×4 … — switching at loop boundaries (sample-accurate); the playing section
-is highlighted. The arrangement saves with the project.
+The **Project** bar saves your work: name it and **💾 Save** to a JSON file (in
+`projects/`, or `$FTM_SYNTH_PROJECTS`); **Open…** reloads it; **Clear project**
+starts fresh (with a confirmation). All positions are stored in seconds, so
+projects are portable across sample rates. **⬇ Export song** renders the whole
+arrangement to a WAV.
 
 ## Presets
 
-Build a library of instruments in the top bar. A **preset** is a model + its
-parameters + engine settings + a name, saved as one JSON file per preset. Type a
-name and **Save**; pick from the dropdown to **Load**; **Delete** removes the
-saved file. Presets live in `presets/` under the working directory, or wherever
-`$FTM_SYNTH_PRESETS` points.
-
-On first run the folder is seeded with a **factory kit** spanning every model —
-strings (basses, guitars, piano, banjo, harp), a couple of musical-string plucks,
-drums (tom, kick, timpani), horns (trumpet, French horn, didgeridoo), and simple
-leads — as starting points to tune by ear. **★ Factory** restores/refreshes them.
+Build a library of instruments. A **preset** is a model + its parameters +
+engine settings + a name, saved as one JSON file per preset. Type a name and
+**Save**; pick from the dropdown to **Load**; **Delete** removes the saved file.
+A kit preset (a key-mapped set of instruments) saves and loads the same way.
+Presets live in `presets/` under the working directory, or wherever
+`$FTM_SYNTH_PRESETS` points. **★ Factory** restores/refreshes the built-ins.
 
 ## Models
 
 - **Musical String** — a plucked string with music-friendly controls
   (inharmonicity, decay time, a pluck-position sweep from triangle to saw).
-- **Pure String** — the FTM string driven by the exact `#define`s from the 2014
-  `main.h` (stiffness, propagation speed, damping, frequency-dependent damping,
-  length, `DEPTH`, `DAMP_PERIOD`, `TIME_SCALE`) plus a continuous pluck position
-  (the firmware's triangle and saw are its center and near-end extremes) and the
-  accelerometer velocity mapping.
-- **Drum (2D membrane)** — a circular drumhead: the same FTM equations with the
+- **Pure String** — the modal string in its rawest form: stiffness, propagation
+  speed, damping, frequency-dependent damping, length, mode count, and a
+  continuous pluck position (a centred pluck gives a triangle-like spectrum, a
+  near-end pluck a saw-like one — those are just the extremes of the sweep).
+- **Drum (2D membrane)** — a circular drumhead: the same modal recipe with the
   Laplacian ∇², so the modes are the inharmonic Bessel-zero series (1 : 1.59 :
   2.14 : 2.30 …). Controls for wave speed, stiffness, damping, radius, and
   strike position (centre → rim).

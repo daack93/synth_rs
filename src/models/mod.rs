@@ -1,68 +1,27 @@
-//! Pluggable synthesis models ("modes").
+//! Pluggable synthesis models.
 //!
-//! The Function Transformation Method represents a vibrating object — a string,
-//! a membrane, a solid — as a finite sum of exponentially-decaying sinusoids
-//! ("modes"). That single representation is the seam we build the plugin system
-//! on: **every model's only job is to fill a [`ModeBuffer`] with partials** for
-//! a struck note. The engine ([`crate::instrument`]) owns everything generic —
-//! polyphony, envelopes, voice-stealing, live parameter rebuilds — and simply
-//! plays whatever bank the active model produced.
+//! A **model** is a plugin that produces a sound. Most models here use modal
+//! synthesis — a vibrating object (a string, a membrane, a solid) represented as
+//! a finite sum of exponentially-decaying sinusoids, its *modes* — but a model
+//! is free to generate its output however it likes. That representation is the
+//! seam the plugin system is built on: **a model's only job is to fill a
+//! [`ModeBuffer`] with partials** for a played note. The engine
+//! ([`crate::instrument`]) owns everything generic — polyphony, envelopes,
+//! voice-stealing, live parameter rebuilds — and plays whatever bank the active
+//! model produced.
 //!
-//! Adding a new mode (a 2-D drum head, a 3-D solid, a different excitation) is
-//! therefore just a new file implementing [`FtmModel`]: fill in the frequencies,
-//! amplitudes and decay rates of its modes and register it in [`registry`].
+//! Adding a model (a 2-D drum head, a 3-D solid, a different excitation) is just
+//! a new file implementing [`FtmModel`]: fill in the frequencies, amplitudes and
+//! decay rates of its partials and register it in [`registry`].
 
 pub mod basic_wave;
 
 /// Maximum partials a single voice can hold (hard array bound).
 pub const MAX_MODES: usize = 512;
 
-/// The 2014 board's timer ran at ~10 kHz ("100 msTicks = 10 ms"), which is also
-/// the firmware `TIME_SCALE`. Named so `DAMP_PERIOD` / `TIME_SCALE` map from
-/// board-ticks onto real seconds the way they did on hardware.
-#[allow(dead_code)] // used by the geometric/physical plugins added in later PRs
-pub const TICK_RATE: f32 = 10_000.0;
-
-/// Reference pitch (C4). Physical-pitch mode scales the geometry so it matches
-/// transpose mode at this note and diverges from there.
-#[allow(dead_code)] // used by the geometric/physical plugins added in later PRs
-pub const REF_PITCH_HZ: f32 = 261.625_57;
-
-/// How pitch is realized for a played note.
-#[allow(dead_code)] // used by the geometric/physical plugins added in later PRs
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum PitchMode {
-    /// Transpose a fixed modal template to the note — uniform timbre across the
-    /// keyboard.
-    Transpose,
-    /// Modulate the geometry (string length / drum size) with pitch, so higher
-    /// notes are physically more inharmonic and decay faster.
-    Physical,
-}
-
-impl Default for PitchMode {
-    fn default() -> Self {
-        // Physical (size tracks pitch) is the standard for the geometric models.
-        PitchMode::Physical
-    }
-}
-
-/// How a resonator is excited.
-#[allow(dead_code)] // Bowed is used by the string/wind plugins added in later PRs
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Excitation {
-    /// A one-shot pluck/strike: the modes ring and decay.
-    Struck,
-    /// Continuously driven (bowed): the modes are sustained while the note is
-    /// played and only fade on release, and loss shapes the steady-state tone.
-    Bowed,
-}
-
-impl Default for Excitation {
-    fn default() -> Self {
-        Excitation::Struck
-    }
-}
+// NOTE: shared modal-synthesis helpers (`TICK_RATE`, `REF_PITCH_HZ`,
+// `PitchMode`, `Excitation`, `strike_amplitude`) live with the models that use
+// them, introduced in the plugin PR — nothing in this framework PR needs them.
 
 /// A bank of modes: parallel arrays of frequency (Hz), linear amplitude, and
 /// per-second decay rate. `env(t) = amp * exp(-decay * t)`; a negative `decay`
@@ -201,22 +160,6 @@ pub fn default_model() -> Box<dyn FtmModel> {
         .into_iter()
         .next()
         .expect("model registry is empty")
-}
-
-/// Firmware accelerometer→amplitude mapping, shared by the firmware models:
-/// key velocity stands in for the accelerometer magnitude, and
-/// `(mag - PLAY_MAGNITUDE)/(MAX_MAGNITUDE - PLAY_MAGNITUDE)` sets the level.
-#[inline]
-#[allow(dead_code)] // used by the firmware/geometric plugins added in later PRs
-pub fn strike_amplitude(vel: f32, play_magnitude: f32, max_magnitude: f32) -> f32 {
-    let mag = vel * max_magnitude;
-    let span = max_magnitude - play_magnitude;
-    let a = if span.abs() < 1e-6 {
-        vel
-    } else {
-        (mag - play_magnitude) / span
-    };
-    a.clamp(0.0, 1.0)
 }
 
 /// An egui slider with range clamping disabled, so any value can be typed in.

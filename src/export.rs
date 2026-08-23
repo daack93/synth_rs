@@ -4,7 +4,8 @@
 //! or a song can be re-rendered off the audio thread — as fast as the CPU
 //! allows and at any sample rate. A fresh [`Studio`] is built for the render so
 //! live playback is untouched, the loop/song is installed, and the result is
-//! written as a mono 16-bit WAV.
+//! written as a stereo WAV (per-track pan baked into the channels) at a chosen
+//! bit depth (16 / 24 / 32-bit integer PCM).
 //!
 //! **Hi-res:** with no real-time deadline we can raise quality. Rendering at a
 //! higher sample rate is the broad win — it lowers aliasing on the bright
@@ -57,13 +58,15 @@ fn bump(model_id: &str, params: &mut serde_json::Value) {
     }
 }
 
-/// Render a single loop `repeats` times (plus a `tail_secs` ring-out) to a WAV.
+/// Render a single loop `repeats` times (plus a `tail_secs` ring-out) to a
+/// stereo WAV at the given bit depth. Per-track pan is applied to the channels.
 pub fn render_loop_to_wav(
     mut data: LoopData,
     sr: f32,
     repeats: u32,
     tail_secs: f32,
     hi_res: bool,
+    depth: wav::BitDepth,
     path: &Path,
 ) -> io::Result<()> {
     if data.is_empty() {
@@ -81,8 +84,8 @@ pub fn render_loop_to_wav(
     }
     let mut studio = Studio::new(sr);
     studio.handle(Command::LoadLoop(data));
-    let buf = studio.render_offline(total, tail);
-    wav::write_pcm16_mono(path, sr as u32, &buf)
+    let buf = studio.render_offline(total, tail); // interleaved stereo
+    wav::write_pcm(path, sr as u32, 2, depth, &buf)
 }
 
 #[cfg(test)]
@@ -120,11 +123,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ftm_export_test_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("loop.wav");
-        // 0.1s loop × 3 repeats + 0.2s tail @ 48k = (0.3 + 0.2)·48000 samples.
-        render_loop_to_wav(one_note_loop(), 48_000.0, 3, 0.2, false, &path).unwrap();
+        // 0.1s loop × 3 repeats + 0.2s tail @ 48k = (0.3 + 0.2)·48000 frames.
+        render_loop_to_wav(one_note_loop(), 48_000.0, 3, 0.2, false, wav::BitDepth::Int16, &path)
+            .unwrap();
         let bytes = std::fs::read(&path).unwrap();
-        let expected_samples = ((0.1 * 3.0 + 0.2) * 48_000.0) as usize;
-        assert_eq!(bytes.len(), 44 + expected_samples * 2);
+        let expected_frames = ((0.1 * 3.0 + 0.2) * 48_000.0) as usize;
+        // Stereo 16-bit: 2 channels × 2 bytes per frame.
+        assert_eq!(bytes.len(), 44 + expected_frames * 2 * 2);
         assert!(&bytes[0..4] == b"RIFF");
         let _ = std::fs::remove_dir_all(&dir);
     }
