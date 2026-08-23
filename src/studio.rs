@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use crate::instrument::{make_sine_table, EngineParams, Instrument};
 use crate::kit::{Kit, Playable};
 use crate::models::{default_model, model_from_id, FtmModel};
-use crate::project::{AutoPoint, ClipData, LoopData, LoopEvent, LoopTrack, TempoGrid, ZoneData};
+use crate::project::{AutoPoint, ClipData, SongData, NoteEvent, TrackData, TempoGrid, ZoneData};
 
 const TWO_PI_F64: f64 = std::f64::consts::TAU;
 const FRAC_1_SQRT_2: f32 = std::f32::consts::FRAC_1_SQRT_2;
@@ -174,8 +174,8 @@ pub enum Command {
     SetTrackModel(usize, Box<dyn FtmModel>),
     /// Update a track's engine params live.
     SetTrackEngine(usize, EngineParams),
-    /// Replace the current loop + tracks with a saved loop, and play it.
-    LoadLoop(LoopData),
+    /// Replace the current song + tracks with a saved song, and play it.
+    LoadSong(SongData),
     /// Update tempo / grid / metronome settings.
     SetTempo(TempoGrid),
 }
@@ -357,12 +357,13 @@ pub struct SharedView {
     state: AtomicU8,
     mode: AtomicU8,
     pos: AtomicU64,
-    loop_len: AtomicU64,
+    /// Total arrangement length in frames (0 = empty); playback wraps here.
+    song_frames: AtomicU64,
     tracks: Mutex<Vec<TrackView>>,
     /// The clip arrangement, for the arrangement editor.
     arrangement: Mutex<Vec<ClipView>>,
-    /// A full serializable snapshot of the current loop (for saving to a project).
-    snapshot: Mutex<LoopData>,
+    /// A full serializable snapshot of the current song (for saving to a project).
+    snapshot: Mutex<SongData>,
     /// Depth of the undo / redo stacks (for enabling the UI buttons).
     undo_depth: AtomicUsize,
     redo_depth: AtomicUsize,
@@ -374,10 +375,10 @@ impl SharedView {
             state: AtomicU8::new(TransportState::Idle.as_u8()),
             mode: AtomicU8::new(0),
             pos: AtomicU64::new(0),
-            loop_len: AtomicU64::new(0),
+            song_frames: AtomicU64::new(0),
             tracks: Mutex::new(Vec::new()),
             arrangement: Mutex::new(Vec::new()),
-            snapshot: Mutex::new(LoopData::default()),
+            snapshot: Mutex::new(SongData::default()),
             undo_depth: AtomicUsize::new(0),
             redo_depth: AtomicUsize::new(0),
         }
@@ -393,8 +394,8 @@ impl SharedView {
         self.arrangement.lock().map(|a| a.clone()).unwrap_or_default()
     }
 
-    /// The current loop as serializable data (for "add to project").
-    pub fn snapshot(&self) -> LoopData {
+    /// The current song as serializable data (for "add to project").
+    pub fn snapshot(&self) -> SongData {
         self.snapshot.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
@@ -403,15 +404,15 @@ impl SharedView {
     }
     /// Playhead position within the loop, in `[0,1)`. 0 if no loop yet.
     pub fn play_fraction(&self) -> f32 {
-        let len = self.loop_len.load(Ordering::Relaxed);
+        let len = self.song_frames.load(Ordering::Relaxed);
         if len == 0 {
             0.0
         } else {
             (self.pos.load(Ordering::Relaxed) % len) as f32 / len as f32
         }
     }
-    pub fn loop_seconds(&self, sr: f32) -> f32 {
-        self.loop_len.load(Ordering::Relaxed) as f32 / sr
+    pub fn song_seconds(&self, sr: f32) -> f32 {
+        self.song_frames.load(Ordering::Relaxed) as f32 / sr
     }
     pub fn tracks(&self) -> Vec<TrackView> {
         self.tracks.lock().map(|t| t.clone()).unwrap_or_default()
@@ -432,7 +433,8 @@ pub struct Studio {
     playing: bool,
     /// Whether playback repeats at the song end (default off = play once).
     repeat: bool,
-    loop_len: Option<u64>,
+    /// Cached total arrangement length in frames; `None` = free/empty.
+    song_frames: Option<u64>,
     pos: u64,
     /// Track index currently capturing live input, if any.
     recording: Option<usize>,
@@ -471,15 +473,15 @@ pub struct Studio {
     master: f32,
 
     /// Loop snapshots for undo / redo of destructive edits.
-    undo_stack: Vec<LoopData>,
-    redo_stack: Vec<LoopData>,
+    undo_stack: Vec<SongData>,
+    redo_stack: Vec<SongData>,
 
     view: Arc<SharedView>,
     /// Structure snapshot waiting to be published to the UI (flushed each render).
     pending_structure: Option<Vec<TrackView>>,
     pending_arrangement: Option<Vec<ClipView>>,
     /// Serializable loop snapshot waiting to be published (for saving).
-    pending_snapshot: Option<LoopData>,
+    pending_snapshot: Option<SongData>,
 }
 
 impl Studio {
@@ -495,7 +497,7 @@ impl Studio {
             mode: LooperMode::Pedal,
             playing: false,
             repeat: false,
-            loop_len: None,
+            song_frames: None,
             pos: 0,
             recording: None,
             armed: false,
@@ -614,7 +616,7 @@ impl Studio {
                     t.inst.set_engine(e);
                 }
             }
-            Command::LoadLoop(data) => self.load_loop(data),
+            Command::LoadSong(data) => self.load_loop(data),
             Command::SetTempo(t) => self.tempo = t,
             Command::SetTrackMix { track, volume, pan } => {
                 if let Some(t) = self.tracks.get_mut(track) {
@@ -720,7 +722,7 @@ impl Studio {
             Command::FlattenClip { index } => self.flatten_clip(index),
             Command::Seek(secs) => {
                 let p = (secs.max(0.0) * self.sr).round() as u64;
-                self.pos = self.loop_len.map(|l| p.min(l.saturating_sub(1))).unwrap_or(0);
+                self.pos = self.song_frames.map(|l| p.min(l.saturating_sub(1))).unwrap_or(0);
                 for t in &mut self.tracks {
                     t.inst.all_notes_off();
                 }
@@ -757,7 +759,7 @@ impl Studio {
                     };
                     self.rebuild_playlist();
                     if self.tracks.is_empty() {
-                        self.loop_len = None;
+                        self.song_frames = None;
                         self.playing = false;
                         self.pos = 0;
                     } else {
@@ -851,7 +853,7 @@ impl Studio {
             return pos;
         }
         let q = ((pos as f64 / grid).round() * grid).round() as u64;
-        match self.loop_len {
+        match self.song_frames {
             Some(len) if q >= len => 0,
             _ => q,
         }
@@ -867,7 +869,7 @@ impl Studio {
         self.beat_index = 0;
         if self.tempo.bars > 0 {
             let fixed = self.fixed_loop_samples();
-            self.loop_len = Some(fixed);
+            self.song_frames = Some(fixed);
             self.arm_period = Some(fixed);
         } else {
             self.arm_period = None; // free take — period set on close
@@ -881,7 +883,7 @@ impl Studio {
         self.defining = false;
         if self.tracks.is_empty() {
             // Nothing recorded — cancel the loop.
-            self.loop_len = None;
+            self.song_frames = None;
             self.playing = false;
         } else if self.mode == LooperMode::Overdub {
             self.arm(false);
@@ -941,11 +943,11 @@ impl Studio {
     fn tap(&mut self) {
         // Ignore taps during a count-in or a fixed-length first take (it
         // auto-closes at the bar boundary).
-        if self.pre_roll > 0 || (self.defining && self.loop_len.is_some()) {
+        if self.pre_roll > 0 || (self.defining && self.song_frames.is_some()) {
             return;
         }
         let recording = self.recording.is_some();
-        match (self.loop_len, self.defining) {
+        match (self.song_frames, self.defining) {
             // Idle: arm the first (loop-defining) take.
             (None, false) if !self.armed && !recording => {
                 if self.tempo.count_in {
@@ -1007,7 +1009,7 @@ impl Studio {
         if self.pre_roll > 0 || self.recording.is_some() || self.armed {
             return;
         }
-        if self.loop_len.is_some() {
+        if self.song_frames.is_some() {
             self.playing = !self.playing; // toggle play / pause
             if self.playing {
                 self.reset_cursors();
@@ -1040,7 +1042,7 @@ impl Studio {
             self.finish_take();
             return;
         }
-        match self.loop_len {
+        match self.song_frames {
             None => {
                 if self.tempo.count_in {
                     self.start_count_in(Pending::FirstTake);
@@ -1103,7 +1105,7 @@ impl Studio {
         self.armed = false;
         self.defining = false;
         self.auto_finalize_at = None;
-        self.loop_len = None;
+        self.song_frames = None;
         self.pos = 0;
         self.playing = false;
         self.pre_roll = 0;
@@ -1114,7 +1116,7 @@ impl Studio {
     }
 
     /// Load a single saved loop (leaving any song stopped) and play it.
-    fn load_loop(&mut self, data: LoopData) {
+    fn load_loop(&mut self, data: SongData) {
         self.clear_history();
         self.install_loop(data);
         self.mark_structure_dirty();
@@ -1142,7 +1144,7 @@ impl Studio {
 
     /// Build a track's [`Playable`] from its serialized form: a kit if it has
     /// zones, otherwise a single instrument.
-    fn track_playable(&self, lt: &LoopTrack) -> Playable {
+    fn track_playable(&self, lt: &TrackData) -> Playable {
         if lt.zones.is_empty() {
             let model = model_from_id(&lt.model_id, &lt.params).unwrap_or_else(default_model);
             Playable::Single(Instrument::with_config(
@@ -1160,7 +1162,7 @@ impl Studio {
     /// Positions in `data` are in seconds; converted to samples at this rate.
     /// Does not touch song-transport state (used by both single-loop load and
     /// song section advances).
-    fn install_loop(&mut self, data: LoopData) {
+    fn install_loop(&mut self, data: SongData) {
         self.tracks.clear();
         self.arrangement.clear();
         self.playlist.clear();
@@ -1170,14 +1172,14 @@ impl Studio {
         self.auto_finalize_at = None;
 
         if data.is_empty() {
-            self.loop_len = None;
+            self.song_frames = None;
             self.pos = 0;
             self.playing = false;
             return;
         }
 
         let song = ((data.length * self.sr).round() as u64).max(1);
-        self.loop_len = Some(song);
+        self.song_frames = Some(song);
         // Migration: old projects stored a single placement per track on the
         // track itself; build one clip per track from it as a fallback.
         let mut migrated: Vec<Clip> = Vec::new();
@@ -1287,16 +1289,16 @@ impl Studio {
         // Callers (load_loop / play_song / section advance) publish the structure.
     }
 
-    /// Build a serializable snapshot of the current loop (positions in seconds).
-    fn snapshot_loop(&self) -> LoopData {
+    /// Build a serializable snapshot of the current song (positions in seconds).
+    fn snapshot_loop(&self) -> SongData {
         let sr = self.sr;
-        let length = self.loop_len.unwrap_or(0) as f32 / sr;
+        let length = self.song_frames.unwrap_or(0) as f32 / sr;
         let tracks = self
             .tracks
             .iter()
             .map(|t| {
                 let (model_id, params, engine, zones) = t.inst.parts();
-                LoopTrack {
+                TrackData {
                 name: t.name.clone(),
                 model_id,
                 params,
@@ -1327,7 +1329,7 @@ impl Studio {
                             EvMsg::On { note, vel } => (true, note, vel),
                             EvMsg::Off { note } => (false, note, 0.0),
                         };
-                        LoopEvent { t: e.pos as f32 / sr, on, note, vel }
+                        NoteEvent { t: e.pos as f32 / sr, on, note, vel }
                     })
                     .collect(),
                 }
@@ -1351,13 +1353,13 @@ impl Studio {
                                 EvMsg::On { note, vel } => (true, note, vel),
                                 EvMsg::Off { note } => (false, note, 0.0),
                             };
-                            LoopEvent { t: e.pos as f32 / sr, on, note, vel }
+                            NoteEvent { t: e.pos as f32 / sr, on, note, vel }
                         })
                         .collect()
                 }),
             })
             .collect();
-        LoopData { length, tracks, arrangement }
+        SongData { length, tracks, arrangement }
     }
 
     /// Pedal-mode "+ Rec track": record exactly one loop pass into a new track.
@@ -1368,13 +1370,13 @@ impl Studio {
         self.arm_period = Some(period);
         // In Arrange mode, punch in at the playhead; in Loop mode, record from 0.
         self.rec_origin = self.pos; // punch in at the playhead
-        let cur = self.loop_len.unwrap_or(0);
-        self.loop_len = Some(cur.max(self.rec_origin + period));
+        let cur = self.song_frames.unwrap_or(0);
+        self.song_frames = Some(cur.max(self.rec_origin + period));
         self.arm(false);
     }
 
     fn arm_overdub_one_pass(&mut self) {
-        if self.loop_len.is_none() || self.recording.is_some() || self.armed {
+        if self.song_frames.is_none() || self.recording.is_some() || self.armed {
             return;
         }
         self.arm_overdub();
@@ -1388,7 +1390,7 @@ impl Studio {
     /// count-in enabled this first plays a bar of clicks (the transport parked at
     /// the cursor), then arms and records from there.
     fn request_overdub_one_pass(&mut self) {
-        if self.loop_len.is_none() || self.recording.is_some() || self.armed || self.pre_roll > 0 {
+        if self.song_frames.is_none() || self.recording.is_some() || self.armed || self.pre_roll > 0 {
             return;
         }
         if self.tempo.count_in {
@@ -1567,7 +1569,7 @@ impl Studio {
     /// Set the transport wrap length to the current song length.
     fn recompute_song_len(&mut self) {
         let len = self.song_len();
-        self.loop_len = if len > 0 { Some(len) } else { None };
+        self.song_frames = if len > 0 { Some(len) } else { None };
     }
 
     /// The period (samples) a newly-armed take should use: a fixed bar-count if
@@ -1586,7 +1588,7 @@ impl Studio {
         }
     }
 
-    /// Snapshot the current loop onto the undo stack before a destructive edit
+    /// Snapshot the current song onto the undo stack before a destructive edit
     /// (and drop the redo history). Bounded so it can't grow without limit.
     fn push_undo(&mut self) {
         const CAP: usize = 64;
@@ -1844,7 +1846,7 @@ impl Studio {
             // when silenced by mute/solo, so unmuting doesn't pop.
             let any_solo = self.tracks.iter().any(|t| t.solo);
             let secs = self.pos as f32 / self.sr;
-            let total = self.loop_len.unwrap_or(0) as f32 / self.sr;
+            let total = self.song_frames.unwrap_or(0) as f32 / self.sr;
             let live_s = self.live.render_frame();
             let (mut l, mut r) = (live_s * FRAC_1_SQRT_2, live_s * FRAC_1_SQRT_2);
             for t in &mut self.tracks {
@@ -1907,7 +1909,7 @@ impl Studio {
     fn fire_events(&mut self) {
         let song_pos = self.pos;
         let recording = self.recording;
-        let song_len = self.loop_len.unwrap_or(0);
+        let song_len = self.song_frames.unwrap_or(0);
         for k in 0..self.playlist.len() {
             let (ti, start, length, offset, content_len, loop_len, looping) = {
                 let c = &self.playlist[k];
@@ -1999,7 +2001,7 @@ impl Studio {
                 }
             }
         }
-        if let Some(len) = self.loop_len {
+        if let Some(len) = self.song_frames {
             if self.pos >= len {
                 // Recording always wraps (overdub passes / fixed takes need it);
                 // plain playback wraps only when repeat is on, else it stops.
@@ -2032,7 +2034,7 @@ impl Studio {
             TransportState::Recording
         } else if self.playing {
             TransportState::Playing
-        } else if self.tracks.is_empty() && self.loop_len.is_none() {
+        } else if self.tracks.is_empty() && self.song_frames.is_none() {
             TransportState::Idle
         } else {
             TransportState::Stopped
@@ -2045,8 +2047,8 @@ impl Studio {
             .store(self.current_state().as_u8(), Ordering::Relaxed);
         self.view.pos.store(self.pos, Ordering::Relaxed);
         self.view
-            .loop_len
-            .store(self.loop_len.unwrap_or(0), Ordering::Relaxed);
+            .song_frames
+            .store(self.song_frames.unwrap_or(0), Ordering::Relaxed);
         self.view.undo_depth.store(self.undo_stack.len(), Ordering::Relaxed);
         self.view.redo_depth.store(self.redo_stack.len(), Ordering::Relaxed);
     }
@@ -2311,7 +2313,7 @@ mod tests {
         drain(&mut s, 2400);
         // Tap: close loop (~100 ms) and play from the top.
         s.handle(Command::Tap);
-        assert!(s.loop_len.is_some());
+        assert!(s.song_frames.is_some());
         assert_eq!(s.tracks.len(), 1, "one recorded track");
         assert!(s.recording.is_none(), "pedal mode stops recording after close");
 
@@ -2426,7 +2428,7 @@ mod tests {
 
         // Reload at a different rate and confirm it plays back through the kit.
         let mut s2 = Studio::new(44_100.0);
-        s2.handle(Command::LoadLoop(snap));
+        s2.handle(Command::LoadSong(snap));
         drain(&mut s2, 200);
         assert!(s2.tracks[0].inst.active_voices() > 0, "reloaded kit plays");
     }
@@ -2464,11 +2466,11 @@ mod tests {
     fn automation_replays_and_changes_the_model() {
         use crate::models::basic_wave::BasicWave;
         use crate::models::FtmModel;
-        use crate::project::{AutoPoint, LoopData, LoopEvent, LoopTrack};
-        let data = LoopData {
+        use crate::project::{AutoPoint, SongData, NoteEvent, TrackData};
+        let data = SongData {
             length: 0.05,
             arrangement: Vec::new(),
-            tracks: vec![LoopTrack {
+            tracks: vec![TrackData {
                 name: "T".into(),
                 model_id: "basic_wave".into(),
                 params: BasicWave::default().to_json(),
@@ -2484,12 +2486,12 @@ mod tests {
                 zones: Vec::new(),
                 // Delta of +100 from the base decay_time (default 2) → effective 102.
                 automation: vec![AutoPoint { t: 0.005, target: "decay_time".into(), value: 100.0 }],
-                events: vec![LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
+                events: vec![NoteEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
             }],
         };
         let base = BasicWave::default().to_json().get("decay_time").and_then(|v| v.as_f64()).unwrap();
         let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(data));
+        s.handle(Command::LoadSong(data));
         // Before the automation point (t=0.005 → 240 samples) it sits at the base.
         drain(&mut s, 100);
         let before = s.tracks[0].inst.parts().1.get("decay_time").and_then(|v| v.as_f64());
@@ -2530,7 +2532,7 @@ mod tests {
         s.handle(Command::NoteOff { note: 60 });
         s.handle(Command::Record); // finish the take
         assert_eq!(s.tracks.len(), 1);
-        assert!(s.loop_len.is_some());
+        assert!(s.song_frames.is_some());
         assert!(s.playing, "finishing the first take starts playback");
 
         // Count-in enabled, but Record WHILE PLAYING punches in immediately.
@@ -2600,11 +2602,11 @@ mod tests {
     fn editing_the_base_shifts_the_automated_value() {
         use crate::models::basic_wave::BasicWave;
         use crate::models::FtmModel;
-        use crate::project::{AutoPoint, LoopData, LoopEvent, LoopTrack};
-        let data = LoopData {
+        use crate::project::{AutoPoint, SongData, NoteEvent, TrackData};
+        let data = SongData {
             length: 0.05,
             arrangement: Vec::new(),
-            tracks: vec![LoopTrack {
+            tracks: vec![TrackData {
                 name: "T".into(),
                 model_id: "basic_wave".into(),
                 params: BasicWave::default().to_json(),
@@ -2619,11 +2621,11 @@ mod tests {
                 span: None,
                 zones: Vec::new(),
                 automation: vec![AutoPoint { t: 0.005, target: "decay_time".into(), value: 100.0 }],
-                events: vec![LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
+                events: vec![NoteEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
             }],
         };
         let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(data));
+        s.handle(Command::LoadSong(data));
         // Re-tune the base live: decay_time 2 → 20.
         let mut d = BasicWave::default();
         d.decay_time = 20.0;
@@ -2636,8 +2638,8 @@ mod tests {
 
     #[test]
     fn shorter_track_loops_within_a_longer_song() {
-        use crate::project::{LoopData, LoopEvent, LoopTrack};
-        let track = |note: u8, period: f32| LoopTrack {
+        use crate::project::{SongData, NoteEvent, TrackData};
+        let track = |note: u8, period: f32| TrackData {
             name: "T".into(),
             model_id: "musical_string".into(),
             params: serde_json::json!({}),
@@ -2653,15 +2655,15 @@ mod tests {
             zones: Vec::new(),
             automation: Vec::new(),
             events: vec![
-                LoopEvent { t: 0.0, on: true, note, vel: 1.0 },
-                LoopEvent { t: 0.02, on: false, note, vel: 0.0 },
+                NoteEvent { t: 0.0, on: true, note, vel: 1.0 },
+                NoteEvent { t: 0.02, on: false, note, vel: 0.0 },
             ],
         };
         // Track A repeats every 0.1s; track B (the longest) sets the 0.4s song.
-        let data = LoopData { length: 0.4, arrangement: Vec::new(), tracks: vec![track(60, 0.1), track(67, 0.4)] };
+        let data = SongData { length: 0.4, arrangement: Vec::new(), tracks: vec![track(60, 0.1), track(67, 0.4)] };
         let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(data));
-        assert_eq!(s.loop_len, Some((0.4 * 48_000.0) as u64), "song = longest period");
+        s.handle(Command::LoadSong(data));
+        assert_eq!(s.song_frames, Some((0.4 * 48_000.0) as u64), "song = longest period");
         assert_eq!(s.tracks[0].period, (0.1 * 48_000.0) as u64, "track A keeps its 0.1s period");
 
         // Play to ~0.31s: past three of A's re-triggers. A struck a fresh note at
@@ -2673,11 +2675,11 @@ mod tests {
 
     #[test]
     fn clip_start_offset_delays_playback() {
-        use crate::project::{LoopData, LoopEvent, LoopTrack};
-        let data = LoopData {
+        use crate::project::{SongData, NoteEvent, TrackData};
+        let data = SongData {
             length: 0.4,
             arrangement: Vec::new(),
-            tracks: vec![LoopTrack {
+            tracks: vec![TrackData {
                 name: "T".into(),
                 model_id: "musical_string".into(),
                 params: serde_json::json!({}),
@@ -2693,14 +2695,14 @@ mod tests {
                 zones: Vec::new(),
                 automation: Vec::new(),
                 events: vec![
-                    LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 },
-                    LoopEvent { t: 0.02, on: false, note: 60, vel: 0.0 },
+                    NoteEvent { t: 0.0, on: true, note: 60, vel: 1.0 },
+                    NoteEvent { t: 0.02, on: false, note: 60, vel: 0.0 },
                 ],
             }],
         };
         let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(data));
-        assert_eq!(s.loop_len, Some((0.4 * 48_000.0) as u64), "song = start + period");
+        s.handle(Command::LoadSong(data));
+        assert_eq!(s.song_frames, Some((0.4 * 48_000.0) as u64), "song = start + period");
         drain(&mut s, 4_800); // 0.1s — before the clip starts
         assert_eq!(s.tracks[0].inst.active_voices(), 0, "silent before its start");
         drain(&mut s, 5_200); // ~0.208s — the clip has started
@@ -2710,7 +2712,7 @@ mod tests {
     #[test]
     fn clip_ops_edit_the_arrangement() {
         let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        s.handle(Command::LoadSong(held_note_loop(0.0, 1.0)));
         assert_eq!(s.arrangement.len(), 1, "one clip auto-placed on load");
         s.handle(Command::AddClip { track: 0, start: 0.4, length: 0.0 });
         assert_eq!(s.arrangement.len(), 2);
@@ -2728,7 +2730,7 @@ mod tests {
     fn front_trim_offsets_the_loop_phase_without_moving_content() {
         let mut s = Studio::new(48_000.0);
         // Period 0.1s, a note struck at loop-local 0 (held, retriggers each pass).
-        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        s.handle(Command::LoadSong(held_note_loop(0.0, 1.0)));
         assert_eq!(s.tracks[0].period, (0.1 * 48_000.0) as u64);
 
         // Trim the front by half a period: same window start/len, offset 0.05s.
@@ -2747,7 +2749,7 @@ mod tests {
     #[test]
     fn duplicate_lands_in_free_space_and_never_resizes_the_original() {
         let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        s.handle(Command::LoadSong(held_note_loop(0.0, 1.0)));
         // The auto-placed clip has a concrete length (no "fill to song" clip).
         let orig = s.arrangement[0].clone();
         assert!(orig.length > 0, "clip carries a concrete length");
@@ -2767,7 +2769,7 @@ mod tests {
     #[test]
     fn added_clip_gets_a_concrete_length_and_avoids_overlap() {
         let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        s.handle(Command::LoadSong(held_note_loop(0.0, 1.0)));
         let period = s.tracks[0].period;
         // Ask for a fill (length 0) at bar 0, where the auto clip already sits.
         s.handle(Command::AddClip { track: 0, start: 0.0, length: 0.0 });
@@ -2808,7 +2810,7 @@ mod tests {
     #[test]
     fn content_edits_fork_the_clip() {
         let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        s.handle(Command::LoadSong(held_note_loop(0.0, 1.0)));
         assert_eq!(s.arrangement.len(), 1);
         assert!(s.arrangement[0].own_events.is_none(), "a fresh clip is linked to its track");
 
@@ -2822,7 +2824,7 @@ mod tests {
     #[test]
     fn undo_redo_round_trips_a_clip_edit() {
         let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        s.handle(Command::LoadSong(held_note_loop(0.0, 1.0)));
         assert_eq!(s.arrangement.len(), 1);
         // Delete the whole clip via a full-span selection → removed.
         let len = s.arrangement[0].length as f32 / 48_000.0;
@@ -2837,7 +2839,7 @@ mod tests {
     #[test]
     fn split_delete_middle_makes_two_clips_with_a_gap() {
         let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        s.handle(Command::LoadSong(held_note_loop(0.0, 1.0)));
         // Give the clip a concrete length of 0.4s so a middle exists.
         s.handle(Command::SetClip { index: 0, start: 0.0, length: 0.4 });
         s.handle(Command::SplitDeleteClip { index: 0, a: 0.1, b: 0.2 });
@@ -2853,7 +2855,7 @@ mod tests {
     #[test]
     fn loop_range_sets_a_custom_loop_unit() {
         let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        s.handle(Command::LoadSong(held_note_loop(0.0, 1.0)));
         s.handle(Command::SetClip { index: 0, start: 0.0, length: 0.4 });
         s.handle(Command::LoopClipRange { index: 0, a: 0.1, b: 0.2 });
         assert!(s.arrangement[0].looping);
@@ -2863,7 +2865,7 @@ mod tests {
     #[test]
     fn flatten_bakes_repeats_and_turns_looping_off() {
         let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        s.handle(Command::LoadSong(held_note_loop(0.0, 1.0)));
         // Period 0.1s; extend to 0.3s while looping → 3 repeats.
         s.handle(Command::SetClip { index: 0, start: 0.0, length: 0.3 });
         s.handle(Command::FlattenClip { index: 0 });
@@ -2878,7 +2880,7 @@ mod tests {
     #[test]
     fn duplicate_forks_into_independent_notes() {
         let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        s.handle(Command::LoadSong(held_note_loop(0.0, 1.0)));
         s.handle(Command::DuplicateClip { index: 0, dest: 0.5 });
         assert_eq!(s.arrangement.len(), 2);
         assert!(s.arrangement[1].own_events.is_some(), "the copy owns its notes");
@@ -2887,7 +2889,7 @@ mod tests {
     #[test]
     fn play_once_stops_at_end_unless_repeat() {
         let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0))); // 0.1s song, playing
+        s.handle(Command::LoadSong(held_note_loop(0.0, 1.0))); // 0.1s song, playing
         assert!(s.playing);
         // Default (no repeat): running past the end stops playback.
         drain(&mut s, 5_000); // 0.1s = 4800 samples
@@ -2901,12 +2903,12 @@ mod tests {
         assert!(s.playing, "keeps playing when repeat is on");
     }
 
-    fn held_note_loop(pan: f32, volume: f32) -> crate::project::LoopData {
-        use crate::project::{LoopData, LoopEvent, LoopTrack};
-        LoopData {
+    fn held_note_loop(pan: f32, volume: f32) -> crate::project::SongData {
+        use crate::project::{SongData, NoteEvent, TrackData};
+        SongData {
             length: 0.1,
             arrangement: Vec::new(),
-            tracks: vec![LoopTrack {
+            tracks: vec![TrackData {
                 name: "T".into(),
                 model_id: "musical_string".into(),
                 params: serde_json::json!({}),
@@ -2921,7 +2923,7 @@ mod tests {
                 span: None,
                 zones: Vec::new(),
                 automation: Vec::new(),
-                events: vec![LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
+                events: vec![NoteEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
             }],
         }
     }
@@ -2940,7 +2942,7 @@ mod tests {
     #[test]
     fn pan_splits_the_stereo_field() {
         let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(held_note_loop(-1.0, 1.0)));
+        s.handle(Command::LoadSong(held_note_loop(-1.0, 1.0)));
         let (le, re) = stereo_energy(&mut s, 512);
         assert!(le > re * 5.0 + 1.0, "hard-left: L≫R (L={le}, R={re})");
     }
@@ -2948,12 +2950,12 @@ mod tests {
     #[test]
     fn master_volume_scales_output() {
         let mut s = Studio::new(48_000.0);
-        s.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        s.handle(Command::LoadSong(held_note_loop(0.0, 1.0)));
         let (l1, _) = stereo_energy(&mut s, 512);
         assert!(l1 > 0.0, "makes sound at unity");
 
         let mut s2 = Studio::new(48_000.0);
-        s2.handle(Command::LoadLoop(held_note_loop(0.0, 1.0)));
+        s2.handle(Command::LoadSong(held_note_loop(0.0, 1.0)));
         s2.handle(Command::SetMasterVolume(0.0));
         let (l0, r0) = stereo_energy(&mut s2, 512);
         assert!(l0 + r0 < 1e-3, "silenced at master 0");
@@ -2976,11 +2978,11 @@ mod tests {
 
         // Load into a fresh studio at a *different* sample rate (seconds-based).
         let mut s2 = Studio::new(44_100.0);
-        s2.handle(Command::LoadLoop(snap.clone()));
+        s2.handle(Command::LoadSong(snap.clone()));
         assert_eq!(s2.tracks.len(), 1);
         assert!(s2.playing);
         let expected_len = (snap.length * 44_100.0).round() as u64;
-        assert_eq!(s2.loop_len, Some(expected_len));
+        assert_eq!(s2.song_frames, Some(expected_len));
 
         // Playing from the top fires the recorded note.
         drain(&mut s2, 200);
@@ -2999,11 +3001,11 @@ mod tests {
         }));
         s.handle(Command::Tap);
         assert!(s.defining);
-        assert_eq!(s.loop_len, Some(96_000), "loop length fixed to one bar");
+        assert_eq!(s.song_frames, Some(96_000), "loop length fixed to one bar");
         s.handle(Command::NoteOn { note: 60, vel: 1.0 });
         drain(&mut s, 96_000 + 20); // play through the bar → auto-close
         assert!(!s.defining, "fixed take auto-closes at the bar boundary");
-        assert_eq!(s.loop_len, Some(96_000));
+        assert_eq!(s.song_frames, Some(96_000));
         assert_eq!(s.tracks.len(), 1);
     }
 
@@ -3033,7 +3035,7 @@ mod tests {
         assert!(!s.tracks.is_empty());
         s.handle(Command::Reset);
         assert!(s.tracks.is_empty());
-        assert!(s.loop_len.is_none());
+        assert!(s.song_frames.is_none());
         assert!(!s.playing);
     }
 

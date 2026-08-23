@@ -264,7 +264,7 @@ impl Playable {
         }
     }
 
-    /// The serialized parts for a `LoopTrack` / `TrackView`.
+    /// The serialized parts for a `TrackData` / `TrackView`.
     pub fn parts(&self) -> PlayableParts {
         match self {
             Playable::Single(i) => {

@@ -1,10 +1,10 @@
-//! Projects: save a loop (its tracks — note events + instruments) to disk, and
-//! collect several named loops into a project. A project is one JSON file per
+//! Projects: save a song (its tracks — note events + instruments) to disk, and
+//! collect several named songs into a project. A project is one JSON file per
 //! project in a folder (like presets).
 //!
 //! Positions and lengths are stored in **seconds**, not samples, so a project is
 //! portable across sample rates. The `Project` type has room to grow a song
-//! arrangement (a timeline of these loops) in a later step.
+//! arrangement (a timeline of these songs) in a later step.
 
 use std::fs;
 use std::io;
@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::instrument::EngineParams;
 
-/// One recorded note event, timed from the loop start (seconds).
+/// One recorded note event, timed from the song start (seconds).
 #[derive(Clone, Serialize, Deserialize)]
-pub struct LoopEvent {
+pub struct NoteEvent {
     pub t: f32,
     pub on: bool,
     pub note: u8,
@@ -58,14 +58,14 @@ fn default_volume() -> f32 {
     1.0
 }
 
-/// One track of a loop: its instrument plus the notes it plays.
+/// One track of a song: its instrument plus the notes it plays.
 ///
 /// A track is either a **single instrument** (`zones` empty — the top-level
 /// `model_id`/`params`/`engine` describe it) or a **kit** (`zones` non-empty —
 /// each zone routes a key range to its own instrument). Old projects predate
 /// `zones` and load as single instruments.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct LoopTrack {
+pub struct TrackData {
     pub name: String,
     pub model_id: String,
     pub params: serde_json::Value,
@@ -84,8 +84,8 @@ pub struct LoopTrack {
     pub fade_in: f32,
     #[serde(default)]
     pub fade_out: f32,
-    /// This track's own loop length in seconds. `None` (older projects) = the
-    /// whole loop; otherwise the track repeats at this period independently.
+    /// This track's own repeat period in seconds. `None` (older projects) = the
+    /// whole song; otherwise the track repeats at this period independently.
     #[serde(default)]
     pub period: Option<f32>,
     /// Where the clip starts on the arrangement timeline (seconds; default 0).
@@ -97,10 +97,10 @@ pub struct LoopTrack {
     pub span: Option<f32>,
     #[serde(default)]
     pub zones: Vec<ZoneData>,
-    /// Recorded parameter automation (per-knob moves over the loop).
+    /// Recorded parameter automation (per-knob moves over the song).
     #[serde(default)]
     pub automation: Vec<AutoPoint>,
-    pub events: Vec<LoopEvent>,
+    pub events: Vec<NoteEvent>,
 }
 
 /// One placement of a track on the arrangement timeline: the track plays,
@@ -127,27 +127,27 @@ pub struct ClipData {
     pub looping: bool,
     /// The clip's own (forked) notes; absent ⇒ the clip uses its track's.
     #[serde(default)]
-    pub own_events: Option<Vec<LoopEvent>>,
+    pub own_events: Option<Vec<NoteEvent>>,
 }
 
 fn yes() -> bool {
     true
 }
 
-/// A complete loop: its tracks (content) plus an arrangement of clips placing
+/// A complete song: its tracks (content) plus an arrangement of clips placing
 /// them on the timeline.
 #[derive(Clone, Default, Serialize, Deserialize)]
-pub struct LoopData {
-    /// Loop length in seconds (0 = no loop).
+pub struct SongData {
+    /// Song length in seconds (0 = empty).
     pub length: f32,
-    pub tracks: Vec<LoopTrack>,
+    pub tracks: Vec<TrackData>,
     /// Clip placements. Empty in projects saved before the arrangement existed
     /// (migrated to one clip per track on load).
     #[serde(default)]
     pub arrangement: Vec<ClipData>,
 }
 
-impl LoopData {
+impl SongData {
     pub fn is_empty(&self) -> bool {
         self.length <= 0.0 || self.tracks.is_empty()
     }
@@ -157,12 +157,12 @@ impl LoopData {
     }
 }
 
-/// A named loop within a project.
+/// A named song within a project.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct NamedLoop {
+pub struct NamedSong {
     pub name: String,
     #[serde(rename = "loop")]
-    pub data: LoopData,
+    pub data: SongData,
 }
 
 /// Tempo + grid settings for recording in time.
@@ -199,7 +199,7 @@ impl Default for TempoGrid {
 pub struct Project {
     pub name: String,
     #[serde(default)]
-    pub loops: Vec<NamedLoop>,
+    pub loops: Vec<NamedSong>,
     /// Tempo + grid settings (saved with the project).
     #[serde(default)]
     pub tempo: TempoGrid,
@@ -278,11 +278,11 @@ fn list_in(dir: &Path) -> Vec<String> {
 mod tests {
     use super::*;
 
-    fn sample_loop() -> LoopData {
-        LoopData {
+    fn sample_song() -> SongData {
+        SongData {
             length: 2.0,
             arrangement: Vec::new(),
-            tracks: vec![LoopTrack {
+            tracks: vec![TrackData {
                 name: "Track 1".into(),
                 model_id: "musical_string".into(),
                 params: serde_json::json!({}),
@@ -301,8 +301,8 @@ mod tests {
                     AutoPoint { t: 0.3, target: "eng:gain".into(), value: 0.8 },
                 ],
                 events: vec![
-                    LoopEvent { t: 0.0, on: true, note: 60, vel: 0.9 },
-                    LoopEvent { t: 0.5, on: false, note: 60, vel: 0.0 },
+                    NoteEvent { t: 0.0, on: true, note: 60, vel: 0.9 },
+                    NoteEvent { t: 0.5, on: false, note: 60, vel: 0.0 },
                 ],
             }],
         }
@@ -318,7 +318,7 @@ mod tests {
             loops: Vec::new(),
             tempo: TempoGrid::default(),
         };
-        project.loops.push(NamedLoop { name: "Groove A".into(), data: sample_loop() });
+        project.loops.push(NamedSong { name: "Groove A".into(), data: sample_song() });
         let path = save_in(&dir, &project).unwrap();
         assert!(path.exists());
 

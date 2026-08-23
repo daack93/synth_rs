@@ -28,7 +28,7 @@ use crate::project::ZoneData;
 ///
 /// A preset is either a **single instrument** (`zones` empty — `model_id` /
 /// `params` / `engine` describe it) or a **kit** (`zones` non-empty — each zone
-/// maps a key range to its own instrument). This mirrors how `LoopTrack` stores
+/// maps a key range to its own instrument). This mirrors how `TrackData` stores
 /// a track, so the two stay interchangeable. Presets saved before kits existed
 /// load as single instruments (`zones` defaults empty).
 #[derive(Clone, Serialize, Deserialize)]

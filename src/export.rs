@@ -16,7 +16,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::project::LoopData;
+use crate::project::SongData;
 use crate::studio::{Command, Studio};
 use crate::wav;
 
@@ -41,7 +41,7 @@ pub fn export_path(name: &str) -> PathBuf {
 /// Raise render-only quality knobs on a loop's instruments. Currently: max out
 /// the Webster horn eigensolve resolution (numerical accuracy only). Applied to
 /// a clone, so the live sound is unaffected.
-pub fn apply_hi_res(data: &mut LoopData) {
+pub fn apply_hi_res(data: &mut SongData) {
     for t in &mut data.tracks {
         bump(&t.model_id, &mut t.params);
         for z in &mut t.zones {
@@ -61,7 +61,7 @@ fn bump(model_id: &str, params: &mut serde_json::Value) {
 /// Render a single loop `repeats` times (plus a `tail_secs` ring-out) to a
 /// stereo WAV at the given bit depth. Per-track pan is applied to the channels.
 pub fn render_loop_to_wav(
-    mut data: LoopData,
+    mut data: SongData,
     sr: f32,
     repeats: u32,
     tail_secs: f32,
@@ -83,7 +83,7 @@ pub fn render_loop_to_wav(
         std::fs::create_dir_all(dir)?;
     }
     let mut studio = Studio::new(sr);
-    studio.handle(Command::LoadLoop(data));
+    studio.handle(Command::LoadSong(data));
     let buf = studio.render_offline(total, tail); // interleaved stereo
     wav::write_pcm(path, sr as u32, 2, depth, &buf)
 }
@@ -92,13 +92,13 @@ pub fn render_loop_to_wav(
 mod tests {
     use super::*;
     use crate::instrument::EngineParams;
-    use crate::project::{LoopEvent, LoopTrack};
+    use crate::project::{NoteEvent, TrackData};
 
-    fn one_note_loop() -> LoopData {
-        LoopData {
+    fn one_note_loop() -> SongData {
+        SongData {
             length: 0.1,
             arrangement: Vec::new(),
-            tracks: vec![LoopTrack {
+            tracks: vec![TrackData {
                 name: "T".into(),
                 model_id: "musical_string".into(),
                 params: serde_json::json!({}),
@@ -113,7 +113,7 @@ mod tests {
                 span: None,
                 zones: Vec::new(),
                 automation: Vec::new(),
-                events: vec![LoopEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
+                events: vec![NoteEvent { t: 0.0, on: true, note: 60, vel: 1.0 }],
             }],
         }
     }
@@ -136,10 +136,10 @@ mod tests {
 
     #[test]
     fn hi_res_maxes_horn_resolution() {
-        let mut data = LoopData {
+        let mut data = SongData {
             length: 0.1,
             arrangement: Vec::new(),
-            tracks: vec![LoopTrack {
+            tracks: vec![TrackData {
                 name: "H".into(),
                 model_id: "webster_horn".into(),
                 params: serde_json::json!({ "resolution": 64 }),
