@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use crate::models::basic_wave::{BasicWave, Waveform};
 use crate::models::cymbal::Cymbal;
 use crate::models::drum_membrane::DrumMembrane;
-use crate::models::graph_voice::{GraphDrum, GraphPlate, GraphString};
 use crate::models::metal_bell::MetalBell;
 use crate::models::musical_string::MusicalString;
 use crate::models::pure_plate::PurePlate;
@@ -147,7 +146,7 @@ pub fn factory() -> Vec<Preset> {
         Preset::capture(name, &model, &engine)
     }
 
-    vec![
+    let base = vec![
         // ---- Pure String (feedback: pluck toward saw, stronger HF damping) ----
         make("Acoustic Bass", string(1.5, 5.0, -5.0, 6.0, 24, 0.15), eng(0.75, 4.0, 120.0)),
         make("Electric Bass", string(2.0, 4.0, -3.0, 8.0, 22, 0.12), eng(0.75, 4.0, 140.0)),
@@ -369,26 +368,48 @@ pub fn factory() -> Vec<Preset> {
             PurePlate { poisson: 0.30, decay_time: 8.0, hf_damp: 0.2, strike_pos: 0.45, modes: 120, key_tracks_pitch: true },
             eng(0.5, 1.0, 400.0),
         ),
-        // ---- Graph-rendered A/B versions (per-sample voice graph) ----
-        make(
-            "Plate (graph)",
-            GraphPlate { inner: PurePlate { poisson: 0.33, decay_time: 4.0, hf_damp: 0.5, strike_pos: 0.75, modes: 90, key_tracks_pitch: true } },
-            eng(0.5, 1.0, 250.0),
-        ),
-        make("String (graph)", GraphString::default(), eng(0.6, 3.0, 120.0)),
-        make("Drum (graph)", GraphDrum::default(), eng(0.7, 1.0, 200.0)),
         // ---- Basic Wave (reference oscillators) ----
         make("Triangle Lead", BasicWave { waveform: Waveform::Triangle, harmonics: 16, decay_time: 1.5 }, eng(0.5, 3.0, 120.0)),
         make("Saw Lead", BasicWave { waveform: Waveform::Saw, harmonics: 40, decay_time: 1.2 }, eng(0.45, 3.0, 120.0)),
-    ]
+    ];
+
+    // For every struck string / membrane / plate preset, add a "(graph)" twin
+    // that plays the SAME parameters through the per-sample voice graph, so each
+    // can be A/B'd against its classic-renderer original. Bowed strings are
+    // skipped (not struck/plucked). The twin just re-homes the params under the
+    // matching graph model's `inner`.
+    let mut twins: Vec<Preset> = Vec::new();
+    for p in &base {
+        let graph_id = match p.model_id.as_str() {
+            "pure_string" => {
+                if p.params.get("excitation").and_then(|v| v.as_str()) == Some("Bowed") {
+                    continue;
+                }
+                "graph_string"
+            }
+            "drum_membrane" => "graph_drum",
+            "pure_plate" => "graph_plate",
+            _ => continue,
+        };
+        twins.push(Preset {
+            name: format!("{} (graph)", p.name),
+            model_id: graph_id.to_string(),
+            params: serde_json::json!({ "inner": p.params }),
+            engine: p.engine.clone(),
+            zones: Vec::new(),
+            builtin: Some(true),
+        });
+    }
+
     // Stamp every factory preset as built-in so the launch refresh keeps them
     // in sync with this code (user-saved presets are left untouched).
-    .into_iter()
-    .map(|mut p| {
-        p.builtin = Some(true);
-        p
-    })
-    .collect()
+    base.into_iter()
+        .chain(twins)
+        .map(|mut p| {
+            p.builtin = Some(true);
+            p
+        })
+        .collect()
 }
 
 /// Seed the folder with the factory presets if it currently has none (first run).
@@ -504,6 +525,29 @@ fn delete_in(dir: &Path, name: &str) -> io::Result<bool> {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod graph_twin_tests {
+    use super::*;
+
+    #[test]
+    fn struck_string_membrane_plate_presets_get_graph_twins() {
+        let f = factory();
+        let has = |n: &str| f.iter().any(|p| p.name == n);
+        // struck string + membrane + plate → twinned
+        assert!(has("Acoustic Guitar (graph)"), "struck string twinned");
+        assert!(has("Tom (graph)"), "membrane twinned");
+        assert!(has("Pure Plate (graph)"), "plate twinned");
+        // bowed strings + musical_string → NOT twinned
+        assert!(!has("Violin (graph)"), "bowed strings excluded");
+        assert!(!has("Soft Nylon (graph)"), "musical_string excluded");
+        // a twin points at the graph model, wraps the original params, and rebuilds
+        let g = f.iter().find(|p| p.name == "Acoustic Guitar (graph)").unwrap();
+        assert_eq!(g.model_id, "graph_string");
+        assert!(g.params.get("inner").is_some(), "params re-homed under inner");
+        assert!(g.build_model().is_some(), "twin rebuilds via model_from_id");
     }
 }
 
