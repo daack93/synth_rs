@@ -69,14 +69,16 @@ impl FtmModel for Cymbal {
         // Low tension + high stiffness → the k⁴ term dominates → plate dispersion
         // (ω ∝ k²), dense and inharmonic. Reuses the membrane's Bessel modes.
         let plate = DrumMembrane {
-            prop_speed: 8.0,
-            stiffness: self.stiffness,
-            damping: self.damping,
-            freq_dep_damping: self.brightness,
-            radius: self.size,
-            depth: self.modes,
+            // A cymbal is bending-dominated: low tension, high bending rigidity,
+            // so the k⁴ term rules → dense inharmonic plate modes.
+            radius_m: (self.size * 0.02).clamp(0.05, 0.6), // "size" → real radius (m)
+            tension_nm: 50.0,
+            areal_density_kgm2: 2.0, // thin metal
+            bending_nm: (self.stiffness * 2.0).max(0.1),
+            decay_time: (3.0 / self.damping.max(0.05)).clamp(0.3, 12.0),
+            hf_damping: (-self.brightness * 4.0).max(0.0), // brightness<0 → highs ring
+            num_modes: self.modes,
             strike_pos: self.strike_pos,
-            key_tracks_pitch: self.key_tracks_pitch,
             ..DrumMembrane::default()
         };
         plate.excite(freq_hz, vel, sr, out);

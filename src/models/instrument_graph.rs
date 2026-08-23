@@ -293,7 +293,7 @@ impl Comp {
     fn mappable(&self) -> &'static [&'static str] {
         match self {
             Comp::String(_) => &["length", "tension", "decay"],
-            Comp::Membrane(_) => &["radius"],
+            Comp::Membrane(_) => &["tension", "radius", "decay"],
             Comp::Plate(_) => &["ring"],
             Comp::Body { .. } => &["top_hz", "decay"],
             Comp::Horn(_) => &["length"],
@@ -309,7 +309,9 @@ impl Comp {
             (Comp::String(m), "length") => Some(m.length_m),
             (Comp::String(m), "tension") => Some(m.tension_n),
             (Comp::String(m), "decay") => Some(m.decay_time),
-            (Comp::Membrane(m), "radius") => Some(m.radius),
+            (Comp::Membrane(m), "tension") => Some(m.tension_nm),
+            (Comp::Membrane(m), "radius") => Some(m.radius_m),
+            (Comp::Membrane(m), "decay") => Some(m.decay_time),
             (Comp::Plate(m), "ring") => Some(m.decay_time),
             (Comp::Body { top_hz, .. }, "top_hz") => Some(*top_hz),
             (Comp::Body { decay_s, .. }, "decay") => Some(*decay_s),
@@ -324,7 +326,9 @@ impl Comp {
             (Comp::String(m), "length") => m.length_m = v,
             (Comp::String(m), "tension") => m.tension_n = v,
             (Comp::String(m), "decay") => m.decay_time = v,
-            (Comp::Membrane(m), "radius") => m.radius = v,
+            (Comp::Membrane(m), "tension") => m.tension_nm = v,
+            (Comp::Membrane(m), "radius") => m.radius_m = v,
+            (Comp::Membrane(m), "decay") => m.decay_time = v,
             (Comp::Plate(m), "ring") => m.decay_time = v,
             (Comp::Body { top_hz, .. }, "top_hz") => *top_hz = v,
             (Comp::Body { decay_s, .. }, "decay") => *decay_s = v,
@@ -792,8 +796,8 @@ mod tests {
     fn coupled_snare_is_stable_and_uses_feedback() {
         let sr = 48_000.0;
         let snare = |feedback: f32| -> Vec<f32> {
-            let top = DrumMembrane { prop_speed: 700.0, damping: 12.0, radius: 7.0, depth: 24, ..DrumMembrane::default() };
-            let bottom = DrumMembrane { prop_speed: 520.0, damping: 20.0, radius: 7.0, depth: 20, ..DrumMembrane::default() };
+            let top = DrumMembrane { radius_m: 0.165, tension_nm: 2000.0, decay_time: 0.18, num_modes: 24, ..DrumMembrane::default() };
+            let bottom = DrumMembrane { radius_m: 0.165, tension_nm: 2600.0, decay_time: 0.12, num_modes: 20, ..DrumMembrane::default() };
             let g = InstrumentGraph {
                 components: vec![
                     Comp::Strike,
