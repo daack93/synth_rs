@@ -24,6 +24,7 @@ pub mod pure_string;
 pub mod snare;
 pub mod webster_horn;
 pub mod graph_voice;
+pub mod instrument_graph;
 
 /// Maximum partials a single voice can hold (hard array bound).
 pub const MAX_MODES: usize = 512;
@@ -212,7 +213,7 @@ pub fn model_from_id(id: &str, params: &serde_json::Value) -> Option<Box<dyn Ftm
         "graph_plate" => boxed::<graph_voice::GraphPlate>(params),
         "graph_drum" => boxed::<graph_voice::GraphDrum>(params),
         "graph_musical_string" => boxed::<graph_voice::GraphMusicalString>(params),
-        "bodied_string" => boxed::<graph_voice::GraphBodiedString>(params),
+        "instrument_graph" => boxed::<instrument_graph::InstrumentGraph>(params),
         _ => None,
     }
 }
@@ -238,7 +239,7 @@ pub fn registry() -> Vec<Box<dyn FtmModel>> {
         Box::new(graph_voice::GraphPlate::default()),
         Box::new(graph_voice::GraphDrum::default()),
         Box::new(graph_voice::GraphMusicalString::default()),
-        Box::new(graph_voice::GraphBodiedString::default()),
+        Box::new(instrument_graph::InstrumentGraph::default()),
         Box::new(basic_wave::BasicWave::default()),
     ]
 }

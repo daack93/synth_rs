@@ -90,30 +90,6 @@ impl Node for ModalResonator {
     }
 }
 
-/// A secondary/body resonator: a fixed-formant modal filter driven by an
-/// upstream signal, mixed dry + wet. This is how a body / oral cavity colours a
-/// primary resonator's output (a resonator → resonator edge).
-pub struct BodyResonator {
-    modal: ModalResonator,
-    dry: f32,
-    wet: f32,
-}
-
-impl BodyResonator {
-    pub fn new(formants: &ModeBuffer, sr: f32, dry: f32, wet: f32) -> Self {
-        BodyResonator { modal: ModalResonator::from_bank(formants, sr), dry, wet }
-    }
-}
-
-impl Node for BodyResonator {
-    #[inline]
-    fn tick(&mut self, inputs: &[f32]) -> f32 {
-        let x: f32 = inputs.iter().sum();
-        let wet = self.modal.tick(&[x]);
-        x * self.dry + wet * self.wet
-    }
-}
-
 /// A small graph of [`Node`]s wired into a per-voice system, itself a [`Node`].
 ///
 /// Every edge carries one signal, scaled by its **gain** (coupling strength),
@@ -182,6 +158,38 @@ impl Node for ImpulseExciter {
             self.fired = true;
             self.amp
         }
+    }
+}
+
+/// A passthrough mixer: outputs the (already edge-scaled) sum of its inputs.
+/// Used as a graph's output node so several components (e.g. a dry primary and a
+/// wet body) can be blended by their edge gains.
+pub struct Sum;
+
+impl Node for Sum {
+    #[inline]
+    fn tick(&mut self, inputs: &[f32]) -> f32 {
+        inputs.iter().sum()
+    }
+}
+
+/// A fixed-formant modal resonator (a body / oral cavity), built from a small
+/// bank of resonances independent of the played note. Pure resonance — mix it
+/// with the dry path via edge gains in the graph.
+pub struct FormantResonator {
+    inner: ModalResonator,
+}
+
+impl FormantResonator {
+    pub fn new(formants: &ModeBuffer, sr: f32) -> Self {
+        FormantResonator { inner: ModalResonator::from_bank(formants, sr) }
+    }
+}
+
+impl Node for FormantResonator {
+    #[inline]
+    fn tick(&mut self, inputs: &[f32]) -> f32 {
+        self.inner.tick(inputs)
     }
 }
 
@@ -340,7 +348,7 @@ mod graph_tests {
         let mut bare = StruckVoice::new(&bank, sr);
         let bare_y = render(&mut bare, 24_000);
 
-        // String → Body graph.
+        // Strike → String → Body(formants) → Mix(dry string + wet body).
         let mut body = ModeBuffer::default();
         body.push(100.0, 0.6, 8.0);
         body.push(210.0, 0.4, 11.0);
@@ -348,9 +356,17 @@ mod graph_tests {
         let nodes: Vec<Box<dyn Node>> = vec![
             Box::new(ImpulseExciter::new(1.0)),
             Box::new(ModalResonator::from_bank(&bank, sr)),
-            Box::new(BodyResonator::new(&body, sr, 1.0, 0.5)),
+            Box::new(FormantResonator::new(&body, sr)),
+            Box::new(Sum),
         ];
-        let mut g = Graph::new(nodes, vec![vec![], vec![(0, 1.0)], vec![(1, 1.0)]], 2);
+        // edges: strike→string, string→body, string→mix (dry), body→mix (wet 0.5)
+        let edges = vec![
+            vec![],
+            vec![(0, 1.0)],
+            vec![(1, 1.0)],
+            vec![(1, 1.0), (2, 0.5)],
+        ];
+        let mut g = Graph::new(nodes, edges, 3);
         let bodied_y = render(&mut g, 24_000);
 
         // Both make sound.

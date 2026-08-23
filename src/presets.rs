@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::models::basic_wave::{BasicWave, Waveform};
 use crate::models::cymbal::Cymbal;
 use crate::models::drum_membrane::DrumMembrane;
-use crate::models::graph_voice::GraphBodiedString;
+use crate::models::instrument_graph::{Comp, Edge, InstrumentGraph};
 use crate::models::metal_bell::MetalBell;
 use crate::models::musical_string::MusicalString;
 use crate::models::pure_plate::PurePlate;
@@ -158,10 +158,24 @@ pub fn factory() -> Vec<Preset> {
         make("Banjo", string(3.0, 13.0, -6.0, 20.0, 36, 0.08), eng(0.6, 2.0, 80.0)),
         // Rounder pluck + more HF damping to tame the "electric" low end.
         make("Harp", string(0.8, 3.5, -4.0, 14.0, 28, 0.18), eng(0.6, 3.0, 180.0)),
-        // ---- Multi-component graph: string → body (A/B vs Acoustic Guitar) ----
+        // ---- Multi-component graph: Strike → String → Body (A/B vs Acoustic Guitar) ----
         make(
             "Guitar + Body (graph)",
-            GraphBodiedString { inner: string(1.0, 7.0, -4.5, 12.0, 28, 0.10), body_mix: 0.05, ..Default::default() },
+            InstrumentGraph {
+                components: vec![
+                    Comp::Strike,
+                    Comp::String(string(1.0, 7.0, -4.5, 12.0, 28, 0.10)),
+                    Comp::Body { ring: 1.0, tone: 1.0 },
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                    Edge { from: 1, to: 3, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.05 },
+                ],
+                output: 3,
+            },
             eng(0.6, 3.0, 120.0),
         ),
         // ---- Bowed strings (driven → sustain; bow near the bridge = bright/saw) ----
