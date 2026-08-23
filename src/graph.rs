@@ -354,6 +354,7 @@ impl Node for DriveExciter {
 pub struct ReedExciter {
     pressure: f32,
     stiffness: f32,
+    rng: u32,
     env: f32,
     env_target: f32,
     atk_rate: f32,
@@ -365,6 +366,7 @@ impl ReedExciter {
         ReedExciter {
             pressure,
             stiffness,
+            rng: 0x1234_5678,
             env: 0.0,
             env_target: 1.0,
             atk_rate: 1.0 - (-1.0 / (0.02 * sr)).exp(), // ~20 ms onset
@@ -383,7 +385,17 @@ impl Node for ReedExciter {
         let delta = p - bore; // pressure across the reed
         // Reed opening closes as the pressure difference rises (nonlinear valve).
         let opening = (1.0 - self.stiffness * delta).clamp(0.0, 1.0);
-        (delta * opening).tanh() // flow into the bore, bounded
+        // Turbulent breath noise through the aperture — a continuous broadband
+        // stimulus (∝ the open flow) that kicks and keeps the bore singing,
+        // rather than waiting for the feedback to build. It is also the breathy
+        // hiss of a real reed.
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        let white = (self.rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+        let flow = delta * opening;
+        let turbulence = white * (opening * p).abs() * 0.25;
+        (flow + turbulence).tanh() // flow into the bore, bounded
     }
     fn control(&mut self, c: Control) {
         if let Control::Gate(on) = c {
@@ -472,6 +484,7 @@ pub struct BowExciter {
     force: f32,      // bow pressure
     slip: f32,       // Stribeck slip-velocity scale
     last: f32,       // previous fed-back sample (to estimate string velocity)
+    rng: u32,        // friction-noise generator
     env: f32,
     env_target: f32,
     atk_rate: f32,
@@ -485,6 +498,7 @@ impl BowExciter {
             force,
             slip: 0.12,
             last: 0.0,
+            rng: 0x71fe_1a3b,
             env: 0.0,
             env_target: 1.0,
             atk_rate: 1.0 - (-1.0 / (0.05 * sr)).exp(), // ~50 ms bow onset
@@ -514,7 +528,15 @@ impl Node for BowExciter {
         // "negative resistance" that sustains the Helmholtz stick-slip motion.
         let mu = 0.15 + 0.85 * (-(v_rel / self.slip).powi(2)).exp();
         let friction = -self.force * self.env * v_rel.signum() * mu;
-        friction.tanh()
+        // Continuous friction/scratch noise (∝ bow pressure): a broadband
+        // stimulus that keeps the string excited from the first sample instead
+        // of waiting for the stick-slip loop to build — and the natural bow hiss.
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        let white = (self.rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+        let scratch = white * self.force * self.env * 0.15;
+        (friction + scratch).tanh()
     }
     fn control(&mut self, c: Control) {
         if let Control::Gate(on) = c {
