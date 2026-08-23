@@ -161,7 +161,7 @@ pub fn factory() -> Vec<Preset> {
         // ---- Multi-component graph: string → body (A/B vs Acoustic Guitar) ----
         make(
             "Guitar + Body (graph)",
-            GraphBodiedString { inner: string(1.0, 7.0, -4.5, 12.0, 28, 0.10) },
+            GraphBodiedString { inner: string(1.0, 7.0, -4.5, 12.0, 28, 0.10), ..Default::default() },
             eng(0.6, 3.0, 120.0),
         ),
         // ---- Bowed strings (driven → sustain; bow near the bridge = bright/saw) ----

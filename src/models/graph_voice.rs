@@ -13,7 +13,7 @@ use super::drum_membrane::DrumMembrane;
 use super::pure_plate::PurePlate;
 use super::musical_string::MusicalString;
 use super::pure_string::PureString;
-use super::{FtmModel, ModeBuffer};
+use super::{unbounded_slider, FtmModel, ModeBuffer};
 use crate::graph::{BodyResonator, Graph, ImpulseExciter, ModalResonator, Node, StruckVoice};
 
 /// Generate a graph-rendered wrapper model around a struck inner model.
@@ -91,14 +91,49 @@ graph_model!(
 );
 
 /// The first genuinely multi-component instrument: a plucked string fed into a
-/// fixed **body** resonator — a two-resonator graph `Impulse → String → Body`.
-/// It demonstrates a secondary resonator (like a guitar body or an oral cavity)
-/// colouring a primary resonator, wired through the general [`Graph`].
-#[derive(Clone, Serialize, Deserialize, Default)]
+/// **body** resonator — a two-resonator graph `Impulse → String → Body`. It
+/// demonstrates a secondary resonator (like a guitar body or an oral cavity)
+/// colouring a primary, wired through the general [`Graph`]. Its parameter panel
+/// shows the graph node-by-node (exciter, each resonator) plus the edge mix.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GraphBodiedString {
-    /// The string, unchanged (its params and physics).
+    /// Primary resonator: the string (its own params + physics, unchanged).
     pub inner: PureString,
+    /// Body resonator: how long it rings (larger = longer). A body is fairly
+    /// damped, so keep this modest or it turns into a ringing filter.
+    pub body_ring: f32,
+    /// Body resonator: shifts its formant frequencies (brightness).
+    pub body_tone: f32,
+    /// Edge String → Body: wet mix. 0 = bypass the body entirely; the dry string
+    /// is always kept, so this only *adds* body colour.
+    pub body_mix: f32,
+}
+
+impl Default for GraphBodiedString {
+    fn default() -> Self {
+        GraphBodiedString {
+            inner: PureString::default(),
+            body_ring: 1.0,
+            body_tone: 1.0,
+            body_mix: 0.2,
+        }
+    }
+}
+
+impl GraphBodiedString {
+    /// The body's formants (base freq, gain), scaled by `body_tone`. Fairly
+    /// damped so the driven resonator can't build up runaway resonant gain.
+    fn body_bank(&self) -> ModeBuffer {
+        let base = [(100.0f32, 0.5f32), (210.0, 0.4), (300.0, 0.3), (450.0, 0.2)];
+        let ring = self.body_ring.clamp(0.1, 6.0);
+        let tone = self.body_tone.clamp(0.4, 2.5);
+        let mut body = ModeBuffer::default();
+        for (f, g) in base {
+            body.push(f * tone, g, 45.0 / ring); // decay ∝ 1/ring; well damped
+        }
+        body
+    }
 }
 
 impl FtmModel for GraphBodiedString {
@@ -109,32 +144,52 @@ impl FtmModel for GraphBodiedString {
         "String + Body (graph)"
     }
     fn description(&self) -> &'static str {
-        "A plucked string fed into a fixed body resonator — a two-resonator voice graph."
+        "A plucked string fed into a body resonator — a two-resonator voice graph."
     }
     fn excite(&self, freq_hz: f32, vel: f32, sr: f32, out: &mut ModeBuffer) {
         self.inner.excite(freq_hz, vel, sr, out);
     }
     fn build_graph(&self, bank: &ModeBuffer, sr: f32) -> Option<Box<dyn Node>> {
-        // Fixed body resonances (guitar-ish; independent of the played note).
-        let mut body = ModeBuffer::default();
-        body.push(100.0, 0.6, 8.0);
-        body.push(210.0, 0.4, 11.0);
-        body.push(390.0, 0.3, 15.0);
-
-        // Impulse(0) → String(1) → Body(2); the body is the output.
+        let body = self.body_bank();
+        // Impulse(0) → String(1) → Body(2); the body node is the output.
         let nodes: Vec<Box<dyn Node>> = vec![
             Box::new(ImpulseExciter::new(1.0)),
             Box::new(ModalResonator::from_bank(bank, sr)),
-            Box::new(BodyResonator::new(&body, sr, 1.0, 0.5)),
+            Box::new(BodyResonator::new(&body, sr, 1.0, self.body_mix.clamp(0.0, 1.0))),
         ];
         let inputs = vec![vec![], vec![0], vec![1]];
         Some(Box::new(Graph::new(nodes, inputs, 2)))
     }
     fn params_ui(&mut self, ui: &mut egui::Ui) -> bool {
-        ui.label(
-            egui::RichText::new("String → Body (per-sample graph)").weak().small(),
-        );
-        self.inner.params_ui(ui)
+        let mut changed = false;
+        ui.label(egui::RichText::new("Voice graph:  Strike → String → Body").weak().small());
+
+        ui.separator();
+        ui.strong("① Exciter — Strike");
+        ui.label(egui::RichText::new("Impulse at note-on; velocity from the key.").weak().small());
+
+        ui.separator();
+        ui.strong("② Resonator — String");
+        changed |= self.inner.params_ui(ui);
+
+        ui.separator();
+        ui.strong("③ Resonator — Body");
+        changed |= ui
+            .add(unbounded_slider(&mut self.body_ring, 0.1..=4.0, "Body ring"))
+            .on_hover_text("How long the body rings. Keep modest — a body is damped.")
+            .changed();
+        changed |= ui
+            .add(unbounded_slider(&mut self.body_tone, 0.5..=2.0, "Body tone"))
+            .on_hover_text("Shifts the body's resonant frequencies (brightness).")
+            .changed();
+
+        ui.separator();
+        ui.strong("Edge — String → Body");
+        changed |= ui
+            .add(unbounded_slider(&mut self.body_mix, 0.0..=1.0, "Body mix (wet)"))
+            .on_hover_text("How much body colour to add. 0 = dry string only.")
+            .changed();
+        changed
     }
     fn box_clone(&self) -> Box<dyn FtmModel> {
         Box::new(self.clone())
