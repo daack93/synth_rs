@@ -116,14 +116,15 @@ impl Node for BodyResonator {
 
 /// A small graph of [`Node`]s wired into a per-voice system, itself a [`Node`].
 ///
-/// Every edge carries one signal with a **one-sample delay** (each node reads
-/// the previous frame's outputs): a few samples of latency through a chain
-/// (inaudible), and — crucially — it makes feedback loops (coupling) stable
-/// without special cases. `inputs[i]` lists the node indices feeding node `i`;
-/// `output` is the node whose sample is the voice's output.
+/// Every edge carries one signal, scaled by its **gain** (coupling strength),
+/// with a **one-sample delay** (each node reads the previous frame's outputs):
+/// a few samples of latency through a chain (inaudible), and — crucially — it
+/// makes feedback loops (coupling) stable without special cases. `inputs[i]`
+/// lists the `(source node, gain)` edges feeding node `i`; `output` is the node
+/// whose sample is the voice's output.
 pub struct Graph {
     nodes: Vec<Box<dyn Node>>,
-    inputs: Vec<Vec<usize>>,
+    inputs: Vec<Vec<(usize, f32)>>,
     output: usize,
     last: Vec<f32>,
     cur: Vec<f32>,
@@ -131,7 +132,7 @@ pub struct Graph {
 }
 
 impl Graph {
-    pub fn new(nodes: Vec<Box<dyn Node>>, inputs: Vec<Vec<usize>>, output: usize) -> Self {
+    pub fn new(nodes: Vec<Box<dyn Node>>, inputs: Vec<Vec<(usize, f32)>>, output: usize) -> Self {
         let n = nodes.len();
         let fan_in = inputs.iter().map(|e| e.len()).max().unwrap_or(0);
         Graph {
@@ -149,8 +150,8 @@ impl Node for Graph {
     fn tick(&mut self, _external: &[f32]) -> f32 {
         for i in 0..self.nodes.len() {
             self.in_buf.clear();
-            for &j in &self.inputs[i] {
-                self.in_buf.push(self.last[j]);
+            for &(j, gain) in &self.inputs[i] {
+                self.in_buf.push(self.last[j] * gain);
             }
             self.cur[i] = self.nodes[i].tick(&self.in_buf);
         }
@@ -349,7 +350,7 @@ mod graph_tests {
             Box::new(ModalResonator::from_bank(&bank, sr)),
             Box::new(BodyResonator::new(&body, sr, 1.0, 0.5)),
         ];
-        let mut g = Graph::new(nodes, vec![vec![], vec![0], vec![1]], 2);
+        let mut g = Graph::new(nodes, vec![vec![], vec![(0, 1.0)], vec![(1, 1.0)]], 2);
         let bodied_y = render(&mut g, 24_000);
 
         // Both make sound.

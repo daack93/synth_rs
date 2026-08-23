@@ -172,13 +172,14 @@ pub trait FtmModel: Send {
     fn to_json(&self) -> serde_json::Value;
 
     /// If this model renders through the **per-sample voice graph**, build the
-    /// graph for one note from its just-computed mode `bank`. Returning `None`
-    /// (the default) means "render via the classic free-oscillator mode bank" —
-    /// so every existing model is unchanged. The graph instruments override this
-    /// to run their modes as driven resonators instead.
+    /// graph for one note. Returning `None` (the default) means "render via the
+    /// classic free-oscillator mode bank" — so every existing model is
+    /// unchanged. Graph instruments override this to wire up driven resonators
+    /// (and, for multi-component instruments, several components + edges).
     fn build_graph(
         &self,
-        _bank: &ModeBuffer,
+        _freq_hz: f32,
+        _vel: f32,
         _sr: f32,
     ) -> Option<Box<dyn crate::graph::Node>> {
         None

@@ -303,9 +303,9 @@ impl Instrument {
         };
         let mut buf = std::mem::take(&mut self.scratch);
         self.model.excite(f0, vel, sr, &mut buf);
-        // Graph instruments render their bank per-sample instead of as a free
-        // oscillator bank; build the per-voice graph before borrowing the voice.
-        let graph = self.model.build_graph(&buf, sr);
+        // Graph instruments render per-sample instead of as a free oscillator
+        // bank; build the per-voice graph (from the note) before borrowing it.
+        let graph = self.model.build_graph(f0, vel, sr);
 
         let atk_ms = self.engine.attack_ms;
         let rel_ms = self.engine.release_ms;

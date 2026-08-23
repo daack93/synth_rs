@@ -40,8 +40,10 @@ macro_rules! graph_model {
                 // Same modes as the original; the graph is built from this bank.
                 self.inner.excite(freq_hz, vel, sr, out);
             }
-            fn build_graph(&self, bank: &ModeBuffer, sr: f32) -> Option<Box<dyn Node>> {
-                Some(Box::new(StruckVoice::new(bank, sr)))
+            fn build_graph(&self, freq_hz: f32, vel: f32, sr: f32) -> Option<Box<dyn Node>> {
+                let mut bank = ModeBuffer::default();
+                self.inner.excite(freq_hz, vel, sr, &mut bank);
+                Some(Box::new(StruckVoice::new(&bank, sr)))
             }
             fn params_ui(&mut self, ui: &mut egui::Ui) -> bool {
                 ui.label(
@@ -149,15 +151,17 @@ impl FtmModel for GraphBodiedString {
     fn excite(&self, freq_hz: f32, vel: f32, sr: f32, out: &mut ModeBuffer) {
         self.inner.excite(freq_hz, vel, sr, out);
     }
-    fn build_graph(&self, bank: &ModeBuffer, sr: f32) -> Option<Box<dyn Node>> {
+    fn build_graph(&self, freq_hz: f32, vel: f32, sr: f32) -> Option<Box<dyn Node>> {
+        let mut bank = ModeBuffer::default();
+        self.inner.excite(freq_hz, vel, sr, &mut bank);
         let body = self.body_bank();
         // Impulse(0) → String(1) → Body(2); the body node is the output.
         let nodes: Vec<Box<dyn Node>> = vec![
             Box::new(ImpulseExciter::new(1.0)),
-            Box::new(ModalResonator::from_bank(bank, sr)),
+            Box::new(ModalResonator::from_bank(&bank, sr)),
             Box::new(BodyResonator::new(&body, sr, 1.0, self.body_mix.clamp(0.0, 1.0))),
         ];
-        let inputs = vec![vec![], vec![0], vec![1]];
+        let inputs = vec![vec![], vec![(0, 1.0)], vec![(1, 1.0)]];
         Some(Box::new(Graph::new(nodes, inputs, 2)))
     }
     fn params_ui(&mut self, ui: &mut egui::Ui) -> bool {
