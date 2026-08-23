@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::models::basic_wave::{BasicWave, Waveform};
 use crate::models::cymbal::Cymbal;
 use crate::models::drum_membrane::DrumMembrane;
+use crate::models::instrument_graph::{Comp, Edge, InstrumentGraph};
 use crate::models::metal_bell::MetalBell;
 use crate::models::musical_string::MusicalString;
 use crate::models::pure_plate::PurePlate;
@@ -146,7 +147,7 @@ pub fn factory() -> Vec<Preset> {
         Preset::capture(name, &model, &engine)
     }
 
-    vec![
+    let base = vec![
         // ---- Pure String (feedback: pluck toward saw, stronger HF damping) ----
         make("Acoustic Bass", string(1.5, 5.0, -5.0, 6.0, 24, 0.15), eng(0.75, 4.0, 120.0)),
         make("Electric Bass", string(2.0, 4.0, -3.0, 8.0, 22, 0.12), eng(0.75, 4.0, 140.0)),
@@ -157,6 +158,85 @@ pub fn factory() -> Vec<Preset> {
         make("Banjo", string(3.0, 13.0, -6.0, 20.0, 36, 0.08), eng(0.6, 2.0, 80.0)),
         // Rounder pluck + more HF damping to tame the "electric" low end.
         make("Harp", string(0.8, 3.5, -4.0, 14.0, 28, 0.18), eng(0.6, 3.0, 180.0)),
+        // ---- Multi-component graph: Strike → String → Body (A/B vs Acoustic Guitar) ----
+        make(
+            "Guitar + Body (graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Strike,
+                    Comp::String(string(1.0, 7.0, -4.5, 12.0, 28, 0.10)),
+                    Comp::Body { ring: 1.0, tone: 1.0 },
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 1, to: 2, gain: 1.0 },
+                    Edge { from: 1, to: 3, gain: 1.0 },
+                    Edge { from: 2, to: 3, gain: 0.05 },
+                ],
+                output: 3,
+                key_map: Vec::new(),
+            },
+            eng(0.6, 3.0, 120.0),
+        ),
+        // ---- Coupled-membrane snare (feedback graph): two heads + wires that
+        //      re-excite the bottom head. A/B vs the "Snare" model. ----
+        make(
+            "Snare (coupled graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Strike,
+                    Comp::Membrane(DrumMembrane { prop_speed: 700.0, stiffness: 0.3, damping: 12.0, freq_dep_damping: -3.0, radius: 7.0, depth: 24, strike_pos: 0.4, key_tracks_pitch: true, ..DrumMembrane::default() }),
+                    Comp::Membrane(DrumMembrane { prop_speed: 520.0, stiffness: 0.2, damping: 20.0, freq_dep_damping: -3.5, radius: 7.0, depth: 20, strike_pos: 0.5, key_tracks_pitch: true, ..DrumMembrane::default() }),
+                    Comp::Wires { level: 0.6, tone: 1.0 },
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 }, // strike → top head
+                    Edge { from: 1, to: 2, gain: 0.5 }, // top couples to bottom
+                    Edge { from: 2, to: 3, gain: 1.0 }, // bottom drives the wires
+                    Edge { from: 3, to: 2, gain: 0.3 }, // wires re-excite the bottom (feedback)
+                    Edge { from: 1, to: 4, gain: 1.0 }, // top → out
+                    Edge { from: 2, to: 4, gain: 0.5 }, // bottom → out
+                    Edge { from: 3, to: 4, gain: 0.6 }, // wires → out
+                ],
+                output: 4,
+                key_map: Vec::new(),
+            },
+            eng(0.7, 1.0, 200.0),
+        ),
+        // ---- Sustained/driven wind: breath into an air column (graph) ----
+        make(
+            "Wind (graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Breath { level: 0.15, tone: 1.0 },
+                    Comp::Horn(WebsterHorn {
+                        boundary: Boundary::Open,
+                        r1: 0.0095,
+                        r2: 0.0,
+                        r3: 0.001,
+                        length: 0.6,
+                        blow_pos: 0.15,
+                        depth: 12,
+                        resolution: 300,
+                        damping: 3.0,
+                        freq_dep_damping: -0.10,
+                        visco_loss: 0.3,
+                        radiation: 0.5,
+                        ..WebsterHorn::default()
+                    }),
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 }, // breath drives the air column
+                    Edge { from: 1, to: 2, gain: 1.0 }, // air column → out
+                ],
+                output: 2,
+                key_map: Vec::new(),
+            },
+            eng(0.5, 20.0, 200.0),
+        ),
         // ---- Bowed strings (driven → sustain; bow near the bridge = bright/saw) ----
         make("Violin", bowed(0.5, 2.5, -1.2, 4.0, 44, 0.12), eng(0.55, 60.0, 150.0)),
         make("Viola", bowed(0.6, 2.5, -1.5, 5.0, 40, 0.14), eng(0.55, 65.0, 160.0)),
@@ -371,15 +451,46 @@ pub fn factory() -> Vec<Preset> {
         // ---- Basic Wave (reference oscillators) ----
         make("Triangle Lead", BasicWave { waveform: Waveform::Triangle, harmonics: 16, decay_time: 1.5 }, eng(0.5, 3.0, 120.0)),
         make("Saw Lead", BasicWave { waveform: Waveform::Saw, harmonics: 40, decay_time: 1.2 }, eng(0.45, 3.0, 120.0)),
-    ]
+    ];
+
+    // For every struck string / membrane / plate preset, add a "(graph)" twin
+    // that plays the SAME parameters through the per-sample voice graph, so each
+    // can be A/B'd against its classic-renderer original. Bowed strings are
+    // skipped (not struck/plucked). The twin just re-homes the params under the
+    // matching graph model's `inner`.
+    let mut twins: Vec<Preset> = Vec::new();
+    for p in &base {
+        let graph_id = match p.model_id.as_str() {
+            "pure_string" => {
+                if p.params.get("excitation").and_then(|v| v.as_str()) == Some("Bowed") {
+                    continue;
+                }
+                "graph_string"
+            }
+            "drum_membrane" => "graph_drum",
+            "musical_string" => "graph_musical_string",
+            "pure_plate" => "graph_plate",
+            _ => continue,
+        };
+        twins.push(Preset {
+            name: format!("{} (graph)", p.name),
+            model_id: graph_id.to_string(),
+            params: serde_json::json!({ "inner": p.params }),
+            engine: p.engine.clone(),
+            zones: Vec::new(),
+            builtin: Some(true),
+        });
+    }
+
     // Stamp every factory preset as built-in so the launch refresh keeps them
     // in sync with this code (user-saved presets are left untouched).
-    .into_iter()
-    .map(|mut p| {
-        p.builtin = Some(true);
-        p
-    })
-    .collect()
+    base.into_iter()
+        .chain(twins)
+        .map(|mut p| {
+            p.builtin = Some(true);
+            p
+        })
+        .collect()
 }
 
 /// Seed the folder with the factory presets if it currently has none (first run).
@@ -495,6 +606,29 @@ fn delete_in(dir: &Path, name: &str) -> io::Result<bool> {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod graph_twin_tests {
+    use super::*;
+
+    #[test]
+    fn struck_string_membrane_plate_presets_get_graph_twins() {
+        let f = factory();
+        let has = |n: &str| f.iter().any(|p| p.name == n);
+        // struck string + membrane + plate → twinned
+        assert!(has("Acoustic Guitar (graph)"), "struck string twinned");
+        assert!(has("Tom (graph)"), "membrane twinned");
+        assert!(has("Pure Plate (graph)"), "plate twinned");
+        // bowed strings + musical_string → NOT twinned
+        assert!(!has("Violin (graph)"), "bowed strings excluded");
+        assert!(has("Soft Nylon (graph)"), "musical_string twinned");
+        // a twin points at the graph model, wraps the original params, and rebuilds
+        let g = f.iter().find(|p| p.name == "Acoustic Guitar (graph)").unwrap();
+        assert_eq!(g.model_id, "graph_string");
+        assert!(g.params.get("inner").is_some(), "params re-homed under inner");
+        assert!(g.build_model().is_some(), "twin rebuilds via model_from_id");
     }
 }
 

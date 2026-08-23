@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use crate::graph::Control;
 use crate::models::{default_model, FtmModel, ModeBuffer, MAX_MODES};
 
 /// Number of simultaneously sounding notes per instrument.
@@ -84,6 +85,11 @@ struct Voice {
     noise_hp_s: f32,
     noise_lp_s: f32,
     rng: u32,
+    // Per-sample graph render path (`Some` = this voice renders through the
+    // voice graph instead of the mode bank). `graph_env` is an amplitude
+    // follower used to free the voice once it has rung out.
+    graph: Option<Box<dyn crate::graph::Node>>,
+    graph_env: f32,
 }
 
 impl Voice {
@@ -113,6 +119,8 @@ impl Voice {
             noise_hp_s: 0.0,
             noise_lp_s: 0.0,
             rng: 1,
+            graph: None,
+            graph_env: 0.0,
         }
     }
 }
@@ -198,6 +206,14 @@ impl Instrument {
     /// Cheap — applied at render, no voice rebuild.
     pub fn set_bend(&mut self, ratio: f32) {
         self.bend = ratio.max(0.0);
+        // Bank voices use `bend` at render; graph voices retune their resonators.
+        for v in &mut self.voices {
+            if v.active {
+                if let Some(g) = v.graph.as_mut() {
+                    g.control(Control::Bend(self.bend));
+                }
+            }
+        }
     }
 
     #[inline]
@@ -253,7 +269,7 @@ impl Instrument {
             v.vel = vel;
         }
         self.build_voice(idx, true);
-        if self.voices[idx].n_modes == 0 {
+        if self.voices[idx].n_modes == 0 && self.voices[idx].graph.is_none() {
             self.voices[idx].active = false;
         }
     }
@@ -262,6 +278,9 @@ impl Instrument {
         for v in &mut self.voices {
             if v.active && v.note == note && !v.releasing {
                 v.releasing = true;
+                if let Some(g) = v.graph.as_mut() {
+                    g.control(Control::Gate(false)); // stop the drive; ring out
+                }
             }
         }
     }
@@ -279,6 +298,9 @@ impl Instrument {
         for v in &mut self.voices {
             if v.active {
                 v.releasing = true;
+                if let Some(g) = v.graph.as_mut() {
+                    g.control(Control::Gate(false));
+                }
             }
         }
     }
@@ -296,6 +318,9 @@ impl Instrument {
         };
         let mut buf = std::mem::take(&mut self.scratch);
         self.model.excite(f0, vel, sr, &mut buf);
+        // Graph instruments render per-sample instead of as a free oscillator
+        // bank; build the per-voice graph (from the note) before borrowing it.
+        let graph = self.model.build_graph(f0, vel, sr);
 
         let atk_ms = self.engine.attack_ms;
         let rel_ms = self.engine.release_ms;
@@ -310,6 +335,19 @@ impl Instrument {
         }
         v.atk_inc = 1.0 / (atk_ms * 0.001 * sr).max(1.0);
         v.rel_mul = (0.001f32).powf(1.0 / (rel_ms * 0.001 * sr).max(1.0));
+
+        // Per-sample graph path: this voice ticks the graph each sample; the
+        // mode-bank arrays below are unused. The voice gate (attack/release)
+        // still applies.
+        if graph.is_some() {
+            v.graph = graph;
+            v.graph_env = 0.0;
+            v.n_modes = 0;
+            v.noise_level = 0.0;
+            self.scratch = buf;
+            return;
+        }
+        v.graph = None;
 
         let n = buf.n.min(MAX_MODES);
         for i in 0..n {
@@ -387,6 +425,9 @@ impl Instrument {
 
     #[inline]
     fn render_voice(&mut self, vi: usize) -> f32 {
+        if self.voices[vi].graph.is_some() {
+            return self.render_graph_voice(vi);
+        }
         let n = self.voices[vi].n_modes;
         let mut acc = 0.0f32;
         for i in 0..n {
@@ -445,6 +486,33 @@ impl Instrument {
             }
         }
         acc * v.gate
+    }
+
+    /// Render one sample of a per-sample graph voice. An amplitude follower
+    /// frees the voice once it has rung out. Release is **natural**: note-off
+    /// sends `Gate(false)` (via `note_off`), which stops any continuous drive so
+    /// the resonator decays on its own and this frees it — a struck voice simply
+    /// rings out. Pitch bend retunes the resonators (via `set_bend`).
+    #[inline]
+    fn render_graph_voice(&mut self, vi: usize) -> f32 {
+        let sr = self.sr;
+        let follow = (-1.0 / (0.05 * sr)).exp(); // ~50 ms amplitude follower
+        let v = &mut self.voices[vi];
+        let raw = v.graph.as_mut().expect("graph voice").tick(&[]);
+        v.elapsed += 1.0 / sr;
+        v.graph_env = raw.abs().max(v.graph_env * follow);
+        // Anti-click attack ramp.
+        if v.gate < 1.0 {
+            v.gate += v.atk_inc;
+            if v.gate > 1.0 {
+                v.gate = 1.0;
+            }
+        }
+        // Free once rung out (short grace so a slow onset isn't cut).
+        if v.elapsed > 0.05 && v.graph_env <= 1e-4 {
+            v.active = false;
+        }
+        raw * v.gate
     }
 }
 
