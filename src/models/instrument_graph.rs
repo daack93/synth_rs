@@ -117,6 +117,56 @@ fn body_bank(ring: f32, tone: f32) -> ModeBuffer {
     b
 }
 
+impl Comp {
+    /// The numeric parameters of this component that a key can drive, by name.
+    fn mappable(&self) -> &'static [&'static str] {
+        match self {
+            Comp::String(_) => &["length", "stiffness"],
+            Comp::Membrane(_) => &["radius"],
+            Comp::Plate(_) => &["ring"],
+            Comp::Body { .. } => &["ring", "tone"],
+            Comp::Strike | Comp::Mix => &[],
+        }
+    }
+
+    /// Read a mappable parameter's current (base) value.
+    fn get_param(&self, name: &str) -> Option<f32> {
+        match (self, name) {
+            (Comp::String(m), "length") => Some(m.string_length),
+            (Comp::String(m), "stiffness") => Some(m.stiffness),
+            (Comp::Membrane(m), "radius") => Some(m.radius),
+            (Comp::Plate(m), "ring") => Some(m.decay_time),
+            (Comp::Body { ring, .. }, "ring") => Some(*ring),
+            (Comp::Body { tone, .. }, "tone") => Some(*tone),
+            _ => None,
+        }
+    }
+
+    /// Set a mappable parameter (used by the key map at note-on).
+    fn set_param(&mut self, name: &str, v: f32) {
+        match (self, name) {
+            (Comp::String(m), "length") => m.string_length = v,
+            (Comp::String(m), "stiffness") => m.stiffness = v,
+            (Comp::Membrane(m), "radius") => m.radius = v,
+            (Comp::Plate(m), "ring") => m.decay_time = v,
+            (Comp::Body { ring, .. }, "ring") => *ring = v,
+            (Comp::Body { tone, .. }, "tone") => *tone = v,
+            _ => {}
+        }
+    }
+}
+
+/// One key→parameter mapping: the played note drives `component`'s `param` as
+/// `base · (f / C4)^amount`. `amount = 0` is fixed; `+1` scales the param up with
+/// pitch; `-1` inversely (e.g. a resonator that shortens as the note rises). One
+/// key can carry several of these, across different components.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct KeyTarget {
+    pub component: usize,
+    pub param: String,
+    pub amount: f32,
+}
+
 /// A directed, gained edge: `from`'s output feeds `to`, scaled by `gain` (the
 /// coupling strength between the two components).
 #[derive(Clone, Serialize, Deserialize)]
@@ -133,6 +183,10 @@ pub struct InstrumentGraph {
     pub components: Vec<Comp>,
     pub edges: Vec<Edge>,
     pub output: usize,
+    /// How the played key drives component parameters. Empty ⇒ resonators just
+    /// track pitch on their own (their `key_tracks_pitch`).
+    #[serde(default)]
+    pub key_map: Vec<KeyTarget>,
 }
 
 impl Default for InstrumentGraph {
@@ -153,6 +207,7 @@ impl Default for InstrumentGraph {
                 Edge { from: 2, to: 3, gain: 0.05 }, // wet body → out (coupling strength)
             ],
             output: 3,
+            key_map: Vec::new(),
         }
     }
 }
@@ -185,8 +240,20 @@ impl FtmModel for InstrumentGraph {
         if self.components.is_empty() || self.output >= self.components.len() {
             return None;
         }
+        // Apply the key map: drive each targeted (component, param) from the note.
+        let mut comps = self.components.clone();
+        if !self.key_map.is_empty() {
+            let ratio = (freq_hz / super::REF_PITCH_HZ).max(1e-4);
+            for kt in &self.key_map {
+                if let Some(c) = comps.get_mut(kt.component) {
+                    if let Some(base) = c.get_param(&kt.param) {
+                        c.set_param(&kt.param, base * ratio.powf(kt.amount));
+                    }
+                }
+            }
+        }
         let nodes: Vec<Box<dyn Node>> =
-            self.components.iter().map(|c| c.instantiate(freq_hz, vel, sr)).collect();
+            comps.iter().map(|c| c.instantiate(freq_hz, vel, sr)).collect();
         let mut inputs: Vec<Vec<(usize, f32)>> = vec![Vec::new(); nodes.len()];
         for e in &self.edges {
             if e.from < nodes.len() && e.to < nodes.len() {
@@ -215,6 +282,52 @@ impl FtmModel for InstrumentGraph {
                 labels.get(e.to).copied().unwrap_or("?"),
             );
             changed |= ui.add(unbounded_slider(&mut e.gain, 0.0..=1.0, &name)).changed();
+        }
+
+        // Key map: one key can drive several component params.
+        ui.separator();
+        ui.label(egui::RichText::new("Key map — a key drives these params").strong());
+        let params_of: Vec<&'static [&'static str]> =
+            self.components.iter().map(|c| c.mappable()).collect();
+        let mut remove: Option<usize> = None;
+        for (t, kt) in self.key_map.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                let c = egui::ComboBox::from_id_salt(("kt_c", t))
+                    .selected_text(labels.get(kt.component).copied().unwrap_or("?"))
+                    .show_ui(ui, |ui| {
+                        let mut ch = false;
+                        for (i, lbl) in labels.iter().enumerate() {
+                            ch |= ui.selectable_value(&mut kt.component, i, *lbl).changed();
+                        }
+                        ch
+                    });
+                changed |= c.inner.unwrap_or(false);
+
+                let opts = params_of.get(kt.component).copied().unwrap_or(&[]);
+                let p = egui::ComboBox::from_id_salt(("kt_p", t))
+                    .selected_text(if kt.param.is_empty() { "—" } else { kt.param.as_str() })
+                    .show_ui(ui, |ui| {
+                        let mut ch = false;
+                        for name in opts {
+                            ch |= ui.selectable_value(&mut kt.param, name.to_string(), *name).changed();
+                        }
+                        ch
+                    });
+                changed |= p.inner.unwrap_or(false);
+
+                changed |= ui.add(unbounded_slider(&mut kt.amount, -2.0..=2.0, "amount")).changed();
+                if ui.button("✕").clicked() {
+                    remove = Some(t);
+                }
+            });
+        }
+        if let Some(t) = remove {
+            self.key_map.remove(t);
+            changed = true;
+        }
+        if ui.button("➕ Add key mapping").clicked() {
+            self.key_map.push(KeyTarget { component: 0, param: String::new(), amount: 1.0 });
+            changed = true;
         }
         changed
     }
@@ -266,5 +379,37 @@ mod tests {
             (acc / 24_000.0).sqrt()
         };
         assert!(render(0.5) > render(0.0), "more body mix = more energy");
+    }
+    #[test]
+    fn key_map_drives_a_param() {
+        // Map the string's length inversely to pitch (shorter = higher). With the
+        // string's own pitch-tracking off, the key map is the only thing setting
+        // pitch, so a higher note must land more energy in a high band.
+        let sr = 48_000.0;
+        let g = InstrumentGraph {
+            components: vec![
+                Comp::Strike,
+                Comp::String(PureString { key_tracks_pitch: false, ..Default::default() }),
+                Comp::Mix,
+            ],
+            edges: vec![
+                Edge { from: 0, to: 1, gain: 1.0 },
+                Edge { from: 1, to: 2, gain: 1.0 },
+            ],
+            output: 2,
+            key_map: vec![KeyTarget { component: 1, param: "length".into(), amount: -1.0 }],
+        };
+        // Zero-crossing rate as a renderer-agnostic pitch proxy.
+        let zcr = |note: f32| -> usize {
+            let mut n = g.build_graph(note, 1.0, sr).unwrap();
+            let y: Vec<f32> = (0..24_000).map(|_| n.tick(&[])).collect();
+            y.windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count()
+        };
+        let low = zcr(220.0);
+        let high = zcr(660.0); // amount=-1 → shorter string → higher pitch
+        assert!(
+            high > low * 3 / 2,
+            "the length key-map raises pitch on higher notes (high={high} low={low})"
+        );
     }
 }

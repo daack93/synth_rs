@@ -175,6 +175,7 @@ pub fn factory() -> Vec<Preset> {
                     Edge { from: 2, to: 3, gain: 0.05 },
                 ],
                 output: 3,
+                key_map: Vec::new(),
             },
             eng(0.6, 3.0, 120.0),
         ),
