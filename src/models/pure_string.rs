@@ -1,61 +1,99 @@
-//! An FTM string model driven by the Kirchhoff string equation. The two
-//! classic pluck geometries are just endpoints of one continuous control: a
-//! centred pluck gives a triangle-like spectrum (odd modes), a near-end pluck a
-//! saw-like one (all modes). Here the pluck position slides freely between them.
+//! A physically-grounded stiff string.
+//!
+//! Every input is a real, tape-measurable property of a string: its speaking
+//! length (m), tension (N), diameter/gauge (mm), and material (density kg/m³,
+//! Young's modulus GPa). Those set the wave speed `c = √(T/μ)` (with linear
+//! density `μ = ρ·π(d/2)²`) and the bending inharmonicity
+//! `B = π²·E·I / (T·L²)`, `I = π(d/2)⁴/4`.
+//!
+//! Playing a note **frets** the string: the sounding length is `L = c/(2f)`, so
+//! higher notes are physically shorter and more inharmonic (B ∝ f²). The
+//! fundamental is tuned exactly onto the note — as a real fretted/tuned string
+//! is — and B stretches the upper partials off the harmonic series.
+//!
+//! Pluck position is the one remaining shape control: a centred pluck gives a
+//! triangle spectrum (odd modes), a near-end pluck a saw-like one. Decay is in
+//! real seconds.
 
 use serde::{Deserialize, Serialize};
 
-use super::{strike_amplitude, unbounded_slider, Excitation, FtmModel, ModeBuffer, PitchMode, TICK_RATE};
+use super::{midi_name, freq_to_midi, strike_amplitude, unbounded_slider, Excitation, FtmModel, ModeBuffer};
 
 const PI: f32 = std::f32::consts::PI;
-const TWO_PI: f32 = std::f32::consts::TAU;
+const PI64: f64 = std::f64::consts::PI;
+/// ln(1000): a decay rate of `ln(1000)/T` reaches −60 dB (÷1000) at `t = T` s.
+const LN_1000: f32 = 6.907_755;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PureString {
-    pub stiffness: f32,         // STRING_STIFFNESS (S)
-    pub prop_speed: f32,        // STRING_PROP_SPEED (c)
-    pub damping: f32,           // STRING_DAMPING (d1)
-    pub freq_dep_damping: f32,  // STRING_FREQ_DEPENDENT_DAMPING (d3)
-    pub string_length: f32,     // STRING_LENGTH (l)
-    pub depth: usize,           // DEPTH
-    /// Pluck position along the string, 0..1. 0.5 = center (triangle, odd modes);
-    /// near an end = saw-like (all modes). The two classic plucks are the ends.
+    /// Open (unfretted) speaking length, metres. With tension + gauge it sets
+    /// the open pitch `(1/2L)·√(T/μ)`; the played note frets up from there.
+    pub length_m: f32,
+    /// String tension, newtons.
+    pub tension_n: f32,
+    /// String diameter (gauge), millimetres.
+    pub diameter_mm: f32,
+    /// Material density, kg/m³ (steel ≈ 7850, nylon ≈ 1150, bronze ≈ 8740).
+    pub density_kgm3: f32,
+    /// Young's modulus, GPa (steel ≈ 200, nylon ≈ 4, bronze ≈ 105).
+    pub youngs_gpa: f32,
+    /// Pluck position along the string, fraction 0..1. 0.5 = centre (triangle,
+    /// odd modes); near an end = saw-like (all modes).
     pub pluck_pos: f32,
-    pub damp_period: f32,       // DAMP_PERIOD
-    pub time_scale: f32,        // TIME_SCALE
-    pub play_magnitude: f32,    // PLAY_MAGNITUDE
-    pub max_magnitude: f32,     // MAX_MAGNITUDE
-    /// If true the key sets pitch; if false, c/2l does and the key transposes.
-    pub key_tracks_pitch: bool,
-    /// How the key sets pitch: transpose a fixed string, or shorten the string
-    /// for higher notes (note-dependent inharmonicity + decay).
-    #[serde(default)]
-    pub pitch_mode: PitchMode,
+    /// Fundamental −60 dB decay time, seconds.
+    pub decay_time: f32,
+    /// Extra decay per mode-index² (1/s) — how much faster the highs die
+    /// (brightness of the tail). May be negative for a swelling tail.
+    pub hf_damping: f32,
+    /// Number of partials summed.
+    pub num_modes: usize,
     /// Plucked/struck (rings and decays) or bowed (driven — sustains while played).
     #[serde(default)]
     pub excitation: Excitation,
+    /// Velocity below this is silent (a gate); 0 keeps soft keypresses audible.
+    pub play_magnitude: f32,
+    /// Velocity mapped to full amplitude.
+    pub max_magnitude: f32,
 }
 
 impl Default for PureString {
     fn default() -> Self {
-        // Classic defaults; pluck at centre gives the triangle-string spectrum.
+        // A plain steel string ~ a light electric-guitar gauge: 0.65 m, 70 N,
+        // 0.5 mm steel → open pitch ≈ 164 Hz (E3), B ≈ 2e-4 (realistic).
         Self {
-            stiffness: 1.0,
-            prop_speed: 500.0,
-            damping: 1.0,
-            freq_dep_damping: -1.0,
-            string_length: 10.0,
-            depth: 10,
-            pluck_pos: 0.5,
-            damp_period: 100.0,
-            time_scale: 10_000.0,
-            play_magnitude: 0.0, // 0 keeps soft keypresses audible (raise to gate)
-            max_magnitude: 2500.0,
-            key_tracks_pitch: true,
-            pitch_mode: PitchMode::Physical,
+            length_m: 0.65,
+            tension_n: 70.0,
+            diameter_mm: 0.5,
+            density_kgm3: 7850.0,
+            youngs_gpa: 200.0,
+            pluck_pos: 0.14,
+            decay_time: 1.6,
+            hf_damping: 0.5,
+            num_modes: 40,
             excitation: Excitation::Struck,
+            play_magnitude: 0.0,
+            max_magnitude: 2500.0,
         }
+    }
+}
+
+impl PureString {
+    /// Linear (mass-per-length) density μ = ρ·π(d/2)², kg/m.
+    fn linear_density(&self) -> f64 {
+        let r = 0.5 * (self.diameter_mm as f64 * 1e-3).max(1e-6);
+        (self.density_kgm3 as f64 * PI64 * r * r).max(1e-12)
+    }
+
+    /// Transverse wave speed c = √(T/μ), m/s.
+    pub fn wave_speed(&self) -> f32 {
+        ((self.tension_n as f64).max(1e-6) / self.linear_density()).sqrt() as f32
+    }
+
+    /// Open-string pitch (1/2L)·√(T/μ), Hz — the string's natural (unfretted)
+    /// pitch, from which the played note frets up.
+    pub fn open_pitch_hz(&self) -> f32 {
+        self.wave_speed() / (2.0 * self.length_m.max(1e-4))
     }
 }
 
@@ -69,7 +107,7 @@ impl FtmModel for PureString {
     }
 
     fn description(&self) -> &'static str {
-        "An FTM string model with a continuous pluck position from triangle to saw."
+        "A physically-grounded stiff string: length, tension, gauge and material set the pitch and inharmonicity."
     }
 
     fn excite(&self, freq_hz: f32, vel: f32, sr: f32, out: &mut ModeBuffer) {
@@ -79,93 +117,97 @@ impl FtmModel for PureString {
         if amp_strike <= 0.0 {
             return; // below play threshold — silent, like a gentle shake
         }
+        let f = freq_hz.max(1.0) as f64;
 
-        // Reference length; in Physical mode the string shortens for higher
-        // notes so it matches Transpose at C4 and gets more inharmonic above it.
-        let l_ref = self.string_length;
-        let l_ref_safe = if l_ref.abs() < 1e-3 { 1e-3 } else { l_ref };
-        let (l_freq, decay_scale) =
-            if self.key_tracks_pitch && self.pitch_mode == PitchMode::Physical {
-                let ratio = (super::REF_PITCH_HZ / freq_hz.max(1.0)).clamp(0.02, 50.0);
-                // Full length scaling for pitch/inharmonicity; a gentler power for
-                // the decay so highs speed up without vanishing (the raw 1/l² is
-                // too aggressive).
-                (l_ref_safe * ratio, (freq_hz.max(1.0) / super::REF_PITCH_HZ).powf(0.6))
-            } else {
-                (l_ref_safe, 1.0)
-            };
+        // Real string geometry → wave speed and the fret length for this note.
+        let r = 0.5 * (self.diameter_mm as f64 * 1e-3).max(1e-6); // radius, m
+        let mu = self.linear_density(); // kg/m
+        let t = (self.tension_n as f64).max(1e-6); // N
+        let c = (t / mu).sqrt(); // m/s
+        let l = (c / (2.0 * f)).max(1e-4); // fretted length, m
+        // Bending inharmonicity B = π²·E·I / (T·L²), I = π r⁴/4.
+        let e = (self.youngs_gpa as f64 * 1e9).max(0.0); // Pa
+        let inertia = PI64 * r.powi(4) / 4.0; // m⁴
+        let b = (PI64 * PI64 * e * inertia / (t * l * l)).max(0.0); // dimensionless
 
-        // Frequency (inharmonicity) terms use the note's length.
-        let c = self.prop_speed / l_freq;
-        let s = self.stiffness / l_freq;
-        let wm_a = (PI * s).powi(4); // W^2 = wm_a*m^4 + wm_b*m^2 - O^2
-        let wm_b = (c * PI).powi(2);
-        // Decay terms use the reference length; Physical mode scales the whole
-        // decay by `decay_scale` instead.
-        let d3 = self.freq_dep_damping / (l_ref_safe * l_ref_safe);
-        let om_m = PI * PI * d3 / 2.0; // sigma[m] = om_m*m^2 + om_c
-        let om_c = -self.damping / 2.0;
-
-        let damp_per = self.damp_period.max(1e-3);
-        let n_req = self.depth.clamp(1, super::MAX_MODES);
-
-        // Pluck weight: Fourier coefficient of a triangular initial displacement
-        // plucked at fraction p of the length, K[m] = 2 sin(mπp) / (m²π² p(1-p)).
-        // At p = 0.5 the even modes vanish (triangle spectrum); as p → 0 it fills
-        // in as ~1/m (saw spectrum). Guarded away from the poles.
+        let n_req = self.num_modes.clamp(1, super::MAX_MODES);
+        let a0 = LN_1000 / self.decay_time.max(1e-3);
+        // Pluck weight: Fourier coefficient of a triangular initial displacement,
+        // K[m] = 2 sin(mπp) / (m²π² p(1-p)). p = 0.5 kills even modes.
         let p = self.pluck_pos.clamp(1e-3, 1.0 - 1e-3);
-        let pq = p * (1.0 - p);
+        let pq = (p * (1.0 - p)) as f64;
+        // Normalise so the m = 1 partial lands exactly on the played note.
+        let denom = (1.0 + b).max(1e-9);
 
-        // Precompute W, sigma, K per mode (also gives W[0] for key normalization).
-        let mut w = [0.0f32; super::MAX_MODES];
-        let mut sig = [0.0f32; super::MAX_MODES];
-        let mut kk = [0.0f32; super::MAX_MODES];
+        let mut freqs = [0.0f32; super::MAX_MODES];
+        let mut ks = [0.0f32; super::MAX_MODES];
+        let mut decays = [0.0f32; super::MAX_MODES];
         let mut amp_sum = 0.0f32;
         let mut count = 0usize;
         for i in 0..n_req {
-            let m = (i + 1) as f32;
+            let m = (i + 1) as f64;
             let m2 = m * m;
-            let m4 = m2 * m2;
-            let sigma = om_m * m2 + om_c;
-            let o_lin = (sigma / damp_per).exp(); // per-tick decay factor O[i], ~1
-            let w2 = (wm_a * m4 + wm_b * m2 - o_lin * o_lin).max(0.0);
-            let k = (2.0 / (m2 * PI * PI * pq)) * (m * PI * p).sin();
-            w[count] = w2.sqrt();
-            sig[count] = sigma;
-            kk[count] = k;
+            // Stiff-string partial: f_m = m·f·√((1+B m²)/(1+B)).
+            let ratio = m * ((1.0 + b * m2) / denom).sqrt();
+            let freq = (f * ratio) as f32;
+            if freq >= sr * 0.45 {
+                break; // near Nyquist: drop the rest (ascending order)
+            }
+            let mf = (i + 1) as f32;
+            let k = (2.0 / (mf * mf * PI * PI * pq as f32)) * (mf * PI * p).sin();
+            freqs[count] = freq;
+            ks[count] = k;
+            decays[count] = a0 + self.hf_damping * mf * mf;
             amp_sum += k.abs();
             count += 1;
         }
         if count == 0 {
             return;
         }
-
-        let w0 = if w[0] > 1e-6 { w[0] } else { 1.0 };
-        let ts = self.time_scale.max(1.0);
         let norm = if amp_sum > 1e-6 { amp_strike / amp_sum } else { amp_strike };
-
         for i in 0..count {
-            let freq = if self.key_tracks_pitch {
-                freq_hz * (w[i] / w0)
-            } else {
-                // Absolute physical mapping W*TICK_RATE/(TIME_SCALE*2pi).
-                w[i] * TICK_RATE / (ts * TWO_PI)
-            };
-            if freq >= sr * 0.45 {
-                break; // near Nyquist: drop the rest (ascending order)
-            }
-            // Each mode's amplitude is multiplied by O = exp(sigma/DAMP_PERIOD)
-            // every DAMP_PERIOD ticks; over a second that is a per-second rate of
-            // sigma*TICK_RATE/DAMP_PERIOD^2. decay = -that (sigma <= 0 => decay >= 0).
-            let decay = -sig[i] * TICK_RATE / (damp_per * damp_per) * decay_scale;
-            out.push(freq, kk[i] * norm, decay);
+            out.push(freqs[i], ks[i] * norm, decays[i]);
         }
     }
 
     fn params_ui(&mut self, ui: &mut egui::Ui) -> bool {
         let mut changed = false;
 
-        ui.strong("String Parameters");
+        ui.strong("String (physical)");
+        // Live read-out: what real string this is, and its open pitch.
+        let open = self.open_pitch_hz();
+        ui.label(
+            egui::RichText::new(format!(
+                "open pitch ≈ {open:.1} Hz ({})   ·   wave speed {:.0} m/s",
+                midi_name(freq_to_midi(open)),
+                self.wave_speed()
+            ))
+            .weak()
+            .small(),
+        );
+
+        changed |= ui
+            .add(unbounded_slider(&mut self.length_m, 0.1..=2.0, "Length").suffix(" m"))
+            .on_hover_text("Open speaking length. Sets the open pitch; the note frets up from there.")
+            .changed();
+        changed |= ui
+            .add(unbounded_slider(&mut self.tension_n, 1.0..=1000.0, "Tension").suffix(" N"))
+            .on_hover_text("String tension. Higher = brighter/less inharmonic at a given pitch (pianos run ~700 N).")
+            .changed();
+        changed |= ui
+            .add(unbounded_slider(&mut self.diameter_mm, 0.05..=3.0, "Gauge").suffix(" mm"))
+            .on_hover_text("String diameter. Thicker = more inharmonic (the m⁴ bending term).")
+            .changed();
+        changed |= ui
+            .add(unbounded_slider(&mut self.density_kgm3, 500.0..=20000.0, "Density").suffix(" kg/m³"))
+            .on_hover_text("Material density: steel ≈ 7850, nylon ≈ 1150, bronze ≈ 8740, gut ≈ 1300.")
+            .changed();
+        changed |= ui
+            .add(unbounded_slider(&mut self.youngs_gpa, 0.5..=250.0, "Young's modulus").suffix(" GPa"))
+            .on_hover_text("Stiffness of the material: steel ≈ 200, bronze ≈ 105, nylon ≈ 4, gut ≈ 6.")
+            .changed();
+
+        ui.add_space(6.0);
         changed |= ui
             .add(
                 unbounded_slider(&mut self.pluck_pos, 0.0..=1.0, "Pluck position").custom_formatter(
@@ -182,78 +224,29 @@ impl FtmModel for PureString {
             )
             .on_hover_text("Where the string is plucked. Center = odd harmonics (triangle); near an end = fuller, saw-like.")
             .changed();
-
         changed |= ui
-            .add(unbounded_slider(&mut self.stiffness, 0.0..=50.0, "STRING_STIFFNESS (S)"))
-            .on_hover_text("The m^4 term: stretches upper partials sharp (inharmonicity).")
+            .add(unbounded_slider(&mut self.decay_time, 0.05..=12.0, "Decay time").suffix(" s"))
+            .on_hover_text("Fundamental −60 dB ring time, in seconds.")
             .changed();
         changed |= ui
-            .add(unbounded_slider(&mut self.prop_speed, 1.0..=2000.0, "STRING_PROP_SPEED (c)"))
-            .on_hover_text("Wave speed. With length sets the physical pitch (~c/2l).")
+            .add(unbounded_slider(&mut self.hf_damping, -2.0..=8.0, "HF damping"))
+            .on_hover_text("How much faster the high partials die (1/s per mode²). Negative = they swell in.")
             .changed();
         changed |= ui
-            .add(unbounded_slider(&mut self.damping, -50.0..=200.0, "STRING_DAMPING (d1)"))
-            .on_hover_text("Uniform decay of every mode. (Best kept >= 0.)")
-            .changed();
-        changed |= ui
-            .add(unbounded_slider(
-                &mut self.freq_dep_damping,
-                -100.0..=20.0,
-                "STRING_FREQ_DEP_DAMPING (d3)",
-            ))
-            .on_hover_text("Extra decay on high modes (typically negative).")
-            .changed();
-        changed |= ui
-            .add(unbounded_slider(&mut self.string_length, 0.1..=100.0, "STRING_LENGTH (l)"))
-            .on_hover_text("Affects pitch and the pluck-shape weights K[m].")
-            .changed();
-        changed |= ui
-            .add(unbounded_slider(&mut self.depth, 1..=super::MAX_MODES, "DEPTH (modes)"))
+            .add(unbounded_slider(&mut self.num_modes, 1..=super::MAX_MODES, "Modes"))
             .changed();
 
         ui.add_space(6.0);
-        ui.strong("Timing / velocity");
-        changed |= ui
-            .add(unbounded_slider(&mut self.damp_period, 1.0..=1000.0, "DAMP_PERIOD"))
-            .on_hover_text("How often damping is applied (in ticks). Larger = longer sustain.")
-            .changed();
-        changed |= ui
-            .add(
-                unbounded_slider(&mut self.time_scale, 100.0..=100_000.0, "TIME_SCALE")
-                    .logarithmic(true),
-            )
-            .on_hover_text("Divides modal frequency in physical-pitch mode (ignored when the key tracks pitch).")
-            .changed();
-        changed |= ui
-            .add(unbounded_slider(&mut self.play_magnitude, 0.0..=2500.0, "PLAY_MAGNITUDE"))
-            .on_hover_text("Velocity threshold; below it a strike is silent.")
-            .changed();
-        changed |= ui
-            .add(unbounded_slider(&mut self.max_magnitude, 1.0..=5000.0, "MAX_MAGNITUDE"))
-            .on_hover_text("Velocity mapped to full amplitude.")
-            .changed();
-
-        changed |= ui
-            .checkbox(&mut self.key_tracks_pitch, "Key tracks pitch")
-            .on_hover_text("Off: c/2l sets the pitch and the key transposes a fixed string.")
-            .changed();
-        ui.add_enabled_ui(self.key_tracks_pitch, |ui| {
-            egui::ComboBox::from_label("Pitch mode")
-                .selected_text(match self.pitch_mode {
-                    PitchMode::Transpose => "Transpose",
-                    PitchMode::Physical => "Physical length",
-                })
-                .show_ui(ui, |ui| {
-                    changed |= ui
-                        .selectable_value(&mut self.pitch_mode, PitchMode::Transpose, "Transpose")
-                        .on_hover_text("One string stretched to each note — uniform timbre.")
-                        .changed();
-                    changed |= ui
-                        .selectable_value(&mut self.pitch_mode, PitchMode::Physical, "Physical length")
-                        .on_hover_text("Shorten the string for higher notes: more inharmonic and faster-decaying up top.")
-                        .changed();
-                });
+        ui.collapsing("Velocity", |ui| {
+            changed |= ui
+                .add(unbounded_slider(&mut self.play_magnitude, 0.0..=2500.0, "Play threshold"))
+                .on_hover_text("Velocity below this is silent.")
+                .changed();
+            changed |= ui
+                .add(unbounded_slider(&mut self.max_magnitude, 1.0..=5000.0, "Full-velocity level"))
+                .changed();
         });
+
         egui::ComboBox::from_label("Excitation")
             .selected_text(match self.excitation {
                 Excitation::Struck => "Plucked / struck",
@@ -289,37 +282,36 @@ mod tests {
     fn pluck_position_shapes_the_spectrum() {
         let mut buf = ModeBuffer::default();
         // Center pluck (0.5): even modes vanish, so mode 2 (index 1) is ~silent.
-        let center = PureString { pluck_pos: 0.5, depth: 8, ..PureString::default() };
+        let center = PureString { pluck_pos: 0.5, num_modes: 8, ..PureString::default() };
         center.excite(220.0, 1.0, 48_000.0, &mut buf);
         assert!(buf.n > 2);
         assert!(buf.amp[1].abs() < 1e-3, "even mode should vanish at center pluck");
 
         // Off-center pluck: even modes come back.
-        let edge = PureString { pluck_pos: 0.12, depth: 8, ..PureString::default() };
+        let edge = PureString { pluck_pos: 0.12, num_modes: 8, ..PureString::default() };
         edge.excite(220.0, 1.0, 48_000.0, &mut buf);
         assert!(buf.amp[1].abs() > 1e-3, "even mode present when plucked off-center");
     }
 
     #[test]
-    fn physical_mode_stretches_high_notes() {
-        let mut buf = ModeBuffer::default();
-        let ratio = |m: &PureString, f: f32, buf: &mut ModeBuffer| {
-            m.excite(f, 1.0, 48_000.0, buf);
-            buf.freq[1] / buf.freq[0]
-        };
-        // Real stiffness so inharmonicity is visible.
-        let phys = PureString { pitch_mode: PitchMode::Physical, stiffness: 8.0, pluck_pos: 0.12, depth: 8, ..PureString::default() };
-        let r_low = ratio(&phys, 261.63, &mut buf); // C4
-        let r_high = ratio(&phys, 1046.5, &mut buf); // C6
-        assert!(r_high > r_low + 1e-3, "physical: high notes more inharmonic ({r_low} -> {r_high})");
+    fn open_pitch_matches_real_geometry() {
+        // A 0.65 m, 0.5 mm steel string at 70 N sounds ≈ 164 Hz (≈ E3).
+        let s = PureString::default();
+        let f = s.open_pitch_hz();
+        assert!((f - 164.0).abs() < 12.0, "open pitch {f} Hz not near the physical 164 Hz");
+    }
 
-        // Transpose mode: the partial ratio is the same at every pitch.
-        let trans = PureString { pitch_mode: PitchMode::Transpose, stiffness: 8.0, pluck_pos: 0.12, depth: 8, ..PureString::default() };
-        let t_low = ratio(&trans, 261.63, &mut buf);
-        let t_high = ratio(&trans, 1046.5, &mut buf);
-        assert!((t_low - t_high).abs() < 1e-4, "transpose: ratio is note-independent");
-        // Physical matches Transpose at the C4 reference.
-        assert!((r_low - t_low).abs() < 1e-3, "physical == transpose at C4 ({r_low} vs {t_low})");
+    #[test]
+    fn higher_notes_are_more_inharmonic() {
+        // B ∝ f², so the 2nd partial stretches sharper up high than down low.
+        let mut buf = ModeBuffer::default();
+        // Thick, low-tension string so stiffness is audible.
+        let s = PureString { diameter_mm: 1.2, tension_n: 40.0, pluck_pos: 0.12, num_modes: 8, ..PureString::default() };
+        let ratio = |f: f32, buf: &mut ModeBuffer| { s.excite(f, 1.0, 96_000.0, buf); buf.freq[1] / buf.freq[0] };
+        let low = ratio(130.81, &mut buf); // C3
+        let high = ratio(1046.5, &mut buf); // C6
+        assert!(high > 2.0, "stiff string should stretch partial 2 sharp ({high})");
+        assert!(high > low + 1e-4, "high notes more inharmonic ({low} -> {high})");
     }
 
     #[test]
@@ -339,11 +331,12 @@ mod tests {
     fn stays_finite_with_degenerate_params() {
         let mut buf = ModeBuffer::default();
         let m = PureString {
-            string_length: 0.0,
-            damping: -3.0,
-            freq_dep_damping: 2.0,
-            depth: 10_000,
-            damp_period: 0.0,
+            length_m: 0.0,
+            tension_n: 0.0,
+            diameter_mm: 0.0,
+            decay_time: 0.0,
+            hf_damping: -5.0,
+            num_modes: 10_000,
             ..PureString::default()
         };
         m.excite(110.0, 1.0, 48_000.0, &mut buf);
@@ -354,7 +347,6 @@ mod tests {
     #[test]
     fn play_magnitude_gates_soft_strikes() {
         let mut buf = ModeBuffer::default();
-        // Threshold at 2000/2500 = 0.8 of full velocity.
         let m = PureString { play_magnitude: 2000.0, max_magnitude: 2500.0, ..PureString::default() };
         m.excite(220.0, 0.5, 48_000.0, &mut buf); // soft => below threshold
         assert_eq!(buf.n, 0, "a soft strike should be silent");
