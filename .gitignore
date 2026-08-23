@@ -9,3 +9,6 @@
 /projects
 # Rendered WAV exports
 /exports
+
+# Claude Code local state / agent worktrees
+/.claude/

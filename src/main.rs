@@ -25,7 +25,7 @@ use instrument::EngineParams;
 use midi::MidiInputHandle;
 use models::FtmModel;
 use presets::Preset;
-use project::{NamedLoop, Project, TempoGrid, ZoneData};
+use project::{NamedSong, Project, TempoGrid, ZoneData};
 use studio::{
     ClipView, Command, LiveConfig, SharedView, TrackView,
     TransportState,
@@ -372,7 +372,7 @@ impl App {
             self.project.loops = if data.is_empty() {
                 Vec::new()
             } else {
-                vec![NamedLoop { name: self.project.name.clone(), data }]
+                vec![NamedSong { name: self.project.name.clone(), data }]
             };
         }
         match project::save(&self.project) {
@@ -391,7 +391,7 @@ impl App {
                 let _ = self.tx.send(Command::SetTempo(p.tempo));
                 // Load its loop straight into the studio.
                 if let Some(nl) = p.loops.first() {
-                    let _ = self.tx.send(Command::LoadLoop(nl.data.clone()));
+                    let _ = self.tx.send(Command::LoadSong(nl.data.clone()));
                 }
                 self.edit_target = Target::Live;
                 self.track_edit = None;
@@ -1324,7 +1324,7 @@ impl App {
         let (state, loop_secs) = self
             .view
             .as_ref()
-            .map(|v| (v.state(), v.loop_seconds(self.sample_rate)))
+            .map(|v| (v.state(), v.song_seconds(self.sample_rate)))
             .unwrap_or((TransportState::Idle, 0.0));
 
         ui.horizontal(|ui| {
@@ -1455,7 +1455,7 @@ impl App {
             Some(v) => (
                 v.tracks(),
                 v.play_fraction(),
-                v.loop_seconds(self.sample_rate),
+                v.song_seconds(self.sample_rate),
                 v.arrangement(),
             ),
             None => return,
