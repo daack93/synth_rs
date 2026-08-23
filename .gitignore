@@ -2,3 +2,10 @@
 **/*.rs.bk
 .DS_Store
 *.log
+
+# Runtime preset library (local instrument saves)
+/presets
+# Runtime project / loop saves
+/projects
+# Rendered WAV exports
+/exports
