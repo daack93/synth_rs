@@ -80,12 +80,82 @@ impl ModalResonator {
 impl Node for ModalResonator {
     #[inline]
     fn tick(&mut self, inputs: &[f32]) -> f32 {
-        let x = inputs.first().copied().unwrap_or(0.0);
+        // Sum all incoming signals — several exciters, or an upstream resonator.
+        let x: f32 = inputs.iter().sum();
         let mut s = 0.0;
         for m in &mut self.modes {
             s += m.tick(x);
         }
         s
+    }
+}
+
+/// A secondary/body resonator: a fixed-formant modal filter driven by an
+/// upstream signal, mixed dry + wet. This is how a body / oral cavity colours a
+/// primary resonator's output (a resonator → resonator edge).
+pub struct BodyResonator {
+    modal: ModalResonator,
+    dry: f32,
+    wet: f32,
+}
+
+impl BodyResonator {
+    pub fn new(formants: &ModeBuffer, sr: f32, dry: f32, wet: f32) -> Self {
+        BodyResonator { modal: ModalResonator::from_bank(formants, sr), dry, wet }
+    }
+}
+
+impl Node for BodyResonator {
+    #[inline]
+    fn tick(&mut self, inputs: &[f32]) -> f32 {
+        let x: f32 = inputs.iter().sum();
+        let wet = self.modal.tick(&[x]);
+        x * self.dry + wet * self.wet
+    }
+}
+
+/// A small graph of [`Node`]s wired into a per-voice system, itself a [`Node`].
+///
+/// Every edge carries one signal with a **one-sample delay** (each node reads
+/// the previous frame's outputs): a few samples of latency through a chain
+/// (inaudible), and — crucially — it makes feedback loops (coupling) stable
+/// without special cases. `inputs[i]` lists the node indices feeding node `i`;
+/// `output` is the node whose sample is the voice's output.
+pub struct Graph {
+    nodes: Vec<Box<dyn Node>>,
+    inputs: Vec<Vec<usize>>,
+    output: usize,
+    last: Vec<f32>,
+    cur: Vec<f32>,
+    in_buf: Vec<f32>,
+}
+
+impl Graph {
+    pub fn new(nodes: Vec<Box<dyn Node>>, inputs: Vec<Vec<usize>>, output: usize) -> Self {
+        let n = nodes.len();
+        let fan_in = inputs.iter().map(|e| e.len()).max().unwrap_or(0);
+        Graph {
+            nodes,
+            inputs,
+            output,
+            last: vec![0.0; n],
+            cur: vec![0.0; n],
+            in_buf: Vec::with_capacity(fan_in),
+        }
+    }
+}
+
+impl Node for Graph {
+    fn tick(&mut self, _external: &[f32]) -> f32 {
+        for i in 0..self.nodes.len() {
+            self.in_buf.clear();
+            for &j in &self.inputs[i] {
+                self.in_buf.push(self.last[j]);
+            }
+            self.cur[i] = self.nodes[i].tick(&self.in_buf);
+        }
+        std::mem::swap(&mut self.last, &mut self.cur);
+        self.last[self.output]
     }
 }
 
@@ -236,5 +306,64 @@ mod tests {
             }
         }
         assert!(worst < 0.25, "per-mode magnitudes match within 25% (worst={worst:.3})");
+    }
+}
+
+#[cfg(test)]
+mod graph_tests {
+    use super::*;
+    use crate::models::pure_string::PureString;
+    use crate::models::FtmModel;
+
+    fn render(node: &mut dyn Node, n: usize) -> Vec<f32> {
+        (0..n).map(|_| node.tick(&[])).collect()
+    }
+    fn mag_at(x: &[f32], f: f32, sr: f32) -> f32 {
+        let w = -std::f32::consts::TAU * f / sr;
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for (k, &v) in x.iter().enumerate() {
+            re += v as f64 * (w as f64 * k as f64).cos();
+            im += v as f64 * (w as f64 * k as f64).sin();
+        }
+        ((re * re + im * im).sqrt() / x.len() as f64) as f32
+    }
+
+    #[test]
+    fn body_graph_colours_and_differs_from_bare_string() {
+        let sr = 48_000.0;
+        let mut bank = ModeBuffer::default();
+        // A low note so the string's own modes sit above the body formants.
+        PureString::default().excite(110.0, 1.0, sr, &mut bank);
+
+        // Bare string (Impulse → String).
+        let mut bare = StruckVoice::new(&bank, sr);
+        let bare_y = render(&mut bare, 24_000);
+
+        // String → Body graph.
+        let mut body = ModeBuffer::default();
+        body.push(100.0, 0.6, 8.0);
+        body.push(210.0, 0.4, 11.0);
+        body.push(390.0, 0.3, 15.0);
+        let nodes: Vec<Box<dyn Node>> = vec![
+            Box::new(ImpulseExciter::new(1.0)),
+            Box::new(ModalResonator::from_bank(&bank, sr)),
+            Box::new(BodyResonator::new(&body, sr, 1.0, 0.5)),
+        ];
+        let mut g = Graph::new(nodes, vec![vec![], vec![0], vec![1]], 2);
+        let bodied_y = render(&mut g, 24_000);
+
+        // Both make sound.
+        let rms = |a: &[f32]| (a.iter().map(|v| v * v).sum::<f32>() / a.len() as f32).sqrt();
+        assert!(rms(&bare_y) > 1e-4 && rms(&bodied_y) > 1e-4, "both non-silent");
+
+        // The body boosts its formant region: 210 Hz is louder relative to the
+        // string's fundamental in the bodied version than in the bare one.
+        let ratio = |y: &[f32]| mag_at(y, 210.0, sr) / mag_at(y, 110.0, sr).max(1e-9);
+        assert!(
+            ratio(&bodied_y) > ratio(&bare_y) * 1.2,
+            "body adds resonance at its formant (bodied {:.3} vs bare {:.3})",
+            ratio(&bodied_y),
+            ratio(&bare_y)
+        );
     }
 }

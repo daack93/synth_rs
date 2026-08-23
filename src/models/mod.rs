@@ -210,6 +210,8 @@ pub fn model_from_id(id: &str, params: &serde_json::Value) -> Option<Box<dyn Ftm
         "graph_string" => boxed::<graph_voice::GraphString>(params),
         "graph_plate" => boxed::<graph_voice::GraphPlate>(params),
         "graph_drum" => boxed::<graph_voice::GraphDrum>(params),
+        "graph_musical_string" => boxed::<graph_voice::GraphMusicalString>(params),
+        "bodied_string" => boxed::<graph_voice::GraphBodiedString>(params),
         _ => None,
     }
 }
@@ -234,6 +236,8 @@ pub fn registry() -> Vec<Box<dyn FtmModel>> {
         Box::new(graph_voice::GraphString::default()),
         Box::new(graph_voice::GraphPlate::default()),
         Box::new(graph_voice::GraphDrum::default()),
+        Box::new(graph_voice::GraphMusicalString::default()),
+        Box::new(graph_voice::GraphBodiedString::default()),
         Box::new(basic_wave::BasicWave::default()),
     ]
 }

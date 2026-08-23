@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::models::basic_wave::{BasicWave, Waveform};
 use crate::models::cymbal::Cymbal;
 use crate::models::drum_membrane::DrumMembrane;
+use crate::models::graph_voice::GraphBodiedString;
 use crate::models::metal_bell::MetalBell;
 use crate::models::musical_string::MusicalString;
 use crate::models::pure_plate::PurePlate;
@@ -157,6 +158,12 @@ pub fn factory() -> Vec<Preset> {
         make("Banjo", string(3.0, 13.0, -6.0, 20.0, 36, 0.08), eng(0.6, 2.0, 80.0)),
         // Rounder pluck + more HF damping to tame the "electric" low end.
         make("Harp", string(0.8, 3.5, -4.0, 14.0, 28, 0.18), eng(0.6, 3.0, 180.0)),
+        // ---- Multi-component graph: string → body (A/B vs Acoustic Guitar) ----
+        make(
+            "Guitar + Body (graph)",
+            GraphBodiedString { inner: string(1.0, 7.0, -4.5, 12.0, 28, 0.10) },
+            eng(0.6, 3.0, 120.0),
+        ),
         // ---- Bowed strings (driven → sustain; bow near the bridge = bright/saw) ----
         make("Violin", bowed(0.5, 2.5, -1.2, 4.0, 44, 0.12), eng(0.55, 60.0, 150.0)),
         make("Viola", bowed(0.6, 2.5, -1.5, 5.0, 40, 0.14), eng(0.55, 65.0, 160.0)),
@@ -388,6 +395,7 @@ pub fn factory() -> Vec<Preset> {
                 "graph_string"
             }
             "drum_membrane" => "graph_drum",
+            "musical_string" => "graph_musical_string",
             "pure_plate" => "graph_plate",
             _ => continue,
         };
@@ -542,7 +550,7 @@ mod graph_twin_tests {
         assert!(has("Pure Plate (graph)"), "plate twinned");
         // bowed strings + musical_string → NOT twinned
         assert!(!has("Violin (graph)"), "bowed strings excluded");
-        assert!(!has("Soft Nylon (graph)"), "musical_string excluded");
+        assert!(has("Soft Nylon (graph)"), "musical_string twinned");
         // a twin points at the graph model, wraps the original params, and rebuilds
         let g = f.iter().find(|p| p.name == "Acoustic Guitar (graph)").unwrap();
         assert_eq!(g.model_id, "graph_string");
