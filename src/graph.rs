@@ -61,8 +61,35 @@ impl Mode {
         Mode {
             a1: 2.0 * r * theta.cos(),
             a2: -(r * r),
-            // Chosen so a unit impulse yields peak output ≈ `amp`.
+            // Chosen so a unit impulse yields peak output ≈ `amp` (struck use).
             b0: amp * theta.sin(),
+            y1: 0.0,
+            y2: 0.0,
+            theta0: theta,
+            r,
+        }
+    }
+
+    /// A **constant-peak-gain** band-pass: its magnitude at resonance is exactly
+    /// `peak_gain`, independent of Q. Used when the resonator is a *filter* driven
+    /// by another signal (a body/oral tract colouring a string, an air column
+    /// blown by breath) — so it *colours* the input rather than amplifying it by
+    /// ~1/(1−r), which is what makes a naive high-Q resonator explode when driven.
+    fn new_filter(freq: f32, decay: f32, peak_gain: f32, sr: f32) -> Self {
+        let theta = TAU * (freq / sr);
+        let r = (-decay / sr).exp().clamp(0.0, 0.999_999);
+        // For D(z) = 1 − a1 z⁻¹ − a2 z⁻², a1 = 2r cosθ, a2 = −r², the response is
+        // H = b0/D. Evaluated at the resonance z = e^{jθ}:
+        //   Re D = (1−r)[(1+r) − 2r cos²θ],   Im D = r(1−r) sin2θ.
+        // Setting b0 = peak_gain·|D(θ)| makes |H(θ)| = peak_gain exactly.
+        let c = theta.cos();
+        let d_re = (1.0 - r) * ((1.0 + r) - 2.0 * r * c * c);
+        let d_im = r * (1.0 - r) * (2.0 * theta).sin();
+        let d_mag = (d_re * d_re + d_im * d_im).sqrt();
+        Mode {
+            a1: 2.0 * r * c,
+            a2: -(r * r),
+            b0: peak_gain * d_mag,
             y1: 0.0,
             y2: 0.0,
             theta0: theta,
@@ -94,9 +121,21 @@ pub struct ModalResonator {
 
 impl ModalResonator {
     /// Build the resonator from a model's computed mode bank (freq/amp/decay).
+    /// Struck normalization: a unit impulse rings out at the modes' amplitudes.
     pub fn from_bank(bank: &ModeBuffer, sr: f32) -> Self {
         let modes = (0..bank.n)
             .map(|i| Mode::new(bank.freq[i], bank.decay[i].max(0.0), bank.amp[i], sr))
+            .collect();
+        ModalResonator { modes }
+    }
+
+    /// Build the resonator as a bank of **constant-peak-gain filters** — each
+    /// mode's amplitude becomes its passband gain. For a resonator used as a
+    /// filter (a body/tract), so it colours a driving signal instead of
+    /// amplifying it by its Q.
+    pub fn from_bank_filter(bank: &ModeBuffer, sr: f32) -> Self {
+        let modes = (0..bank.n)
+            .map(|i| Mode::new_filter(bank.freq[i], bank.decay[i].max(0.0), bank.amp[i], sr))
             .collect();
         ModalResonator { modes }
     }
@@ -569,7 +608,9 @@ pub struct FormantResonator {
 
 impl FormantResonator {
     pub fn new(formants: &ModeBuffer, sr: f32) -> Self {
-        FormantResonator { inner: ModalResonator::from_bank(formants, sr) }
+        // A body colours its input, so its modes are constant-peak-gain filters
+        // (peak gain = the formant amplitude), not energy-adding resonators.
+        FormantResonator { inner: ModalResonator::from_bank_filter(formants, sr) }
     }
 }
 
@@ -757,7 +798,7 @@ mod graph_tests {
             vec![],
             vec![(0, 1.0)],
             vec![(1, 1.0)],
-            vec![(1, 1.0), (2, 0.5)],
+            vec![(1, 1.0), (2, 1.0)], // wet body at full edge
         ];
         let mut g = Graph::new(nodes, edges, 3);
         let bodied_y = render(&mut g, 24_000);
@@ -769,8 +810,10 @@ mod graph_tests {
         // The body boosts its formant region: 210 Hz is louder relative to the
         // string's fundamental in the bodied version than in the bare one.
         let ratio = |y: &[f32]| mag_at(y, 210.0, sr) / mag_at(y, 110.0, sr).max(1e-9);
+        // The body is a constant-peak-gain filter, so it colours gently: the
+        // 210 Hz formant region gains relative to the string's fundamental.
         assert!(
-            ratio(&bodied_y) > ratio(&bare_y) * 1.2,
+            ratio(&bodied_y) > ratio(&bare_y) * 1.05,
             "body adds resonance at its formant (bodied {:.3} vs bare {:.3})",
             ratio(&bodied_y),
             ratio(&bare_y)
