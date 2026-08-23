@@ -5,6 +5,7 @@
 
 mod arrangement_ui;
 mod audio;
+mod graph;
 mod export;
 mod instrument;
 mod kit;
