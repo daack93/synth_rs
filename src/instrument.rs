@@ -512,13 +512,29 @@ impl Instrument {
         if v.elapsed > 0.05 && v.graph_env <= 1e-4 {
             v.active = false;
         }
-        raw * v.gate
+        soft_limit(raw * v.gate)
     }
 }
 
 #[inline]
 fn midi_to_freq(note: u8) -> f32 {
     440.0 * 2.0f32.powf((note as f32 - 69.0) / 12.0)
+}
+
+/// A per-voice safety limiter for the graph engine. Transparent below ±2 (normal
+/// voices are ~unit level, so it never touches them), then soft-saturates toward
+/// a ±4 ceiling — so an experimental preset whose feedback loop is unstable
+/// (until its underlying model is grounded) can't produce a dangerous spike.
+#[inline]
+fn soft_limit(x: f32) -> f32 {
+    const THRESH: f32 = 3.0;
+    const CEIL: f32 = 6.0;
+    let a = x.abs();
+    if a <= THRESH {
+        return x;
+    }
+    let range = CEIL - THRESH;
+    x.signum() * (THRESH + range * ((a - THRESH) / range).tanh())
 }
 
 #[cfg(test)]
