@@ -205,6 +205,38 @@ pub fn factory() -> Vec<Preset> {
             },
             eng(0.7, 1.0, 200.0),
         ),
+        // ---- Sustained/driven wind: breath into an air column (graph) ----
+        make(
+            "Wind (graph)",
+            InstrumentGraph {
+                components: vec![
+                    Comp::Breath { level: 0.15, tone: 1.0 },
+                    Comp::Horn(WebsterHorn {
+                        boundary: Boundary::Open,
+                        r1: 0.0095,
+                        r2: 0.0,
+                        r3: 0.001,
+                        length: 0.6,
+                        blow_pos: 0.15,
+                        depth: 12,
+                        resolution: 300,
+                        damping: 3.0,
+                        freq_dep_damping: -0.10,
+                        visco_loss: 0.3,
+                        radiation: 0.5,
+                        ..WebsterHorn::default()
+                    }),
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 1, gain: 1.0 }, // breath drives the air column
+                    Edge { from: 1, to: 2, gain: 1.0 }, // air column → out
+                ],
+                output: 2,
+                key_map: Vec::new(),
+            },
+            eng(0.5, 20.0, 200.0),
+        ),
         // ---- Bowed strings (driven → sustain; bow near the bridge = bright/saw) ----
         make("Violin", bowed(0.5, 2.5, -1.2, 4.0, 44, 0.12), eng(0.55, 60.0, 150.0)),
         make("Viola", bowed(0.6, 2.5, -1.5, 5.0, 40, 0.14), eng(0.55, 65.0, 160.0)),

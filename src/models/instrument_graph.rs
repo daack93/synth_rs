@@ -15,9 +15,11 @@ use serde::{Deserialize, Serialize};
 use super::drum_membrane::DrumMembrane;
 use super::pure_plate::PurePlate;
 use super::pure_string::PureString;
+use super::webster_horn::WebsterHorn;
 use super::{unbounded_slider, FtmModel, ModeBuffer};
 use crate::graph::{
-    FormantResonator, Graph, ImpulseExciter, ModalResonator, Node, SnareWires, Sum,
+    DriveExciter, FormantResonator, Graph, ImpulseExciter, ModalResonator, Node, SnareWires,
+    Sum,
 };
 
 /// One node in an instrument graph. Each variant is a physics component with
@@ -39,6 +41,10 @@ pub enum Comp {
     /// Snare wires resting on a head: a rattle that buzzes with the head's motion.
     /// `level` = rattle amount, `tone` = band brightness.
     Wires { level: f32, tone: f32 },
+    /// A continuous breath drive (band-passed noise) — sustains a resonator.
+    Breath { level: f32, tone: f32 },
+    /// A flaring air column (Webster horn) resonator.
+    Horn(WebsterHorn),
     /// A mixer / output node: the (edge-scaled) sum of its inputs.
     Mix,
 }
@@ -52,6 +58,8 @@ impl Comp {
             Comp::Plate(_) => "Plate (resonator)",
             Comp::Body { .. } => "Body (resonator)",
             Comp::Wires { .. } => "Snare wires",
+            Comp::Breath { .. } => "Breath (exciter)",
+            Comp::Horn(_) => "Air column (resonator)",
             Comp::Mix => "Mix / output",
         }
     }
@@ -76,6 +84,11 @@ impl Comp {
                 let t = tone.clamp(0.3, 3.0);
                 Box::new(SnareWires::new(*level, 600.0 * t, 8_000.0, sr))
             }
+            Comp::Breath { level, tone } => {
+                let t = tone.clamp(0.3, 3.0);
+                Box::new(DriveExciter::new(*level, 300.0 * t, 3_000.0 * t, sr))
+            }
+            Comp::Horn(m) => Box::new(ModalResonator::from_bank(&bank_of(m), sr)),
             Comp::Mix => Box::new(Sum),
         }
     }
@@ -111,6 +124,13 @@ impl Comp {
                 c |= ui.add(unbounded_slider(tone, 0.3..=3.0, "Rattle tone")).changed();
                 c
             }
+            Comp::Breath { level, tone } => {
+                let mut c = false;
+                c |= ui.add(unbounded_slider(level, 0.0..=1.0, "Breath level")).changed();
+                c |= ui.add(unbounded_slider(tone, 0.3..=3.0, "Breath tone")).changed();
+                c
+            }
+            Comp::Horn(m) => m.params_ui(ui),
             Comp::Mix => {
                 ui.label(egui::RichText::new("Sums its inputs (see edge strengths).").weak().small());
                 false
@@ -139,7 +159,8 @@ impl Comp {
             Comp::Membrane(_) => &["radius"],
             Comp::Plate(_) => &["ring"],
             Comp::Body { .. } => &["ring", "tone"],
-            Comp::Strike | Comp::Mix | Comp::Wires { .. } => &[],
+            Comp::Horn(_) => &["length"],
+            Comp::Strike | Comp::Mix | Comp::Wires { .. } | Comp::Breath { .. } => &[],
         }
     }
 
@@ -152,6 +173,7 @@ impl Comp {
             (Comp::Plate(m), "ring") => Some(m.decay_time),
             (Comp::Body { ring, .. }, "ring") => Some(*ring),
             (Comp::Body { tone, .. }, "tone") => Some(*tone),
+            (Comp::Horn(m), "length") => Some(m.length),
             _ => None,
         }
     }
@@ -165,6 +187,7 @@ impl Comp {
             (Comp::Plate(m), "ring") => m.decay_time = v,
             (Comp::Body { ring, .. }, "ring") => *ring = v,
             (Comp::Body { tone, .. }, "tone") => *tone = v,
+            (Comp::Horn(m), "length") => m.length = v,
             _ => {}
         }
     }
@@ -278,6 +301,7 @@ impl FtmModel for InstrumentGraph {
                 Comp::String(m) => return m.excite(freq_hz, vel, sr, out),
                 Comp::Membrane(m) => return m.excite(freq_hz, vel, sr, out),
                 Comp::Plate(m) => return m.excite(freq_hz, vel, sr, out),
+                Comp::Horn(m) => return m.excite(freq_hz, vel, sr, out),
                 _ => {}
             }
         }
@@ -606,5 +630,32 @@ mod tests {
         let diff: f32 = with_fb.iter().zip(&no_fb).map(|(a, b)| (a - b).abs()).sum::<f32>()
             / with_fb.len() as f32;
         assert!(diff > 1e-5, "the wires→bottom feedback changes the sound (diff={diff:.6})");
+    }
+    #[test]
+    fn breath_driven_voice_sustains() {
+        // A continuous breath drive should make a resonator sustain: its late
+        // energy stays comparable to its early energy (a struck voice would have
+        // decayed away by then).
+        let sr = 48_000.0;
+        let g = InstrumentGraph {
+            components: vec![
+                Comp::Breath { level: 0.1, tone: 1.0 },
+                Comp::String(PureString::default()),
+                Comp::Mix,
+            ],
+            edges: vec![
+                Edge { from: 0, to: 1, gain: 1.0 },
+                Edge { from: 1, to: 2, gain: 1.0 },
+            ],
+            output: 2,
+            key_map: Vec::new(),
+        };
+        let mut n = g.build_graph(220.0, 1.0, sr).unwrap();
+        let y: Vec<f32> = (0..48_000).map(|_| n.tick(&[])).collect();
+        assert!(y.iter().all(|v| v.is_finite()), "stable");
+        let rms = |a: &[f32]| (a.iter().map(|v| v * v).sum::<f32>() / a.len() as f32).sqrt();
+        let early = rms(&y[4_800..9_600]); // 0.1–0.2 s
+        let late = rms(&y[38_400..43_200]); // 0.8–0.9 s
+        assert!(late > early * 0.5, "driven voice sustains (early={early:.4} late={late:.4})");
     }
 }

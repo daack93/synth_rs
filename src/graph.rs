@@ -213,6 +213,53 @@ impl Node for ImpulseExciter {
     }
 }
 
+/// A continuous drive — band-passed noise ("breath") that ramps in at note-on
+/// and keeps sounding while the note is held. Driving a resonator with it makes
+/// the resonator *sustain* (each mode holds a driven steady state) rather than
+/// ring and decay — a blown/bowed tone. Note-off is handled by the voice's
+/// release gate, which fades and frees it. Its own output ignores inputs.
+pub struct DriveExciter {
+    rng: u32,
+    hp_a: f32,
+    lp_a: f32,
+    hp_s: f32,
+    lp_s: f32,
+    level: f32,
+    atk: f32,
+    atk_rate: f32,
+}
+
+impl DriveExciter {
+    pub fn new(level: f32, hp: f32, lp: f32, sr: f32) -> Self {
+        let a = |hz: f32| 1.0 - (-2.0 * PI * hz.max(1.0) / sr).exp();
+        DriveExciter {
+            rng: 0x9e37_79b9,
+            hp_a: a(hp),
+            lp_a: a(lp),
+            hp_s: 0.0,
+            lp_s: 0.0,
+            level,
+            atk: 0.0,
+            atk_rate: 1.0 - (-1.0 / (0.01 * sr)).exp(), // ~10 ms breath onset
+        }
+    }
+}
+
+impl Node for DriveExciter {
+    #[inline]
+    fn tick(&mut self, _inputs: &[f32]) -> f32 {
+        self.atk += (1.0 - self.atk) * self.atk_rate;
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        let white = (self.rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+        self.hp_s += self.hp_a * (white - self.hp_s);
+        let hp = white - self.hp_s;
+        self.lp_s += self.lp_a * (hp - self.lp_s);
+        self.lp_s * self.level * self.atk
+    }
+}
+
 /// A passthrough mixer: outputs the (already edge-scaled) sum of its inputs.
 /// Used as a graph's output node so several components (e.g. a dry primary and a
 /// wet body) can be blended by their edge gains.
