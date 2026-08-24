@@ -1142,11 +1142,13 @@ pub fn factory() -> Vec<Preset> {
                     Edge { from: 1, to: 2, gain: 0.4 }, // bell colour → out
                 ],
                 output: 2,
-                // The ONLY key→pitch path: the key drives the bore length,
-                // f = c/2L so length ∝ (f/C4)^−1.
+                // Overblow-stepped: the key drives the coupled bore's register +
+                // length. Below the break (3× the lowest note, D3) it plays the
+                // fundamental; above, it opens the register hole and overblows a
+                // twelfth — so the bore only spans ~a twelfth of realistic lengths.
                 key_map: vec![KeyBinding {
                     component: 0,
-                    map: KeyMapKind::Power { param: "length".into(), amount: -1.0 },
+                    map: KeyMapKind::Overblow { anchor_hz: 146.83, steps: 0, microtune: false },
                 }],
             },
             eng(0.5, 25.0, 90.0),

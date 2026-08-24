@@ -527,13 +527,32 @@ impl Comp {
     /// Configure this component to overblow-track the key (the `Overblow` key-map
     /// strategy). On a Webster horn it switches on the overblow-tracked render:
     /// the horn picks an overblown bore length per key so a harmonic lands on it.
-    fn set_overblow(&mut self, anchor_hz: f32, steps: u32, microtune: bool) {
-        if let Comp::Horn(m) = self {
-            m.play_mode = PlayMode::OverblowTracked;
-            m.key_tracks_pitch = true;
-            m.overblow_anchor_hz = anchor_hz;
-            m.valve_steps = steps;
-            m.overblow_microtune = microtune;
+    fn set_overblow(&mut self, freq_hz: f32, anchor_hz: f32, steps: u32, microtune: bool) {
+        match self {
+            Comp::Horn(m) => {
+                m.play_mode = PlayMode::OverblowTracked;
+                m.key_tracks_pitch = true;
+                m.overblow_anchor_hz = anchor_hz;
+                m.valve_steps = steps;
+                m.overblow_microtune = microtune;
+            }
+            // A coupled reed bore does the clarinet register break: below the
+            // break (3× the lowest note) it plays the fundamental (chalumeau, hole
+            // closed); at/above it opens the register hole and plays the 3rd
+            // harmonic (clarion) — the *same* bore-length range, up a twelfth. So
+            // the bore only spans ~a twelfth of realistic lengths across the range.
+            Comp::ReedBore { length, register, .. } => {
+                let f = freq_hz.max(1.0);
+                let f_break = 3.0 * anchor_hz.max(1.0);
+                if f < f_break {
+                    *register = 0.0;
+                    *length = C_AIR / (2.0 * f);
+                } else {
+                    *register = 0.3;
+                    *length = C_AIR / (2.0 * (f / 3.0)); // bore fundamental = f/3
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -790,7 +809,7 @@ impl FtmModel for InstrumentGraph {
                             }
                         }
                         KeyMapKind::Overblow { anchor_hz, steps, microtune } => {
-                            c.set_overblow(*anchor_hz, *steps, *microtune);
+                            c.set_overblow(freq_hz, *anchor_hz, *steps, *microtune);
                         }
                     }
                 }
