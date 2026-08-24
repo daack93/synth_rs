@@ -20,7 +20,7 @@ use crate::models::ModeBuffer;
 
 const TAU: f32 = std::f32::consts::TAU;
 const PI: f32 = std::f32::consts::PI;
-const CR_COMP: f32 = 1.5;
+const CR_COMP: f32 = 5.0;
 
 /// A control message broadcast to every node in a voice's graph (not audio —
 /// these arrive at control rate, on a bend move or a key-up).
@@ -846,21 +846,21 @@ impl Node for CoupledReed {
         self.x += self.v;
         let h = (1.0 + self.x).clamp(0.0, 3.0);
 
-        // 3. Resolve the flow ↔ pressure algebraic loop *this sample* (no delay):
-        //    ΔP = Pm − 2·p₊ + Zc·U,  U = h·sign(ΔP)·√|ΔP|.  Newton–Raphson on U,
-        //    warm-started from last sample so it converges in a step or two.
+        // 3. Resolve the flow ↔ pressure algebraic loop *this sample* (no delay).
+        //    Injecting flow *raises* the mouthpiece pressure (P = 2·p₊ + Zc·U), so
+        //    ΔP = Pm − P = Pm − 2·p₊ − Zc·U, with U = h·sign(ΔP)·√|ΔP|. Newton on
+        //    U (warm-started from last sample). d(ΔP)/dU = −Zc, so the residual's
+        //    derivative is 1 + h·Zc·(0.5/√|ΔP|). Getting these signs right removes
+        //    the runaway that previously needed a `tanh` crutch (which distorted).
         let mut u = self.u_prev;
         for _ in 0..4 {
-            let dp = pm - 2.0 * p_plus + self.zc * u;
-            let ad = dp.abs().max(1e-9);
-            let sq = ad.sqrt();
-            let g = dp.signum() * sq; // sign(ΔP)·√|ΔP|
-            let resid = u - h * g;
-            // dU: d/dU[h·g(ΔP)] = h · (0.5/√|ΔP|) · Zc
-            let deriv = 1.0 - h * self.zc * (0.5 / sq);
-            u -= resid / if deriv.abs() < 1e-3 { 1e-3f32.copysign(deriv) } else { deriv };
+            let dp = pm - 2.0 * p_plus - self.zc * u;
+            let sq = dp.abs().max(1e-9).sqrt();
+            let resid = u - h * dp.signum() * sq;
+            let deriv = 1.0 + h * self.zc * (0.5 / sq);
+            u -= resid / deriv;
         }
-        let dp = pm - 2.0 * p_plus + self.zc * u;
+        let dp = pm - 2.0 * p_plus - self.zc * u;
         self.dp_prev = dp;
         self.u_prev = u;
 
@@ -874,8 +874,9 @@ impl Node for CoupledReed {
         self.flow_lp += self.flow_a * (g * (u + h * 0.015 * white) - self.flow_lp);
         let ur = self.flow_lp;
 
-        // 4. Launch the outgoing wave into the bore and advance it.
-        let p_minus = (p_plus - self.zc * ur).tanh();
+        // 4. Launch the outgoing wave into the bore (pure acoustic superposition,
+        //    p₋ = p₊ + Zc·U — no waveshaper; the reed's beating bounds the cycle).
+        let p_minus = p_plus + self.zc * ur;
         self.line[self.pos] = p_minus;
         self.pos = (self.pos + 1) % n;
         bore_out

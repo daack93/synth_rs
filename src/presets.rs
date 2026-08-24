@@ -1137,9 +1137,9 @@ pub fn factory() -> Vec<Preset> {
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 2, gain: 0.7 }, // coupled voice (dry) → out
+                    Edge { from: 0, to: 2, gain: 1.3 }, // coupled voice (dry) → out
                     Edge { from: 0, to: 1, gain: 1.0 }, // voice → bell
-                    Edge { from: 1, to: 2, gain: 0.25 }, // bell colour → out
+                    Edge { from: 1, to: 2, gain: 0.4 }, // bell colour → out
                 ],
                 output: 2,
                 // The ONLY key→pitch path: the key drives the bore length,
