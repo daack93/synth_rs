@@ -22,7 +22,7 @@ use super::webster_horn::WebsterHorn;
 use super::{freq_to_midi, midi_name, unbounded_slider, FtmModel, ModeBuffer};
 use crate::graph::{
     BowExciter, DriveExciter, FormantResonator, Graph, HammerExciter, ImpulseExciter,
-    ModalResonator, Node, ReedExciter, SineExciter, SnareWires, Sum, VoiceExciter, WaveguideBore, WaveguideBow, WaveguideReed,
+    ModalResonator, Node, ReedExciter, SineExciter, SnareWires, Sum, VoiceExciter, WaveguideBore, WaveguideBow, WaveguideHorn, WaveguideReed,
 };
 
 const PI: f32 = std::f32::consts::PI;
@@ -90,6 +90,12 @@ pub enum Comp {
     /// A waveguide air column (delay line + bell reflection): a wind bore that a
     /// reed/lip exciter drives (via a feedback edge) into self-oscillation.
     Bore { tone: f32 },
+    /// A **traveling-wave flaring horn** — the geometry (`r(x) = r1 + r2·x +
+    /// r3·x²`) built as segmented Kelly–Lochbaum waveguide, so a reed drives it
+    /// into oscillation and its pitch tracks the bore `length` (a cylinder →
+    /// odd harmonics/clarinet, a cone → all harmonics/sax). `segments` is the
+    /// flare resolution. Needs a feedback edge from a reed, like `Bore`.
+    WaveguideHorn { r1: f32, r2: f32, r3: f32, length: f32, segments: usize, tone: f32 },
     /// A pure sinusoid generator at the played pitch. `level` sets its amplitude.
     /// Doubles as the audition probe the graph editor feeds a component under
     /// test (a generator ignores it; a resonator resonates its pure tone).
@@ -119,6 +125,7 @@ impl Comp {
             Comp::Voice { .. } => "Voice / glottis (exciter)",
             Comp::Horn(_) => "Air column (resonator)",
             Comp::Bore { .. } => "Air column (waveguide)",
+            Comp::WaveguideHorn { .. } => "Waveguide horn (bore)",
             Comp::Sine { .. } => "Sine (tone exciter)",
             Comp::Mix => "Mix / output",
         }
@@ -198,6 +205,9 @@ impl Comp {
             }
             Comp::Horn(m) => reso(&bank_of(m)),
             Comp::Bore { tone } => Box::new(WaveguideBore::new(freq_hz, *tone, sr)),
+            Comp::WaveguideHorn { r1, r2, r3, length, segments, tone } => {
+                Box::new(WaveguideHorn::new(*r1, *r2, *r3, *length, *segments, *tone, sr))
+            }
             Comp::Reed { pressure, stiffness, freq_hz } => {
                 Box::new(ReedExciter::new(*pressure, *stiffness, *freq_hz, sr))
             }
@@ -281,6 +291,22 @@ impl Comp {
             Comp::Horn(m) => m.params_ui(ui),
             Comp::Bore { tone } => {
                 ui.add(unbounded_slider(tone, 0.0..=1.5, "Bell brightness")).changed()
+            }
+            Comp::WaveguideHorn { r1, r2, r3, length, segments, tone } => {
+                let mut c = false;
+                c |= ui.add(unbounded_slider(length, 0.05..=2.0, "Bore length (m)"))
+                    .on_hover_text("Sets the pitch (usually key-mapped): cylinder f≈c/4L, cone f≈c/2L.")
+                    .changed();
+                c |= ui.add(unbounded_slider(r1, 0.002..=0.03, "Throat radius (m)")).changed();
+                c |= ui.add(unbounded_slider(r2, 0.0..=0.1, "Taper (cone → all harmonics)")).changed();
+                c |= ui.add(unbounded_slider(r3, 0.0..=0.05, "Flare (bell)")).changed();
+                c |= ui.add(unbounded_slider(tone, 0.0..=1.5, "Bell brightness")).changed();
+                let mut seg = *segments as f32;
+                if ui.add(unbounded_slider(&mut seg, 2.0..=32.0, "Segments (flare detail)")).changed() {
+                    *segments = seg.round().clamp(2.0, 64.0) as usize;
+                    c = true;
+                }
+                c
             }
             Comp::Reed { pressure, stiffness, freq_hz } => {
                 let mut c = false;
@@ -398,6 +424,8 @@ impl Comp {
             Comp::Plate(_) => &["ring"],
             Comp::Body { .. } => &["top_hz", "decay"],
             Comp::Horn(_) => &["length"],
+            // The traveling-wave bore whose length the key drives to set pitch.
+            Comp::WaveguideHorn { .. } => &["length"],
             // The reed's fixed pitch — so a key can drive embouchure/pitch on a
             // self-contained mouthpiece (`freq_hz > 0`).
             Comp::Reed { .. } => &["freq"],
@@ -421,6 +449,7 @@ impl Comp {
             (Comp::Body { top_hz, .. }, "top_hz") => Some(*top_hz),
             (Comp::Body { decay_s, .. }, "decay") => Some(*decay_s),
             (Comp::Horn(m), "length") => Some(m.length),
+            (Comp::WaveguideHorn { length, .. }, "length") => Some(*length),
             (Comp::Reed { freq_hz, .. }, "freq") => Some(*freq_hz),
             _ => None,
         }
@@ -439,6 +468,7 @@ impl Comp {
             (Comp::Body { top_hz, .. }, "top_hz") => *top_hz = v,
             (Comp::Body { decay_s, .. }, "decay") => *decay_s = v,
             (Comp::Horn(m), "length") => m.length = v,
+            (Comp::WaveguideHorn { length, .. }, "length") => *length = v,
             (Comp::Reed { freq_hz, .. }, "freq") => *freq_hz = v,
             _ => {}
         }

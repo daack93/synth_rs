@@ -748,6 +748,124 @@ impl Node for WaveguideBore {
     }
 }
 
+/// A short fractional delay line (linear interpolation) — one waveguide segment.
+struct FracDelay {
+    buf: Vec<f32>,
+    pos: usize,
+    delay: f32,
+}
+
+impl FracDelay {
+    fn new(delay: f32) -> Self {
+        let d = delay.max(1.0);
+        FracDelay { buf: vec![0.0; d.ceil() as usize + 2], pos: 0, delay: d }
+    }
+    #[inline]
+    fn read(&self) -> f32 {
+        let n = self.buf.len();
+        let rp = self.pos as f32 + n as f32 - self.delay;
+        let i0 = rp.floor() as usize % n;
+        let i1 = (i0 + 1) % n;
+        let frac = rp - rp.floor();
+        self.buf[i0] * (1.0 - frac) + self.buf[i1] * frac
+    }
+    #[inline]
+    fn write(&mut self, x: f32) {
+        self.buf[self.pos] = x;
+        self.pos = (self.pos + 1) % self.buf.len();
+    }
+}
+
+/// A **digital-waveguide flaring horn** — a *traveling-wave* model of a bore with
+/// varying cross-section `A(x) = π·r(x)²`, `r(x) = r1 + r2·x + r3·x²`. Unlike the
+/// modal [`crate::models::webster_horn::WebsterHorn`] (a fixed bank of sinusoids,
+/// which a reed can't drive into oscillation), the wave here actually propagates
+/// and reflects, so a reed self-oscillates on it and its **pitch tracks the bore
+/// length**. The bore is `n` short cylindrical segments joined by Kelly–Lochbaum
+/// scattering junctions — each area change reflects part of the wave (the flare)
+/// — with a radiating low-pass reflection at the bell. A cylindrical profile
+/// (r2 = r3 = 0) gives odd harmonics (a clarinet, closed–open); a conical/flaring
+/// profile fills the harmonic series back in (a saxophone). The reed drives the
+/// throat over a feedback edge; the throat-returning wave is the output.
+pub struct WaveguideHorn {
+    fwd: Vec<FracDelay>, // forward waves, throat → bell (one per segment)
+    bwd: Vec<FracDelay>, // backward waves, bell → throat
+    k: Vec<f32>,         // n−1 junction reflection coefficients (the flare)
+    f_in: Vec<f32>,      // scratch: forward wave entering each segment this sample
+    b_in: Vec<f32>,      // scratch: backward wave entering each segment
+    bell_lp: f32,        // bell radiation low-pass state
+    bell_a: f32,
+    bell_refl: f32,
+}
+
+impl WaveguideHorn {
+    /// Build the segmented bore from its geometry. `segments` is the flare
+    /// resolution (a handful is plenty); `length` sets the pitch (key-mapped).
+    pub fn new(r1: f32, r2: f32, r3: f32, length: f32, segments: usize, tone: f32, sr: f32) -> Self {
+        let l = length.max(0.02);
+        let c = 343.0_f32;
+        // One-way propagation time across the whole bore, less a small
+        // compensation for the junction + bell-filter phase.
+        let total = (l / c * sr - 2.0).max(6.0);
+        // Keep each segment at least ~3 samples long (a fractional delay needs a
+        // few samples to interpolate), so a short/high bore uses fewer segments.
+        let n = segments.clamp(2, 64).min((total / 3.0) as usize).max(2);
+        let d = total / n as f32;
+        let area = |i: usize| -> f32 {
+            let x = (i as f32 + 0.5) / n as f32 * l;
+            let r = (r1 + r2 * x + r3 * x * x).max(1e-4);
+            PI * r * r
+        };
+        // Junction reflection: k = (A_next − A_here)/(A_next + A_here). A flare
+        // (area increasing toward the bell) gives k > 0.
+        let k = (1..n)
+            .map(|j| {
+                let (a0, a1) = (area(j - 1), area(j));
+                ((a1 - a0) / (a1 + a0)).clamp(-0.99, 0.99)
+            })
+            .collect();
+        WaveguideHorn {
+            fwd: (0..n).map(|_| FracDelay::new(d)).collect(),
+            bwd: (0..n).map(|_| FracDelay::new(d)).collect(),
+            k,
+            f_in: vec![0.0; n],
+            b_in: vec![0.0; n],
+            bell_lp: 0.0,
+            bell_a: (0.15 + 0.55 * tone.clamp(0.0, 1.5) / 1.5).clamp(0.05, 0.9),
+            bell_refl: -0.97,
+        }
+    }
+}
+
+impl Node for WaveguideHorn {
+    fn tick(&mut self, inputs: &[f32]) -> f32 {
+        let drive: f32 = inputs.iter().sum(); // reed's wave launched into the throat
+        let n = self.fwd.len();
+        // Throat: the reed's wave enters segment 0; the wave arriving back at the
+        // throat is the output (it feeds the reed and the mix).
+        let throat_return = self.bwd[0].read();
+        self.f_in[0] = drive;
+        // Internal Kelly–Lochbaum junctions (memoryless; the delays are the tube).
+        for j in 1..n {
+            let f_arr = self.fwd[j - 1].read(); // forward wave reaching junction j
+            let b_arr = self.bwd[j].read(); // backward wave reaching junction j
+            let w = self.k[j - 1] * (b_arr - f_arr);
+            self.f_in[j] = f_arr + w; // continues into segment j
+            self.b_in[j - 1] = b_arr + w; // reflects into segment j−1
+        }
+        // Bell: the open end radiates and reflects (inverting low-pass).
+        let f_bell = self.fwd[n - 1].read();
+        self.bell_lp += self.bell_a * (f_bell - self.bell_lp);
+        self.b_in[n - 1] = self.bell_refl * self.bell_lp;
+        // Advance every segment.
+        for i in 0..n {
+            self.fwd[i].write(self.f_in[i]);
+            self.bwd[i].write(self.b_in[i]);
+        }
+        throat_return
+    }
+}
+
 /// A digital-waveguide reed instrument (clarinet / sax / lip-brass) — the
 /// McIntyre–Schumacher–Woodhouse / STK model. The bore is a **delay line**; the
 /// bell is a one-pole low-pass with an inverting reflection; the mouthpiece is a
@@ -1397,5 +1515,30 @@ mod new_exciter_tests {
         let rms = (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt();
         assert!(rms > 0.1, "self-contained reed buzzes on its own (rms {rms})");
         assert!((acf_freq(tail, sr, 196.0) / 196.0 - 1.0).abs() < 0.07, "buzzes at its fixed pitch");
+    }
+
+    #[test]
+    fn reed_drives_waveguide_horn_into_a_bounded_oscillation() {
+        // The reed drives the segmented waveguide horn into a bounded, sounding
+        // oscillation across a range of bore lengths. (The reed↔horn loop is
+        // multistable — it can overblow to a higher register — so pitch is not
+        // asserted here; taming the register break is separate tuning work.)
+        let sr = 48_000.0;
+        for &length in &[0.9f32, 0.6, 0.4, 0.25] {
+            let mut reed = ReedExciter::new(0.9, 1.0, 0.0, sr);
+            let mut horn = WaveguideHorn::new(0.0073, 0.0, 0.002, length, 18, 1.0, sr);
+            let mut fb = 0.0f32;
+            let y: Vec<f32> = (0..30_000)
+                .map(|_| {
+                    let r = reed.tick(&[fb * 0.8]);
+                    fb = horn.tick(&[r * 0.8]);
+                    fb
+                })
+                .collect();
+            assert!(y.iter().all(|v| v.is_finite() && v.abs() < 50.0), "horn stable at L={length}");
+            let tail = &y[20_000..];
+            let rms = (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt();
+            assert!(rms > 1e-3, "reed sustains the horn at L={length} (rms {rms})");
+        }
     }
 }
