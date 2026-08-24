@@ -1132,16 +1132,13 @@ pub fn factory() -> Vec<Preset> {
             "Base: Clarinet",
             InstrumentGraph {
                 components: vec![
-                    Comp::Reed { pressure: 0.6, stiffness: 1.5 },
-                    Comp::Horn(WebsterHorn { length: 0.58, wave_speed: 343.0, r1: 0.0075, r2: 0.0, r3: 0.001, blow_pos: 0.0, depth: 18, resolution: 240, damping: 4.0, freq_dep_damping: -0.08, visco_loss: 0.8, radiation: 0.6, boundary: Boundary::Brass, ..WebsterHorn::default() }),
+                    Comp::ReedPipe { pressure: 0.9, stiffness: 1.0, tone: 1.0 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.3 },
-                    Edge { from: 1, to: 0, gain: 0.55 },
-                    Edge { from: 1, to: 2, gain: 1.0 },
+                    Edge { from: 0, to: 1, gain: 1.0 },
                 ],
-                output: 2,
+                output: 1,
                 key_map: Vec::new(),
             },
             eng(0.5, 25.0, 90.0),
@@ -1150,16 +1147,13 @@ pub fn factory() -> Vec<Preset> {
             "Base: Alto Sax",
             InstrumentGraph {
                 components: vec![
-                    Comp::Reed { pressure: 0.7, stiffness: 1.3 },
-                    Comp::Horn(WebsterHorn { length: 1.0, wave_speed: 343.0, r1: 0.006, r2: 0.03, r3: 0.005, blow_pos: 0.0, depth: 24, resolution: 300, damping: 5.0, freq_dep_damping: -0.08, visco_loss: 1.0, radiation: 1.2, boundary: Boundary::Brass, ..WebsterHorn::default() }),
+                    Comp::ReedPipe { pressure: 1.0, stiffness: 0.8, tone: 1.3 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.3 },
-                    Edge { from: 1, to: 0, gain: 0.55 },
-                    Edge { from: 1, to: 2, gain: 1.0 },
+                    Edge { from: 0, to: 1, gain: 1.0 },
                 ],
-                output: 2,
+                output: 1,
                 key_map: Vec::new(),
             },
             eng(0.55, 25.0, 90.0),
@@ -1168,16 +1162,13 @@ pub fn factory() -> Vec<Preset> {
             "Base: Bassoon",
             InstrumentGraph {
                 components: vec![
-                    Comp::Reed { pressure: 0.65, stiffness: 1.2 },
-                    Comp::Horn(WebsterHorn { length: 2.5, wave_speed: 343.0, r1: 0.004, r2: 0.008, r3: 0.001, blow_pos: 0.0, depth: 28, resolution: 300, damping: 6.0, freq_dep_damping: -0.1, visco_loss: 2.0, radiation: 0.5, boundary: Boundary::Brass, ..WebsterHorn::default() }),
+                    Comp::ReedPipe { pressure: 0.85, stiffness: 1.2, tone: 0.5 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.3 },
-                    Edge { from: 1, to: 0, gain: 0.55 },
-                    Edge { from: 1, to: 2, gain: 1.0 },
+                    Edge { from: 0, to: 1, gain: 1.0 },
                 ],
-                output: 2,
+                output: 1,
                 key_map: Vec::new(),
             },
             eng(0.5, 25.0, 110.0),
@@ -1186,16 +1177,13 @@ pub fn factory() -> Vec<Preset> {
             "Base: Trumpet",
             InstrumentGraph {
                 components: vec![
-                    Comp::Reed { pressure: 0.8, stiffness: 1.1 },
-                    Comp::Horn(WebsterHorn { length: 1.48, wave_speed: 343.0, r1: 0.006, r2: 0.015, r3: 0.04, blow_pos: 0.0, depth: 28, resolution: 300, damping: 6.0, freq_dep_damping: -0.08, visco_loss: 1.2, radiation: 1.4, boundary: Boundary::Brass, ..WebsterHorn::default() }),
+                    Comp::ReedPipe { pressure: 1.0, stiffness: 0.7, tone: 1.4 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.5 },
-                    Edge { from: 1, to: 0, gain: 0.55 },
-                    Edge { from: 1, to: 2, gain: 1.0 },
+                    Edge { from: 0, to: 1, gain: 1.0 },
                 ],
-                output: 2,
+                output: 1,
                 key_map: Vec::new(),
             },
             eng(0.55, 25.0, 90.0),
@@ -1204,16 +1192,13 @@ pub fn factory() -> Vec<Preset> {
             "Base: Trombone",
             InstrumentGraph {
                 components: vec![
-                    Comp::Reed { pressure: 0.8, stiffness: 1.0 },
-                    Comp::Horn(WebsterHorn { length: 2.7, wave_speed: 343.0, r1: 0.007, r2: 0.012, r3: 0.025, blow_pos: 0.0, depth: 30, resolution: 300, damping: 6.0, freq_dep_damping: -0.08, visco_loss: 1.6, radiation: 1.4, boundary: Boundary::Brass, ..WebsterHorn::default() }),
+                    Comp::ReedPipe { pressure: 1.0, stiffness: 0.8, tone: 1.2 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.5 },
-                    Edge { from: 1, to: 0, gain: 0.55 },
-                    Edge { from: 1, to: 2, gain: 1.0 },
+                    Edge { from: 0, to: 1, gain: 1.0 },
                 ],
-                output: 2,
+                output: 1,
                 key_map: Vec::new(),
             },
             eng(0.55, 25.0, 90.0),
@@ -1222,16 +1207,13 @@ pub fn factory() -> Vec<Preset> {
             "Base: French Horn",
             InstrumentGraph {
                 components: vec![
-                    Comp::Reed { pressure: 0.85, stiffness: 1.1 },
-                    Comp::Horn(WebsterHorn { length: 3.7, wave_speed: 343.0, r1: 0.004, r2: 0.008, r3: 0.05, blow_pos: 0.0, depth: 32, resolution: 300, damping: 7.0, freq_dep_damping: -0.1, visco_loss: 2.2, radiation: 0.6, boundary: Boundary::Brass, ..WebsterHorn::default() }),
+                    Comp::ReedPipe { pressure: 0.9, stiffness: 1.0, tone: 0.7 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.5 },
-                    Edge { from: 1, to: 0, gain: 0.55 },
-                    Edge { from: 1, to: 2, gain: 1.0 },
+                    Edge { from: 0, to: 1, gain: 1.0 },
                 ],
-                output: 2,
+                output: 1,
                 key_map: Vec::new(),
             },
             eng(0.5, 30.0, 150.0),
@@ -1813,6 +1795,7 @@ mod tests {
         assert!(!file_stem("a/b\\c").contains(['/', '\\']));
     }
 }
+
 
 
 

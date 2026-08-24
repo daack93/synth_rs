@@ -22,7 +22,7 @@ use super::webster_horn::WebsterHorn;
 use super::{freq_to_midi, midi_name, unbounded_slider, FtmModel, ModeBuffer};
 use crate::graph::{
     BowExciter, DriveExciter, FormantResonator, Graph, HammerExciter, ImpulseExciter,
-    ModalResonator, Node, ReedExciter, SnareWires, Sum, VoiceExciter,
+    ModalResonator, Node, ReedExciter, SnareWires, Sum, VoiceExciter, WaveguideReed,
 };
 
 const PI: f32 = std::f32::consts::PI;
@@ -63,6 +63,10 @@ pub enum Comp {
     Breath { level: f32, tone: f32 },
     /// A self-oscillating reed/lip (needs a feedback edge from its resonator).
     Reed { pressure: f32, stiffness: f32 },
+    /// A digital-waveguide reed pipe — a self-contained wind voice (bore delay +
+    /// bell + reed) that self-oscillates into a clean reed tone. `pressure` =
+    /// breath, `stiffness` = reed hardness, `tone` = bell brightness.
+    ReedPipe { pressure: f32, stiffness: f32, tone: f32 },
     /// A piano/dulcimer hammer: a nonlinear felt mass (needs a feedback edge from
     /// the string). `hardness` 0..1 sets the felt stiffness (dark→bright, long→
     /// short contact), `felt` is the compression nonlinearity.
@@ -93,6 +97,7 @@ impl Comp {
             Comp::Wires { .. } => "Snare wires",
             Comp::Breath { .. } => "Breath (exciter)",
             Comp::Reed { .. } => "Reed / lip (exciter)",
+            Comp::ReedPipe { .. } => "Reed pipe (waveguide)",
             Comp::Hammer { .. } => "Hammer (exciter)",
             Comp::Bow { .. } => "Bow (exciter)",
             Comp::Voice { .. } => "Voice / glottis (exciter)",
@@ -114,6 +119,7 @@ impl Comp {
                 | Comp::Reed { .. }
                 | Comp::Bow { .. }
                 | Comp::Voice { .. }
+                | Comp::ReedPipe { .. }
         )
     }
 
@@ -172,6 +178,9 @@ impl Comp {
             }
             Comp::Horn(m) => reso(&bank_of(m)),
             Comp::Reed { pressure, stiffness } => Box::new(ReedExciter::new(*pressure, *stiffness, sr)),
+            Comp::ReedPipe { pressure, stiffness, tone } => {
+                Box::new(WaveguideReed::new(freq_hz, *pressure, *stiffness, *tone, sr))
+            }
             Comp::Hammer { hardness, felt } => {
                 Box::new(HammerExciter::new(vel, *hardness, *felt, sr))
             }
@@ -247,6 +256,13 @@ impl Comp {
                 let mut c = false;
                 c |= ui.add(unbounded_slider(pressure, 0.0..=2.0, "Mouth pressure")).changed();
                 c |= ui.add(unbounded_slider(stiffness, 0.0..=3.0, "Reed stiffness")).changed();
+                c
+            }
+            Comp::ReedPipe { pressure, stiffness, tone } => {
+                let mut c = false;
+                c |= ui.add(unbounded_slider(pressure, 0.1..=1.5, "Breath pressure")).changed();
+                c |= ui.add(unbounded_slider(stiffness, 0.2..=3.0, "Reed stiffness")).changed();
+                c |= ui.add(unbounded_slider(tone, 0.0..=1.5, "Bell brightness")).changed();
                 c
             }
             Comp::Hammer { hardness, felt } => {
@@ -338,7 +354,7 @@ impl Comp {
             Comp::Horn(_) => &["length"],
             Comp::MusicalString(_) | Comp::Bell(_) | Comp::Cymbal(_) | Comp::Strike | Comp::Mix
             | Comp::Wires { .. } | Comp::Breath { .. } | Comp::Reed { .. } | Comp::Hammer { .. }
-            | Comp::Bow { .. } | Comp::Voice { .. } => &[],
+            | Comp::Bow { .. } | Comp::Voice { .. } | Comp::ReedPipe { .. } => &[],
         }
     }
 
@@ -492,6 +508,11 @@ impl FtmModel for InstrumentGraph {
                 _ => {}
             }
         }
+        // Waveguide/self-contained voices (e.g. ReedPipe) have no mode bank; give
+        // the classic-path validation a single representative partial at the note.
+        if out.n == 0 {
+            out.push(freq_hz.max(1.0), 1.0, 4.0);
+        }
     }
     fn build_graph(&self, freq_hz: f32, vel: f32, sr: f32) -> Option<Box<dyn Node>> {
         if self.components.is_empty() || self.output >= self.components.len() {
@@ -617,6 +638,10 @@ impl FtmModel for InstrumentGraph {
             }
             if ui.small_button("Reed / lip").clicked() {
                 self.components.push(Comp::Reed { pressure: 0.6, stiffness: 1.5 });
+                changed = true;
+            }
+            if ui.small_button("Reed pipe").clicked() {
+                self.components.push(Comp::ReedPipe { pressure: 0.9, stiffness: 1.0, tone: 1.0 });
                 changed = true;
             }
             if ui.small_button("Hammer").clicked() {
