@@ -541,15 +541,26 @@ impl Comp {
             // closed); at/above it opens the register hole and plays the 3rd
             // harmonic (clarion) — the *same* bore-length range, up a twelfth. So
             // the bore only spans ~a twelfth of realistic lengths across the range.
-            Comp::ReedBore { length, register, .. } => {
+            Comp::ReedBore { length, register, pressure, .. } => {
                 let f = freq_hz.max(1.0);
                 let f_break = 3.0 * anchor_hz.max(1.0);
-                if f < f_break {
+                // Position within the register (ratio above its lowest note) and
+                // the per-register micro-tune gain — the bore flattens as you play
+                // up, more so in the overblown clarion than the chalumeau.
+                let (rel, gain) = if f < f_break {
                     *register = 0.0;
                     *length = C_AIR / (2.0 * f);
+                    (f / anchor_hz.max(1.0), 0.05)
                 } else {
                     *register = 0.3;
                     *length = C_AIR / (2.0 * (f / 3.0)); // bore fundamental = f/3
+                    (f / f_break, 0.10)
+                };
+                // Pressure micro-tune, the way a player lips each note in tune:
+                // blow a little harder as the note rises in its register to cancel
+                // the bore's residual flatness (harder = sharper).
+                if microtune {
+                    *pressure *= 1.0 + gain * (rel - 1.0);
                 }
             }
             _ => {}

@@ -1148,7 +1148,7 @@ pub fn factory() -> Vec<Preset> {
                 // twelfth — so the bore only spans ~a twelfth of realistic lengths.
                 key_map: vec![KeyBinding {
                     component: 0,
-                    map: KeyMapKind::Overblow { anchor_hz: 146.83, steps: 0, microtune: false },
+                    map: KeyMapKind::Overblow { anchor_hz: 146.83, steps: 0, microtune: true },
                 }],
             },
             eng(0.5, 25.0, 90.0),
