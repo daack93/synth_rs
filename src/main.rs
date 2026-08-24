@@ -6,6 +6,7 @@
 mod arrangement_ui;
 mod audio;
 mod graph;
+mod graph_editor;
 mod export;
 mod instrument;
 mod kit;
@@ -189,6 +190,9 @@ struct App {
     /// Shared "last note played" for MIDI-learn on pitch fields.
     note_monitor: midi::NoteMonitor,
     midi_status: String,
+
+    /// Visual graph-editor state (node positions, selection, audition).
+    ge: graph_editor::GeState,
 }
 
 impl App {
@@ -263,6 +267,7 @@ impl App {
             _midi: None,
             note_monitor: midi::NoteMonitor::default(),
             midi_status: "not connected".to_string(),
+            ge: graph_editor::GeState::default(),
         }
     }
 
@@ -591,6 +596,7 @@ impl eframe::App for App {
         });
 
         self.clear_confirm_modal(ctx);
+        self.graph_editor_window(ctx);
     }
 }
 
@@ -937,6 +943,12 @@ impl App {
         }
 
         ui.separator();
+        if self.models[self.selected].id() == "instrument_graph" {
+            if ui.button("🕸 Edit graph (visual)").clicked() {
+                self.ge.open = true;
+            }
+            ui.add_space(4.0);
+        }
         egui::ScrollArea::vertical()
             .max_height(320.0)
             .show(ui, |ui| {
