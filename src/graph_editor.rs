@@ -3,18 +3,25 @@
 //! Components are draggable boxes; you wire an output port to an input port to
 //! connect them. Selecting a component (or edge) shows its parameters, and —
 //! crucially for diagnosis — **arms it for audition**: while it is selected,
-//! playing a key on the live keyboard renders *just that component's output*
-//! (the whole graph still runs so its upstream drive is real, and note-mapped
-//! controls apply), so each part of an instrument can be heard in isolation as
-//! it is built.
+//! playing a key renders *just that component, in isolation*, driven by a pure
+//! sinusoid at the played pitch. A signal generator ignores the probe and emits
+//! its own sound; a resonator resonates the pure tone — so you hear how each
+//! part responds to a clean input, with its note-mapping applied.
 //!
-//! The audition is free: the graph already outputs `self.output`, and the model
-//! is shipped to the audio thread on every edit, so we simply send a clone whose
-//! `output` is repointed at the selected node.
+//! Audition costs nothing on the audio thread: the model is reshipped on every
+//! edit anyway, so we just send a three-node stand-in graph — `Sine → component
+//! → Mix` (see [`isolate`]) — in place of the real one while a node is selected.
 
 use eframe::egui;
 
-use crate::models::instrument_graph::{Comp, Edge, InstrumentGraph};
+use crate::models::instrument_graph::{Comp, Edge, InstrumentGraph, KeyTarget};
+use crate::models::cymbal::Cymbal;
+use crate::models::drum_membrane::DrumMembrane;
+use crate::models::metal_bell::MetalBell;
+use crate::models::musical_string::MusicalString;
+use crate::models::pure_plate::PurePlate;
+use crate::models::pure_string::PureString;
+use crate::models::webster_horn::WebsterHorn;
 use crate::models::FtmModel;
 
 const NODE_W: f32 = 152.0;
@@ -122,15 +129,30 @@ impl crate::App {
         if changed || desired != self.ge.audition {
             self.ge.audition = desired;
             let model: Box<dyn FtmModel> = match desired {
-                Some(i) if i < ig.components.len() => {
-                    let mut c = ig.clone();
-                    c.output = i;
-                    Box::new(c)
-                }
+                Some(i) if i < ig.components.len() => Box::new(isolate(&ig, i)),
                 _ => self.models[self.selected].box_clone(),
             };
             let _ = self.tx.send(crate::studio::Command::SetModel(model));
         }
+    }
+}
+
+/// Build the isolation graph that auditions component `i` alone: a pure sine at
+/// the played pitch drives just that component into a mixer. The component keeps
+/// its own key-mapping (remapped onto its new index). An exciter ignores the
+/// sine and emits its own sound; a resonator resonates the pure tone.
+fn isolate(ig: &InstrumentGraph, i: usize) -> InstrumentGraph {
+    let key_map = ig
+        .key_map
+        .iter()
+        .filter(|k| k.component == i)
+        .map(|k| KeyTarget { component: 1, param: k.param.clone(), amount: k.amount })
+        .collect();
+    InstrumentGraph {
+        components: vec![Comp::Sine { level: 1.0 }, ig.components[i].clone(), Comp::Mix],
+        edges: vec![Edge { from: 0, to: 1, gain: 1.0 }, Edge { from: 1, to: 2, gain: 1.0 }],
+        output: 2,
+        key_map,
     }
 }
 
@@ -150,13 +172,18 @@ fn draw_editor(ui: &mut egui::Ui, ig: &mut InstrumentGraph, ge: &mut GeState) ->
     // Add-component menu.
     ui.horizontal_wrapped(|ui| {
         ui.label("Add:");
-        for (label, mk) in add_menu() {
-            if ui.small_button(label).clicked() {
-                ig.components.push(mk());
-                ge.layout.push([20.0, 20.0]);
-                ge.sel = Some(GeSel::Node(ig.components.len() - 1));
-                changed = true;
-            }
+        for (category, items) in add_menu() {
+            ui.menu_button(format!("{category} ▾"), |ui| {
+                for (label, mk) in items {
+                    if ui.button(label).clicked() {
+                        ig.components.push(mk());
+                        ge.layout.push([20.0, 20.0]);
+                        ge.sel = Some(GeSel::Node(ig.components.len() - 1));
+                        changed = true;
+                        ui.close_menu();
+                    }
+                }
+            });
         }
     });
     ui.separator();
@@ -416,15 +443,45 @@ fn selection_panel(ui: &mut egui::Ui, ig: &mut InstrumentGraph, ge: &mut GeState
     changed
 }
 
-/// Which components the Add menu offers, and how to make one at a sane default.
-fn add_menu() -> Vec<(&'static str, fn() -> Comp)> {
+/// Which components the Add menu offers, grouped into categories, each with a
+/// constructor that makes one at a sane default.
+fn add_menu() -> Vec<(&'static str, Vec<(&'static str, fn() -> Comp)>)> {
     vec![
-        ("Strike", || Comp::Strike),
-        ("Reed", || Comp::Reed { pressure: 0.9, stiffness: 1.0 }),
-        ("Breath", || Comp::Breath { level: 0.15, tone: 1.0 }),
-        ("Bore", || Comp::Bore { tone: 1.0 }),
-        ("Body", || Comp::Body { cavity_litres: 15.0, soundhole_cm: 9.0, top_hz: 195.0, decay_s: 0.18 }),
-        ("Mix", || Comp::Mix),
+        (
+            "Exciter",
+            vec![
+                ("Strike", || Comp::Strike),
+                ("Hammer", || Comp::Hammer { hardness: 0.6, felt: 2.5 }),
+                ("Reed / lip", || Comp::Reed { pressure: 0.9, stiffness: 1.0 }),
+                ("Breath", || Comp::Breath { level: 0.15, tone: 1.0 }),
+                ("Bow", || Comp::Bow { speed: 1.2, force: 0.6 }),
+                ("Voice", || Comp::Voice { open_quotient: 0.6, level: 0.5 }),
+                ("Sine (tone)", || Comp::Sine { level: 1.0 }),
+            ],
+        ),
+        (
+            "Resonator",
+            vec![
+                ("String", || Comp::String(PureString::default())),
+                ("Musical string", || Comp::MusicalString(MusicalString::default())),
+                ("Membrane", || Comp::Membrane(DrumMembrane::default())),
+                ("Plate", || Comp::Plate(PurePlate::default())),
+                ("Bell / cowbell", || Comp::Bell(MetalBell::default())),
+                ("Cymbal / gong", || Comp::Cymbal(Cymbal::default())),
+                ("Air column (horn)", || Comp::Horn(WebsterHorn::default())),
+                ("Body / cavity", || Comp::Body { cavity_litres: 15.0, soundhole_cm: 9.0, top_hz: 195.0, decay_s: 0.18 }),
+                ("Snare wires", || Comp::Wires { level: 0.6, tone: 1.0 }),
+            ],
+        ),
+        (
+            "Waveguide",
+            vec![
+                ("Reed pipe", || Comp::ReedPipe { pressure: 0.9, stiffness: 1.0, tone: 1.0 }),
+                ("Bowed string", || Comp::BowedString { speed: 1.2, force: 0.6 }),
+                ("Air column (bore)", || Comp::Bore { tone: 1.0 }),
+            ],
+        ),
+        ("Output", vec![("Mix", || Comp::Mix)]),
     ]
 }
 

@@ -22,7 +22,7 @@ use super::webster_horn::WebsterHorn;
 use super::{freq_to_midi, midi_name, unbounded_slider, FtmModel, ModeBuffer};
 use crate::graph::{
     BowExciter, DriveExciter, FormantResonator, Graph, HammerExciter, ImpulseExciter,
-    ModalResonator, Node, ReedExciter, SnareWires, Sum, VoiceExciter, WaveguideBore, WaveguideBow, WaveguideReed,
+    ModalResonator, Node, ReedExciter, SineExciter, SnareWires, Sum, VoiceExciter, WaveguideBore, WaveguideBow, WaveguideReed,
 };
 
 const PI: f32 = std::f32::consts::PI;
@@ -86,6 +86,10 @@ pub enum Comp {
     /// A waveguide air column (delay line + bell reflection): a wind bore that a
     /// reed/lip exciter drives (via a feedback edge) into self-oscillation.
     Bore { tone: f32 },
+    /// A pure sinusoid generator at the played pitch. `level` sets its amplitude.
+    /// Doubles as the audition probe the graph editor feeds a component under
+    /// test (a generator ignores it; a resonator resonates its pure tone).
+    Sine { level: f32 },
     /// A mixer / output node: the (edge-scaled) sum of its inputs.
     Mix,
 }
@@ -111,6 +115,7 @@ impl Comp {
             Comp::Voice { .. } => "Voice / glottis (exciter)",
             Comp::Horn(_) => "Air column (resonator)",
             Comp::Bore { .. } => "Air column (waveguide)",
+            Comp::Sine { .. } => "Sine (tone exciter)",
             Comp::Mix => "Mix / output",
         }
     }
@@ -130,6 +135,7 @@ impl Comp {
                 | Comp::Voice { .. }
                 | Comp::ReedPipe { .. }
                 | Comp::BowedString { .. }
+                | Comp::Sine { .. }
         )
     }
 
@@ -202,6 +208,7 @@ impl Comp {
             Comp::Voice { open_quotient, level } => {
                 Box::new(VoiceExciter::new(freq_hz, *open_quotient, *level, sr))
             }
+            Comp::Sine { level } => Box::new(SineExciter::new(freq_hz, *level, sr)),
             Comp::Mix => Box::new(Sum),
         }
     }
@@ -321,6 +328,9 @@ impl Comp {
                 c |= ui.add(unbounded_slider(level, 0.0..=1.0, "Voice level")).changed();
                 c
             }
+            Comp::Sine { level } => {
+                ui.add(unbounded_slider(level, 0.0..=1.0, "Sine level")).changed()
+            }
             Comp::Mix => {
                 ui.label(egui::RichText::new("Sums its inputs (see edge strengths).").weak().small());
                 false
@@ -377,7 +387,8 @@ impl Comp {
             Comp::Horn(_) => &["length"],
             Comp::MusicalString(_) | Comp::Bell(_) | Comp::Cymbal(_) | Comp::Strike | Comp::Mix
             | Comp::Wires { .. } | Comp::Breath { .. } | Comp::Reed { .. } | Comp::Hammer { .. }
-            | Comp::Bow { .. } | Comp::Voice { .. } | Comp::ReedPipe { .. } | Comp::BowedString { .. } | Comp::Bore { .. } => &[],
+            | Comp::Bow { .. } | Comp::Voice { .. } | Comp::ReedPipe { .. } | Comp::BowedString { .. } | Comp::Bore { .. }
+            | Comp::Sine { .. } => &[],
         }
     }
 
@@ -914,9 +925,9 @@ mod tests {
     }
     #[test]
     fn repointing_output_auditions_that_component() {
-        // The graph editor auditions a component by cloning the graph with
-        // `output` repointed at it. Default graph: Strike(0) → String(1) → Body(2)
-        // → Mix(3). Tapping the String rings; tapping the Strike is a one-shot.
+        // Repointing `output` taps a component's signal where it sits in the
+        // graph. Default graph: Strike(0) → String(1) → Body(2) → Mix(3).
+        // Tapping the String rings; tapping the Strike is a one-shot.
         let sr = 48_000.0;
         let base = InstrumentGraph::default();
         let render = |out: usize| -> Vec<f32> {
@@ -930,6 +941,37 @@ mod tests {
         let strike = render(0); // the Strike exciter (impulse then silence)
         assert!(rms(&string[2000..]) > 1e-4, "auditioning the string rings");
         assert!(rms(&strike[2000..]) < rms(&string[2000..]), "the strike is a one-shot, quieter tail");
+    }
+
+    #[test]
+    fn sine_probe_isolates_a_component() {
+        // The editor auditions a component in isolation via `Sine → comp → Mix`.
+        // A pure sine holds a steady tone; a resonator fed that sine at its own
+        // pitch resonates it — audibly louder than the bare probe off-resonance.
+        let sr = 48_000.0;
+        let mk = |comp: Comp| InstrumentGraph {
+            components: vec![Comp::Sine { level: 1.0 }, comp, Comp::Mix],
+            edges: vec![
+                Edge { from: 0, to: 1, gain: 1.0 },
+                Edge { from: 1, to: 2, gain: 1.0 },
+            ],
+            output: 2,
+            key_map: vec![],
+        };
+        let render = |g: InstrumentGraph| -> Vec<f32> {
+            let mut n = g.build_graph(220.0, 1.0, sr).unwrap();
+            (0..24_000).map(|_| n.tick(&[])).collect()
+        };
+        let rms = |a: &[f32]| (a.iter().map(|v| v * v).sum::<f32>() / a.len() as f32).sqrt();
+        // A pure sine sustains (its late-window energy stays up).
+        let sine = render(mk(Comp::Mix)); // Sine → Mix → Mix: just the tone
+        assert!(rms(&sine[12_000..]) > 1e-3, "sine probe sustains a tone");
+        // A string tuned to the played pitch resonates the probe into sound.
+        let strung = render(mk(Comp::String(PureString::default())));
+        assert!(
+            rms(&strung[2000..]) > 1e-4 && rms(&strung[2000..]).is_finite(),
+            "resonator resonates the pure probe tone"
+        );
     }
 
     #[test]

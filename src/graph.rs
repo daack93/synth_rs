@@ -843,6 +843,51 @@ impl Node for WaveguideBow {
     }
 }
 
+/// A pure sinusoid generator at the played pitch. A clean tone source — and the
+/// probe signal the graph editor feeds a component to audition it in isolation
+/// (a generator ignores it and emits its own sound; a resonator resonates it).
+pub struct SineExciter {
+    phase: f32,
+    incr: f32,
+    level: f32,
+    env: f32,
+    env_target: f32,
+    atk: f32,
+    rel: f32,
+}
+
+impl SineExciter {
+    pub fn new(freq_hz: f32, level: f32, sr: f32) -> Self {
+        SineExciter {
+            phase: 0.0,
+            incr: freq_hz.max(1.0) / sr,
+            level,
+            env: 0.0,
+            env_target: 1.0,
+            atk: 1.0 - (-1.0 / (0.005 * sr)).exp(),
+            rel: 1.0 - (-1.0 / (0.02 * sr)).exp(),
+        }
+    }
+}
+
+impl Node for SineExciter {
+    #[inline]
+    fn tick(&mut self, _inputs: &[f32]) -> f32 {
+        let rate = if self.env < self.env_target { self.atk } else { self.rel };
+        self.env += (self.env_target - self.env) * rate;
+        self.phase += self.incr;
+        if self.phase >= 1.0 {
+            self.phase -= 1.0;
+        }
+        (TAU * self.phase).sin() * self.level * self.env
+    }
+    fn control(&mut self, c: Control) {
+        if let Control::Gate(on) = c {
+            self.env_target = if on { 1.0 } else { 0.0 };
+        }
+    }
+}
+
 /// A passthrough mixer: outputs the (already edge-scaled) sum of its inputs.
 /// Used as a graph's output node so several components (e.g. a dry primary and a
 /// wet body) can be blended by their edge gains.
