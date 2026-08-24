@@ -104,6 +104,10 @@ pub enum Command {
     /// Whammy / pitch-wheel: global pitch-bend of the live instrument, in
     /// semitones (0 = no bend). Recorded into the take's automation.
     SetBend(f32),
+    /// Live mouth-pressure / breath (1.0 = nominal) — e.g. from key aftertouch or
+    /// an expression controller. On a coupled-reed wind it swells and bends the
+    /// note (harder = louder + sharper), the way a player blows.
+    SetBreath(f32),
     /// Replace the whole live slot — used to enter/exit kit mode or rebuild a
     /// kit's zones. `SetModel`/`SetEngine` still handle single-instrument edits.
     SetLive(LiveConfig),
@@ -564,6 +568,9 @@ impl Studio {
                         value: semitones,
                     });
                 }
+            }
+            Command::SetBreath(mult) => {
+                self.live.set_breath(mult);
             }
             Command::AllNotesOff => {
                 self.live.all_notes_off();

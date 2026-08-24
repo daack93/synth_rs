@@ -155,6 +155,12 @@ impl Playable {
         }
     }
 
+    pub fn set_breath(&mut self, mult: f32) {
+        for s in &mut self.sources {
+            s.set_breath(mult);
+        }
+    }
+
     #[inline]
     pub fn render_frame(&mut self) -> f32 {
         let mut s = 0.0;

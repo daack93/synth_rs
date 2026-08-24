@@ -100,6 +100,16 @@ fn handle_message(message: &[u8], tx: &Sender<Command>, monitor: &NoteMonitor) {
             // All notes off (CC 123)
             let _ = tx.send(Command::AllNotesOff);
         }
+        0xB0 if note == 1 || note == 2 || note == 11 => {
+            // Mod wheel (CC1), breath (CC2), or expression (CC11) → mouth pressure.
+            // Rest (0) = nominal; pushing up blows harder (louder + sharper).
+            let _ = tx.send(Command::SetBreath(1.0 + (data2 as f32 / 127.0) * 0.6));
+        }
+        0xD0 => {
+            // Channel pressure (aftertouch) → mouth pressure. Press a held key
+            // harder to swell and bend the note, the way a player leans on it.
+            let _ = tx.send(Command::SetBreath(1.0 + (note as f32 / 127.0) * 0.6));
+        }
         0xE0 => {
             // Pitch wheel: 14-bit (LSB, MSB), centre 8192. Map to ±2 semitones.
             let value = ((data2 as i32) << 7) | note as i32;

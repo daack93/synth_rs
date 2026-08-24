@@ -14,7 +14,7 @@
 
 use eframe::egui;
 
-use crate::models::instrument_graph::{Comp, Edge, InstrumentGraph, KeyTarget};
+use crate::models::instrument_graph::{Comp, Edge, InstrumentGraph, KeyBinding};
 use crate::models::cymbal::Cymbal;
 use crate::models::drum_membrane::DrumMembrane;
 use crate::models::metal_bell::MetalBell;
@@ -146,7 +146,7 @@ fn isolate(ig: &InstrumentGraph, i: usize) -> InstrumentGraph {
         .key_map
         .iter()
         .filter(|k| k.component == i)
-        .map(|k| KeyTarget { component: 1, param: k.param.clone(), amount: k.amount })
+        .map(|k| KeyBinding { component: 1, map: k.map.clone() })
         .collect();
     InstrumentGraph {
         components: vec![Comp::Sine { level: 1.0 }, ig.components[i].clone(), Comp::Mix],
@@ -189,8 +189,10 @@ fn draw_editor(ui: &mut egui::Ui, ig: &mut InstrumentGraph, ge: &mut GeState) ->
     ui.separator();
 
     // --- Canvas ---
+    // Give the canvas a bit over half the height and leave the rest for the
+    // component-parameter panel, so its controls need far less scrolling.
     let avail = ui.available_size_before_wrap();
-    let canvas_h = (avail.y - 150.0).max(220.0);
+    let canvas_h = (avail.y * 0.55).clamp(200.0, avail.y - 200.0);
     let (rect, resp) =
         ui.allocate_exact_size(egui::vec2(avail.x.max(400.0), canvas_h), egui::Sense::click_and_drag());
     let painter = ui.painter_at(rect);
@@ -414,7 +416,13 @@ fn selection_panel(ui: &mut egui::Ui, ig: &mut InstrumentGraph, ge: &mut GeState
             });
             if ge.sel.is_some() {
                 ui.separator();
-                egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                // Fill the panel's remaining height, and make the controls larger
+                // (wider sliders, taller rows) so they are easy to play with.
+                let h = ui.available_height().max(200.0);
+                egui::ScrollArea::vertical().max_height(h).show(ui, |ui| {
+                    ui.spacing_mut().slider_width = 260.0;
+                    ui.spacing_mut().interact_size.y = 24.0;
+                    ui.spacing_mut().item_spacing.y = 8.0;
                     changed |= ig.component_params_ui(i, ui);
                 });
             }
@@ -452,7 +460,8 @@ fn add_menu() -> Vec<(&'static str, Vec<(&'static str, fn() -> Comp)>)> {
             vec![
                 ("Strike", || Comp::Strike),
                 ("Hammer", || Comp::Hammer { hardness: 0.6, felt: 2.5 }),
-                ("Reed / lip", || Comp::Reed { pressure: 0.9, stiffness: 1.0 }),
+                ("Reed / lip", || Comp::Reed { pressure: 0.9, stiffness: 1.0, freq_hz: 150.0 }),
+                ("Reed + bore (coupled)", || Comp::ReedBore { pressure: 0.9, stiffness: 1.0, length: 0.6555, tone: 1.0, register: 0.0 }),
                 ("Breath", || Comp::Breath { level: 0.15, tone: 1.0 }),
                 ("Bow", || Comp::Bow { speed: 1.2, force: 0.6 }),
                 ("Voice", || Comp::Voice { open_quotient: 0.6, level: 0.5 }),
@@ -478,7 +487,8 @@ fn add_menu() -> Vec<(&'static str, Vec<(&'static str, fn() -> Comp)>)> {
             vec![
                 ("Reed pipe", || Comp::ReedPipe { pressure: 0.9, stiffness: 1.0, tone: 1.0 }),
                 ("Bowed string", || Comp::BowedString { speed: 1.2, force: 0.6 }),
-                ("Air column (bore)", || Comp::Bore { tone: 1.0 }),
+                ("Air column (bore)", || Comp::Bore { tone: 1.0, length: 0.0 }),
+                ("Waveguide horn", || Comp::WaveguideHorn { r1: 0.0073, r2: 0.0, r3: 0.002, length: 0.334, segments: 18, tone: 1.0 }),
             ],
         ),
         ("Output", vec![("Mix", || Comp::Mix)]),
