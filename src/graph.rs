@@ -615,6 +615,93 @@ impl Node for VoiceExciter {
     }
 }
 
+/// A digital-waveguide reed instrument (clarinet / sax / lip-brass) — the
+/// McIntyre–Schumacher–Woodhouse / STK model. The bore is a **delay line**; the
+/// bell is a one-pole low-pass with an inverting reflection; the mouthpiece is a
+/// nonlinear **reed table** closing the loop. Unlike a reed driving a modal bank,
+/// the traveling wave actually reflects, so the reed self-oscillates into a clean
+/// harmonic tone. Self-contained (no graph feedback edge); pitch = delay length.
+pub struct WaveguideReed {
+    line: Vec<f32>,
+    delay: f32,      // fractional loop delay (samples) — sets the pitch
+    pos: usize,      // write index
+    bell: f32,       // bell low-pass state
+    bell_a: f32,     // bell brightness (low-pass coeff)
+    refl: f32,       // bell reflection gain (negative → closed-open, odd harmonics)
+    reed_offset: f32,
+    reed_slope: f32, // reed stiffness (steeper = stiffer/brighter)
+    pressure: f32,
+    env: f32,
+    env_target: f32,
+    atk: f32,
+    rel: f32,
+    rng: u32,
+    noise: f32,
+}
+
+impl WaveguideReed {
+    pub fn new(freq_hz: f32, pressure: f32, stiffness: f32, tone: f32, sr: f32) -> Self {
+        let f = freq_hz.max(20.0);
+        // Loop round-trip = 2·delay samples; the inverting bell reflection makes
+        // it a closed-open quarter-wave (odd harmonics). A fractional delay (read
+        // with interpolation) tunes it exactly; ~1 sample compensates the bell
+        // filter's phase delay in the loop.
+        let delay = (sr / (2.0 * f) - 1.0).max(2.0);
+        WaveguideReed {
+            line: vec![0.0; delay.ceil() as usize + 3],
+            delay,
+            pos: 0,
+            bell: 0.0,
+            bell_a: (0.15 + 0.55 * tone.clamp(0.0, 1.5) / 1.5).clamp(0.05, 0.9),
+            refl: -0.97,
+            reed_offset: 0.7,
+            reed_slope: -(0.08 + stiffness * 0.22),
+            pressure,
+            env: 0.0,
+            env_target: 1.0,
+            atk: 1.0 - (-1.0 / (0.012 * sr)).exp(),
+            rel: 1.0 - (-1.0 / (0.02 * sr)).exp(),
+            rng: 0x9e37_79b9,
+            noise: 0.03,
+        }
+    }
+}
+
+impl Node for WaveguideReed {
+    #[inline]
+    fn tick(&mut self, _inputs: &[f32]) -> f32 {
+        let rate = if self.env < self.env_target { self.atk } else { self.rel };
+        self.env += (self.env_target - self.env) * rate;
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        let white = (self.rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+        let breath = self.pressure * self.env * (1.0 + self.noise * white);
+        // Fractional-delay read of the returning wave at the mouthpiece.
+        let n = self.line.len();
+        let rp = self.pos as f32 + n as f32 - self.delay;
+        let i0 = rp.floor() as usize % n;
+        let i1 = (i0 + 1) % n;
+        let frac = rp - rp.floor();
+        let bore_out = self.line[i0] * (1.0 - frac) + self.line[i1] * frac;
+        // Bell: low-pass then invert/attenuate — the open-end reflection.
+        self.bell += self.bell_a * (bore_out - self.bell);
+        let reflected = self.refl * self.bell;
+        // Reed table: reflection coefficient falls with the pressure difference,
+        // clipped when the reed slaps shut — the nonlinearity that sustains it.
+        let delta = reflected - breath;
+        let reed = (self.reed_offset + self.reed_slope * delta).clamp(-1.0, 1.0);
+        self.line[self.pos] = breath + delta * reed;
+        self.pos = (self.pos + 1) % n;
+        bore_out
+    }
+    fn control(&mut self, c: Control) {
+        if let Control::Gate(on) = c {
+            self.env_target = if on { 1.0 } else { 0.0 };
+        }
+    }
+}
+
 /// A passthrough mixer: outputs the (already edge-scaled) sum of its inputs.
 /// Used as a graph's output node so several components (e.g. a dry primary and a
 /// wet body) can be blended by their edge gains.
@@ -957,4 +1044,6 @@ mod new_exciter_tests {
         assert!(end.iter().all(|s| s.abs() < 1e-2), "voice goes silent after note-off");
     }
 }
+
+
 
