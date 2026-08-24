@@ -1112,19 +1112,18 @@ pub fn factory() -> Vec<Preset> {
             "Base: Clarinet",
             InstrumentGraph {
                 components: vec![
-                    // COUPLED reed↔bore, kept INTERNAL to the reed (a built-in
-                    // waveguide bore) so the coupling has no graph-edge delay and
-                    // pitch stays in tune across the range. The key-map drives the
-                    // reed's pitch (its bore length); the bore's returning wave
-                    // pushes the reed and it follows — the real coupled loop. The
-                    // Webster horn is the fixed-formant bell that colours the tone.
-                    Comp::Reed { pressure: 0.9, stiffness: 1.0, freq_hz: 261.63 },
+                    // COUPLED reed + bore (implicit-solved) is the pitched voice —
+                    // the reed↔bore loop sets the pitch (in tune, f = c/2L). The
+                    // key-map drives the bore LENGTH; the Webster horn is the
+                    // fixed-formant bell that colours the tone. Cylindrical bore →
+                    // odd harmonics, closed–open (the hollow clarinet register).
+                    Comp::ReedBore { pressure: 0.9, stiffness: 1.0, length: 0.6555, tone: 1.0 },
                     Comp::Horn(WebsterHorn {
                         boundary: Boundary::Brass,
                         r1: 0.0073,
                         r2: 0.0,
                         r3: 0.002,
-                        length: 0.66,
+                        length: 0.12,
                         blow_pos: 0.0,
                         depth: 18,
                         resolution: 300,
@@ -1138,15 +1137,16 @@ pub fn factory() -> Vec<Preset> {
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 2, gain: 0.3 }, // reed dry → out
-                    Edge { from: 0, to: 1, gain: 1.0 }, // reed → bell
-                    Edge { from: 1, to: 2, gain: 0.4 }, // bell colour → out
+                    Edge { from: 0, to: 2, gain: 0.7 }, // coupled voice (dry) → out
+                    Edge { from: 0, to: 1, gain: 1.0 }, // voice → bell
+                    Edge { from: 1, to: 2, gain: 0.25 }, // bell colour → out
                 ],
                 output: 2,
-                // The ONLY key→pitch path: the key drives the reed's bore pitch.
+                // The ONLY key→pitch path: the key drives the bore length,
+                // f = c/2L so length ∝ (f/C4)^−1.
                 key_map: vec![KeyBinding {
                     component: 0,
-                    map: KeyMapKind::Power { param: "freq".into(), amount: 1.0 },
+                    map: KeyMapKind::Power { param: "length".into(), amount: -1.0 },
                 }],
             },
             eng(0.5, 25.0, 90.0),

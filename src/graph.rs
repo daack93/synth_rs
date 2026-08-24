@@ -20,6 +20,7 @@ use crate::models::ModeBuffer;
 
 const TAU: f32 = std::f32::consts::TAU;
 const PI: f32 = std::f32::consts::PI;
+const CR_COMP: f32 = 1.5;
 
 /// A control message broadcast to every node in a voice's graph (not audio —
 /// these arrive at control rate, on a bend move or a key-up).
@@ -745,6 +746,144 @@ impl Node for WaveguideBore {
         self.line[self.pos] = flow;
         self.pos = (self.pos + 1) % n;
         reflected
+    }
+}
+
+/// A **coupled reed + bore** solved *implicitly* — the physically-correct
+/// woodwind. The reed valve and the waveguide bore are one tightly-coupled
+/// feedback loop: the bore's returning pressure wave pushes the reed, and the
+/// reed's flow drives the bore. The reed's own *mechanical* motion is stepped
+/// explicitly (its ~1.5 kHz resonance is slow next to a sample), but the
+/// **flow ↔ pressure** relationship is resolved with a per-sample Newton–Raphson
+/// solve, so there is **no artificial one-sample delay in the loop** — which is
+/// what makes the pitch lock exactly to the bore length (`f ≈ c/2L`) instead of
+/// drifting flat. Self-contained (no feedback edge); pitch = `length`.
+pub struct CoupledReed {
+    // reed
+    x: f32,
+    v: f32,
+    wn2: f32,
+    damp: f32,
+    beta: f32,
+    zc: f32,
+    dp_prev: f32,
+    u_prev: f32,
+    flow_lp: f32,
+    flow_a: f32,
+    // internal waveguide bore
+    line: Vec<f32>,
+    delay: f32,
+    pos: usize,
+    bell: f32,
+    bell_a: f32,
+    refl: f32,
+    // drive
+    pressure: f32,
+    env: f32,
+    env_target: f32,
+    atk: f32,
+    rel: f32,
+    rng: u32,
+}
+
+impl CoupledReed {
+    /// `length_m` = bore length (metres); pitch ≈ c/2L. `stiffness` shapes the
+    /// reed's beating; `tone` the bell brightness.
+    pub fn new(pressure: f32, stiffness: f32, length_m: f32, tone: f32, sr: f32) -> Self {
+        let c = 343.0_f32;
+        // Bore round-trip delay from the length; −3 compensates the bell filter.
+        let delay = (length_m.max(0.02) / c * sr - CR_COMP).max(2.0);
+        let wn = TAU * 1500.0 / sr;
+        let beta = (0.65 + 0.14 * stiffness.clamp(0.0, 2.0)).clamp(0.7, 0.9);
+        CoupledReed {
+            x: 0.0,
+            v: 0.0,
+            wn2: wn * wn,
+            damp: 2.0 * 0.8 * wn,
+            beta,
+            zc: 0.6,
+            dp_prev: 0.0,
+            u_prev: 0.0,
+            flow_lp: 0.0,
+            flow_a: 0.28,
+            line: vec![0.0; delay.ceil() as usize + 3],
+            delay,
+            pos: 0,
+            bell: 0.0,
+            bell_a: (0.15 + 0.55 * tone.clamp(0.0, 1.5) / 1.5).clamp(0.05, 0.9),
+            refl: -0.97,
+            pressure,
+            env: 0.0,
+            env_target: 1.0,
+            atk: 1.0 - (-1.0 / (0.02 * sr)).exp(),
+            rel: 1.0 - (-1.0 / (0.03 * sr)).exp(),
+            rng: 0x1234_5678,
+        }
+    }
+}
+
+impl Node for CoupledReed {
+    #[inline]
+    fn tick(&mut self, _inputs: &[f32]) -> f32 {
+        let rate = if self.env < self.env_target { self.atk } else { self.rel };
+        self.env += (self.env_target - self.env) * rate;
+        let pm = self.pressure * self.env;
+
+        // 1. The bore's returning wave at the mouthpiece (p₊): read the delay
+        //    line, low-pass + invert at the bell.
+        let n = self.line.len();
+        let rp = self.pos as f32 + n as f32 - self.delay;
+        let i0 = rp.floor() as usize % n;
+        let i1 = (i0 + 1) % n;
+        let frac = rp - rp.floor();
+        let bore_out = self.line[i0] * (1.0 - frac) + self.line[i1] * frac;
+        self.bell += self.bell_a * (bore_out - self.bell);
+        let p_plus = self.refl * self.bell;
+
+        // 2. Advance the reed's *mechanical* state (explicit — slow variable).
+        let acc = -self.damp * self.v - self.wn2 * (self.x + self.beta * self.dp_prev);
+        self.v += acc;
+        self.x += self.v;
+        let h = (1.0 + self.x).clamp(0.0, 3.0);
+
+        // 3. Resolve the flow ↔ pressure algebraic loop *this sample* (no delay):
+        //    ΔP = Pm − 2·p₊ + Zc·U,  U = h·sign(ΔP)·√|ΔP|.  Newton–Raphson on U,
+        //    warm-started from last sample so it converges in a step or two.
+        let mut u = self.u_prev;
+        for _ in 0..4 {
+            let dp = pm - 2.0 * p_plus + self.zc * u;
+            let ad = dp.abs().max(1e-9);
+            let sq = ad.sqrt();
+            let g = dp.signum() * sq; // sign(ΔP)·√|ΔP|
+            let resid = u - h * g;
+            // dU: d/dU[h·g(ΔP)] = h · (0.5/√|ΔP|) · Zc
+            let deriv = 1.0 - h * self.zc * (0.5 / sq);
+            u -= resid / if deriv.abs() < 1e-3 { 1e-3f32.copysign(deriv) } else { deriv };
+        }
+        let dp = pm - 2.0 * p_plus + self.zc * u;
+        self.dp_prev = dp;
+        self.u_prev = u;
+
+        // Reed/air inertia low-pass + a little breath turbulence; breath-gate so
+        // the note stops on note-off instead of self-oscillating on the wave.
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        let white = (self.rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+        let g = (self.env * 4.0).min(1.0);
+        self.flow_lp += self.flow_a * (g * (u + h * 0.015 * white) - self.flow_lp);
+        let ur = self.flow_lp;
+
+        // 4. Launch the outgoing wave into the bore and advance it.
+        let p_minus = (p_plus - self.zc * ur).tanh();
+        self.line[self.pos] = p_minus;
+        self.pos = (self.pos + 1) % n;
+        bore_out
+    }
+    fn control(&mut self, c: Control) {
+        if let Control::Gate(on) = c {
+            self.env_target = if on { 1.0 } else { 0.0 };
+        }
     }
 }
 
@@ -1515,6 +1654,39 @@ mod new_exciter_tests {
         let rms = (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt();
         assert!(rms > 0.1, "self-contained reed buzzes on its own (rms {rms})");
         assert!((acf_freq(tail, sr, 196.0) / 196.0 - 1.0).abs() < 0.07, "buzzes at its fixed pitch");
+    }
+
+    #[test]
+    fn coupled_reed_bore_plays_in_tune_with_odd_harmonics() {
+        // The implicitly-solved reed↔bore locks its pitch to the bore length
+        // (f ≈ c/2L) in tune, and — a cylindrical closed-open bore — sounds odd
+        // harmonics (strong 3rd, weak 2nd): the hollow clarinet tone.
+        let sr = 48_000.0;
+        let c = 343.0f32;
+        let mag = |y: &[f32], f: f32| -> f32 {
+            let (mut re, mut im) = (0.0f32, 0.0f32);
+            for (n, &s) in y.iter().enumerate() {
+                let p = TAU * f * n as f32 / sr;
+                re += s * p.cos();
+                im += s * p.sin();
+            }
+            (re * re + im * im).sqrt() / y.len() as f32
+        };
+        for &f0 in &[147.0f32, 220.0, 330.0, 494.0] {
+            let l = c / (2.0 * f0);
+            let mut r = CoupledReed::new(0.9, 1.0, l, 1.0, sr);
+            let y: Vec<f32> = (0..30_000).map(|_| r.tick(&[])).collect();
+            assert!(y.iter().all(|v| v.is_finite() && v.abs() < 20.0), "coupled reed stable at {f0}");
+            let tail = &y[20_000..];
+            let rms = (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt();
+            assert!(rms > 0.1, "coupled reed sounds at {f0} Hz (rms {rms})");
+            let f = acf_freq(tail, sr, f0);
+            let cents = 1200.0 * (f / f0).log2();
+            assert!(cents.abs() < 25.0, "in tune at {f0} Hz (got {cents:+.0} cents)");
+            // odd-harmonic: 3rd stronger than 2nd
+            let (h2, h3) = (mag(tail, 2.0 * f0), mag(tail, 3.0 * f0));
+            assert!(h3 > h2, "odd-harmonic (clarinet) tone at {f0}: h3 {h3} > h2 {h2}");
+        }
     }
 
     #[test]

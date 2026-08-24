@@ -21,7 +21,7 @@ use super::pure_string::PureString;
 use super::webster_horn::{PlayMode, WebsterHorn};
 use super::{freq_to_midi, midi_name, unbounded_slider, FtmModel, ModeBuffer};
 use crate::graph::{
-    BowExciter, DriveExciter, FormantResonator, Graph, HammerExciter, ImpulseExciter,
+    BowExciter, CoupledReed, DriveExciter, FormantResonator, Graph, HammerExciter, ImpulseExciter,
     ModalResonator, Node, ReedExciter, SineExciter, SnareWires, Sum, VoiceExciter, WaveguideBore, WaveguideBow, WaveguideHorn, WaveguideReed,
 };
 
@@ -67,6 +67,12 @@ pub enum Comp {
     /// `freq_hz = 0` makes it a bare valve that reads its resonant load back over
     /// a feedback edge (pitch comes from the bore it drives).
     Reed { pressure: f32, stiffness: f32, freq_hz: f32 },
+    /// A **coupled reed + bore** — the physically-correct woodwind voice. The reed
+    /// valve and a waveguide bore are one tightly-coupled loop solved *implicitly*
+    /// each sample (no loop delay), so the pitch locks to the bore `length`
+    /// (`f ≈ c/2L`) in tune. Self-contained; drive a downstream Webster horn for
+    /// bell colour. Key-map `length` for pitch.
+    ReedBore { pressure: f32, stiffness: f32, length: f32, tone: f32 },
     /// A digital-waveguide reed pipe — a self-contained wind voice (bore delay +
     /// bell + reed) that self-oscillates into a clean reed tone. `pressure` =
     /// breath, `stiffness` = reed hardness, `tone` = bell brightness.
@@ -122,6 +128,7 @@ impl Comp {
             Comp::Wires { .. } => "Snare wires",
             Comp::Breath { .. } => "Breath (exciter)",
             Comp::Reed { .. } => "Reed / lip (exciter)",
+            Comp::ReedBore { .. } => "Reed + bore (coupled)",
             Comp::ReedPipe { .. } => "Reed pipe (waveguide)",
             Comp::BowedString { .. } => "Bowed string (waveguide)",
             Comp::Hammer { .. } => "Hammer (exciter)",
@@ -146,6 +153,7 @@ impl Comp {
                 | Comp::Hammer { .. }
                 | Comp::Breath { .. }
                 | Comp::Reed { .. }
+                | Comp::ReedBore { .. }
                 | Comp::Bow { .. }
                 | Comp::Voice { .. }
                 | Comp::ReedPipe { .. }
@@ -218,6 +226,9 @@ impl Comp {
             }
             Comp::Reed { pressure, stiffness, freq_hz } => {
                 Box::new(ReedExciter::new(*pressure, *stiffness, *freq_hz, sr))
+            }
+            Comp::ReedBore { pressure, stiffness, length, tone } => {
+                Box::new(CoupledReed::new(*pressure, *stiffness, *length, *tone, sr))
             }
             Comp::ReedPipe { pressure, stiffness, tone } => {
                 Box::new(WaveguideReed::new(freq_hz, *pressure, *stiffness, *tone, sr))
@@ -334,6 +345,17 @@ impl Comp {
                     .changed();
                 c
             }
+            Comp::ReedBore { pressure, stiffness, length, tone } => {
+                let mut c = false;
+                c |= ui.add(unbounded_slider(pressure, 0.1..=2.0, "Mouth pressure")).changed();
+                c |= ui.add(unbounded_slider(stiffness, 0.0..=3.0, "Reed stiffness")).changed();
+                c |= ui
+                    .add(unbounded_slider(length, 0.05..=2.0, "Bore length (m)"))
+                    .on_hover_text("Sets the pitch (usually key-mapped): f ≈ c/2L.")
+                    .changed();
+                c |= ui.add(unbounded_slider(tone, 0.0..=1.5, "Bell brightness")).changed();
+                c
+            }
             Comp::ReedPipe { pressure, stiffness, tone } => {
                 let mut c = false;
                 c |= ui.add(unbounded_slider(pressure, 0.1..=1.5, "Breath pressure")).changed();
@@ -441,6 +463,8 @@ impl Comp {
             Comp::WaveguideHorn { .. } => &["length"],
             // The waveguide bore's length — the coupled reed↔bore pitch control.
             Comp::Bore { .. } => &["length"],
+            // The coupled reed+bore's length sets its (in-tune) pitch.
+            Comp::ReedBore { .. } => &["length"],
             // The reed's fixed pitch — so a key can drive embouchure/pitch on a
             // self-contained mouthpiece (`freq_hz > 0`).
             Comp::Reed { .. } => &["freq"],
@@ -466,6 +490,7 @@ impl Comp {
             (Comp::Horn(m), "length") => Some(m.length),
             (Comp::WaveguideHorn { length, .. }, "length") => Some(*length),
             (Comp::Bore { length, .. }, "length") => Some(*length),
+            (Comp::ReedBore { length, .. }, "length") => Some(*length),
             (Comp::Reed { freq_hz, .. }, "freq") => Some(*freq_hz),
             _ => None,
         }
@@ -486,6 +511,7 @@ impl Comp {
             (Comp::Horn(m), "length") => m.length = v,
             (Comp::WaveguideHorn { length, .. }, "length") => *length = v,
             (Comp::Bore { length, .. }, "length") => *length = v,
+            (Comp::ReedBore { length, .. }, "length") => *length = v,
             (Comp::Reed { freq_hz, .. }, "freq") => *freq_hz = v,
             _ => {}
         }
