@@ -24,7 +24,6 @@ const CR_COMP: f32 = 2.5;
 /// Register-hole position along the bore (fraction from the throat). At 1/3 the
 /// fundamental has a pressure antinode and the 3rd harmonic a node, so opening
 /// the hole kills the fundamental and the reed jumps a 12th to the 3rd.
-const REGISTER_POS: f32 = 0.33;
 
 /// A control message broadcast to every node in a voice's graph (not audio —
 /// these arrive at control rate, on a bend move or a key-up).

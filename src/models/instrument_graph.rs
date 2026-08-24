@@ -667,13 +667,16 @@ impl InstrumentGraph {
         self.components.iter().map(|c| c.label()).collect()
     }
 
-    /// Calibrate a per-MIDI-note pressure-correction table for a coupled-reed
-    /// component `comp` (the `OverblowTuned` strategy). For each note it applies
-    /// the register-break geometry, then *solves* (bisection over short renders)
-    /// for the mouth-pressure multiplier that lands the note exactly in tune,
-    /// capturing the model's whole residual — physical + numerical — at once.
-    /// Run once (edit-time); the result is looked up per note-on at no cost.
-    pub fn calibrate_pressure(&self, comp: usize, anchor_hz: f32, sr: f32) -> Vec<f32> {
+    /// Calibrate a per-MIDI-note bore-**length** correction table for a coupled-
+    /// reed component `comp` (the `OverblowTuned` strategy). For each note it
+    /// applies the register-break geometry, then *solves* (bisection over short
+    /// renders) for the length multiplier that lands the note exactly in tune,
+    /// capturing the model's whole tuning residual — physical + numerical — at
+    /// once. Length has direct, full pitch authority (`f = c/2L`), so this works
+    /// for both cylinders and cones (a cone's pitch barely responds to mouth
+    /// pressure, so pressure calibration can't tune saxes). Run once (edit-time);
+    /// the result is looked up per note-on at no cost.
+    pub fn calibrate_tuning(&self, comp: usize, anchor_hz: f32, sr: f32) -> Vec<f32> {
         // Autocorrelation pitch with parabolic interpolation of the peak lag, so
         // the pitch is resolved to a fraction of a cent (integer lags alone are
         // only ~±16 cents — too coarse to null the tuning we're solving for).
@@ -696,20 +699,36 @@ impl InstrumentGraph {
             let frac = if denom.abs() > 1e-12 { 0.5 * (a - c) / denom } else { 0.0 };
             sr / (best as f32 + frac.clamp(-1.0, 1.0))
         };
-        // Render one note at a given pressure multiplier and return its pitch.
+        // Render one note at a given bore-length multiplier and return its pitch.
+        // Calibrate on the reed component ALONE — the downstream bell colours the
+        // tone but doesn't set pitch, and rebuilding a modal horn per solve step
+        // is ~100× the cost of the reed. So strip to a one-node graph.
+        let reed = self.components.get(comp).cloned();
         let measure = |mult: f32, f: f32| -> f32 {
-            let mut g = self.clone();
-            g.key_map.clear();
-            if let Some(c) = g.components.get_mut(comp) {
-                c.set_overblow(f, anchor_hz, 0, false); // register + length only
-                if let Comp::ReedBore { pressure, .. } = c {
-                    *pressure *= mult;
-                }
+            let mut c = match &reed {
+                Some(c) => c.clone(),
+                None => return 0.0,
+            };
+            c.set_overblow(f, anchor_hz, 0, false); // register + length only
+            if let Comp::ReedBore { length, .. } = &mut c {
+                *length *= mult;
             }
+            let g = InstrumentGraph {
+                components: vec![c],
+                edges: Vec::new(),
+                output: 0,
+                key_map: Vec::new(),
+            };
             match g.build_graph(f, 1.0, sr) {
                 Some(mut n) => {
-                    let y: Vec<f32> = (0..16_000).map(|_| n.tick(&[])).collect();
-                    let tail = &y[10_000..];
+                    // Enough time to build up + a tail of ≥20 periods, so the ACF
+                    // is accurate even for the lowest instruments (a contrabass
+                    // clarinet's ~37 Hz has a 1300-sample period).
+                    let warm = (0.15 * sr) as usize;
+                    let tail_len = ((20.0 * sr / f) as usize).clamp(4_000, 24_000);
+                    let total = warm + tail_len;
+                    let y: Vec<f32> = (0..total).map(|_| n.tick(&[])).collect();
+                    let tail = &y[warm..];
                     let rms = (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt();
                     if rms > 1e-3 {
                         acf(tail, f)
@@ -721,10 +740,11 @@ impl InstrumentGraph {
             }
         };
         let mut table = vec![1.0f32; 128];
-        for note in 36u8..=100 {
+        for note in 24u8..=108 {
             let f = super::REF_PITCH_HZ * 2f32.powf((note as f32 - 60.0) / 12.0);
-            // Bisect the pressure multiplier so the rendered pitch = f.
-            let (mut lo, mut hi) = (0.6f32, 1.5f32);
+            // Bisect the length multiplier so the rendered pitch = f. Shorter bore
+            // → sharper (f = c/2L), so flat pitch means shorten (smaller mult).
+            let (mut lo, mut hi) = (0.82f32, 1.18f32);
             let mut ok = false;
             for _ in 0..9 {
                 let m = (lo + hi) * 0.5;
@@ -734,9 +754,9 @@ impl InstrumentGraph {
                 }
                 ok = true;
                 if p < f {
-                    lo = m; // flat → blow harder
+                    hi = m; // flat → shorten the bore
                 } else {
-                    hi = m;
+                    lo = m;
                 }
             }
             if ok {
@@ -939,13 +959,13 @@ impl FtmModel for InstrumentGraph {
                             c.set_overblow(freq_hz, *anchor_hz, *steps, *microtune);
                         }
                         KeyMapKind::OverblowTuned { anchor_hz, table } => {
-                            // Register + length from the overblow, then the exact
-                            // calibrated pressure for this note (nearest MIDI).
+                            // Register + nominal length from the overblow, then the
+                            // exact calibrated length correction for this note.
                             c.set_overblow(freq_hz, *anchor_hz, 0, false);
                             let note = super::freq_to_midi(freq_hz).clamp(0, 127) as usize;
                             if let Some(&mult) = table.get(note) {
-                                if let Comp::ReedBore { pressure, .. } = c {
-                                    *pressure *= mult;
+                                if let Comp::ReedBore { length, .. } = c {
+                                    *length *= mult;
                                 }
                             }
                         }
@@ -1222,7 +1242,7 @@ impl FtmModel for InstrumentGraph {
                         changed |= ui.add(unbounded_slider(amount, -2.0..=2.0, "amount")).changed();
                     }
                     KeyMapKind::Overblow { anchor_hz, steps, microtune } => {
-                        changed |= ui.add(unbounded_slider(anchor_hz, 40.0..=440.0, "anchor Hz")).changed();
+                        changed |= ui.add(unbounded_slider(anchor_hz, 30.0..=440.0, "anchor Hz")).changed();
                         let mut s = *steps as f32;
                         if ui.add(unbounded_slider(&mut s, 0.0..=12.0, "steps")).changed() {
                             *steps = s.round() as u32;
@@ -1231,7 +1251,7 @@ impl FtmModel for InstrumentGraph {
                         changed |= ui.checkbox(microtune, "in-tune").changed();
                     }
                     KeyMapKind::OverblowTuned { anchor_hz, table } => {
-                        changed |= ui.add(unbounded_slider(anchor_hz, 40.0..=440.0, "anchor Hz")).changed();
+                        changed |= ui.add(unbounded_slider(anchor_hz, 30.0..=440.0, "anchor Hz")).changed();
                         let n = table.iter().filter(|&&v| (v - 1.0).abs() > 1e-4).count();
                         ui.label(
                             egui::RichText::new(if table.is_empty() {
@@ -1258,8 +1278,8 @@ impl FtmModel for InstrumentGraph {
             changed = true;
         }
         if let Some((t, comp, anchor)) = calibrate_req {
-            // Solve the per-note pressure table (a one-off; a moment of compute).
-            let tbl = self.calibrate_pressure(comp, anchor, 48_000.0);
+            // Solve the per-note length-tuning table (a one-off; a moment of compute).
+            let tbl = self.calibrate_tuning(comp, anchor, 48_000.0);
             if let Some(kb) = self.key_map.get_mut(t) {
                 if let KeyMapKind::OverblowTuned { table, .. } = &mut kb.map {
                     *table = tbl;
