@@ -1112,37 +1112,42 @@ pub fn factory() -> Vec<Preset> {
             "Base: Clarinet",
             InstrumentGraph {
                 components: vec![
-                    // The reed is a bare valve (freq_hz = 0) that drives a
-                    // TRAVELING-WAVE bore and follows its pitch. The bore is the
-                    // Webster geometry built as a segmented waveguide, so it
-                    // actually oscillates and its pitch is set by its LENGTH — and
-                    // the *key* drives that length (the only key→pitch path is the
-                    // key map below). A cylinder (r2 = 0) sounds odd harmonics and
-                    // overblows a 12th, like a clarinet; 14.6 mm bore (r1 = 7.3 mm)
-                    // with a slight bell flare (r3).
+                    // The reed forward-drives the modal Webster horn (no feedback
+                    // loop) as broadband excitation; the horn RINGS at its own
+                    // resonances — that resonant overblown-horn tone. In
+                    // OverblowTracked mode the horn picks an overblown bore length
+                    // per key so its resonance lands on the note (chromatic, in
+                    // tune within a few cents across the range). Cylindrical bore
+                    // (14.6 mm, r1 = 7.3 mm, no taper) → odd harmonics, closed
+                    // mouthpiece + open bell.
+                    // NOTE: the horn's pitch tracking is still INTERNAL here (its
+                    // play_mode), not yet the explicit per-component key-map type
+                    // Dave wants — that's the next step.
                     Comp::Reed { pressure: 0.9, stiffness: 1.0, freq_hz: 0.0 },
-                    Comp::WaveguideHorn {
+                    Comp::Horn(WebsterHorn {
+                        boundary: Boundary::Brass,
                         r1: 0.0073,
                         r2: 0.0,
                         r3: 0.002,
-                        // Base length @ C4. ROUGH: the reed↔horn loop overblows,
-                        // so it plays ~a register up and the tuning drifts across
-                        // the range — taming the register break is the next pass.
-                        length: 0.595,
-                        segments: 18,
-                        tone: 1.0,
-                    },
+                        length: 0.66,
+                        blow_pos: 0.0,
+                        depth: 18,
+                        resolution: 300,
+                        damping: 4.0,
+                        freq_dep_damping: -0.08,
+                        visco_loss: 0.8,
+                        radiation: 0.6,
+                        play_mode: HornPlay::OverblowTracked,
+                        ..WebsterHorn::default()
+                    }),
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.8 }, // reed → bore
-                    Edge { from: 1, to: 0, gain: 0.8 }, // bore → reed (feedback)
-                    Edge { from: 1, to: 2, gain: 5.0 }, // bore → out (its throat wave is quiet)
+                    Edge { from: 0, to: 1, gain: 0.6 }, // reed excites the horn
+                    Edge { from: 1, to: 2, gain: 0.5 }, // horn → out
                 ],
                 output: 2,
-                // The ONLY key→pitch path: the key drives the bore length.
-                // f ∝ 1/L (cylinder, closed-open), so length ∝ (f/C4)^−1.
-                key_map: vec![KeyTarget { component: 1, param: "length".into(), amount: -1.0 }],
+                key_map: Vec::new(),
             },
             eng(0.5, 25.0, 90.0),
         ),
