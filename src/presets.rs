@@ -1123,7 +1123,7 @@ pub fn factory() -> Vec<Preset> {
                         r1: 0.0073,
                         r2: 0.0,
                         r3: 0.002,
-                        length: 0.12,
+                        length: 0.06,
                         blow_pos: 0.0,
                         depth: 18,
                         resolution: 300,
