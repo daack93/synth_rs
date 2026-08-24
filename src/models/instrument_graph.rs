@@ -22,7 +22,7 @@ use super::webster_horn::WebsterHorn;
 use super::{freq_to_midi, midi_name, unbounded_slider, FtmModel, ModeBuffer};
 use crate::graph::{
     BowExciter, DriveExciter, FormantResonator, Graph, HammerExciter, ImpulseExciter,
-    ModalResonator, Node, ReedExciter, SnareWires, Sum, VoiceExciter, WaveguideReed,
+    ModalResonator, Node, ReedExciter, SnareWires, Sum, VoiceExciter, WaveguideBow, WaveguideReed,
 };
 
 const PI: f32 = std::f32::consts::PI;
@@ -74,6 +74,10 @@ pub enum Comp {
     /// A bow: stick-slip friction (needs a feedback edge from the string).
     /// `speed` = bow velocity, `force` = bow pressure.
     Bow { speed: f32, force: f32 },
+    /// A digital-waveguide bowed string — a self-contained voice (string delays +
+    /// bridge + friction junction) that locks into Helmholtz stick-slip.
+    /// `speed` = bow velocity, `force` = bow pressure.
+    BowedString { speed: f32, force: f32 },
     /// A vocal-fold (glottal) source, pitched at the played note. `open_quotient`
     /// = how long the folds stay open (breathy → pressed), `level` = drive.
     Voice { open_quotient: f32, level: f32 },
@@ -98,6 +102,7 @@ impl Comp {
             Comp::Breath { .. } => "Breath (exciter)",
             Comp::Reed { .. } => "Reed / lip (exciter)",
             Comp::ReedPipe { .. } => "Reed pipe (waveguide)",
+            Comp::BowedString { .. } => "Bowed string (waveguide)",
             Comp::Hammer { .. } => "Hammer (exciter)",
             Comp::Bow { .. } => "Bow (exciter)",
             Comp::Voice { .. } => "Voice / glottis (exciter)",
@@ -120,6 +125,7 @@ impl Comp {
                 | Comp::Bow { .. }
                 | Comp::Voice { .. }
                 | Comp::ReedPipe { .. }
+                | Comp::BowedString { .. }
         )
     }
 
@@ -180,6 +186,9 @@ impl Comp {
             Comp::Reed { pressure, stiffness } => Box::new(ReedExciter::new(*pressure, *stiffness, sr)),
             Comp::ReedPipe { pressure, stiffness, tone } => {
                 Box::new(WaveguideReed::new(freq_hz, *pressure, *stiffness, *tone, sr))
+            }
+            Comp::BowedString { speed, force } => {
+                Box::new(WaveguideBow::new(freq_hz, *speed, *force, sr))
             }
             Comp::Hammer { hardness, felt } => {
                 Box::new(HammerExciter::new(vel, *hardness, *felt, sr))
@@ -263,6 +272,12 @@ impl Comp {
                 c |= ui.add(unbounded_slider(pressure, 0.1..=1.5, "Breath pressure")).changed();
                 c |= ui.add(unbounded_slider(stiffness, 0.2..=3.0, "Reed stiffness")).changed();
                 c |= ui.add(unbounded_slider(tone, 0.0..=1.5, "Bell brightness")).changed();
+                c
+            }
+            Comp::BowedString { speed, force } => {
+                let mut c = false;
+                c |= ui.add(unbounded_slider(speed, 0.2..=3.0, "Bow speed")).changed();
+                c |= ui.add(unbounded_slider(force, 0.1..=2.0, "Bow force")).changed();
                 c
             }
             Comp::Hammer { hardness, felt } => {
@@ -354,7 +369,7 @@ impl Comp {
             Comp::Horn(_) => &["length"],
             Comp::MusicalString(_) | Comp::Bell(_) | Comp::Cymbal(_) | Comp::Strike | Comp::Mix
             | Comp::Wires { .. } | Comp::Breath { .. } | Comp::Reed { .. } | Comp::Hammer { .. }
-            | Comp::Bow { .. } | Comp::Voice { .. } | Comp::ReedPipe { .. } => &[],
+            | Comp::Bow { .. } | Comp::Voice { .. } | Comp::ReedPipe { .. } | Comp::BowedString { .. } => &[],
         }
     }
 
@@ -642,6 +657,10 @@ impl FtmModel for InstrumentGraph {
             }
             if ui.small_button("Reed pipe").clicked() {
                 self.components.push(Comp::ReedPipe { pressure: 0.9, stiffness: 1.0, tone: 1.0 });
+                changed = true;
+            }
+            if ui.small_button("Bowed string").clicked() {
+                self.components.push(Comp::BowedString { speed: 1.2, force: 0.6 });
                 changed = true;
             }
             if ui.small_button("Hammer").clicked() {

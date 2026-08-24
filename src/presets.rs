@@ -1005,19 +1005,16 @@ pub fn factory() -> Vec<Preset> {
             "Base: Violin",
             InstrumentGraph {
                 components: vec![
-                    Comp::Bow { speed: 0.6, force: 1.0 },
-                    Comp::String(string(0.33, 50.0, 0.7, GUT, 1.5, 0.6, 0.12)),
+                    Comp::BowedString { speed: 1.3, force: 0.6 },
                     Comp::Body { cavity_litres: 2.2, soundhole_cm: 3.2, top_hz: 280.0, decay_s: 0.35 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 0, gain: 1.0 },
-                    Edge { from: 1, to: 3, gain: 0.8 },
-                    Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 0.3 },
+                    Edge { from: 0, to: 2, gain: 0.8 }, // dry string → out
+                    Edge { from: 0, to: 1, gain: 1.0 }, // string → body
+                    Edge { from: 1, to: 2, gain: 0.3 }, // body colour → out
                 ],
-                output: 3,
+                output: 2,
                 key_map: Vec::new(),
             },
             eng(0.5, 45.0, 200.0),
@@ -1026,19 +1023,16 @@ pub fn factory() -> Vec<Preset> {
             "Base: Viola",
             InstrumentGraph {
                 components: vec![
-                    Comp::Bow { speed: 0.55, force: 1.1 },
-                    Comp::String(string(0.38, 55.0, 1.1, GUT, 1.7, 0.5, 0.11)),
+                    Comp::BowedString { speed: 1.2, force: 0.7 },
                     Comp::Body { cavity_litres: 4.5, soundhole_cm: 3.8, top_hz: 210.0, decay_s: 0.38 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 0, gain: 1.0 },
-                    Edge { from: 1, to: 3, gain: 0.8 },
-                    Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 0.3 },
+                    Edge { from: 0, to: 2, gain: 0.8 }, // dry string → out
+                    Edge { from: 0, to: 1, gain: 1.0 }, // string → body
+                    Edge { from: 1, to: 2, gain: 0.3 }, // body colour → out
                 ],
-                output: 3,
+                output: 2,
                 key_map: Vec::new(),
             },
             eng(0.5, 45.0, 200.0),
@@ -1047,19 +1041,16 @@ pub fn factory() -> Vec<Preset> {
             "Base: Cello",
             InstrumentGraph {
                 components: vec![
-                    Comp::Bow { speed: 0.5, force: 1.3 },
-                    Comp::String(string(0.69, 110.0, 1.8, GUT, 2.0, 0.5, 0.1)),
+                    Comp::BowedString { speed: 1.1, force: 0.8 },
                     Comp::Body { cavity_litres: 28.0, soundhole_cm: 6.5, top_hz: 105.0, decay_s: 0.5 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 0, gain: 1.0 },
-                    Edge { from: 1, to: 3, gain: 0.8 },
-                    Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 0.3 },
+                    Edge { from: 0, to: 2, gain: 0.8 }, // dry string → out
+                    Edge { from: 0, to: 1, gain: 1.0 }, // string → body
+                    Edge { from: 1, to: 2, gain: 0.3 }, // body colour → out
                 ],
-                output: 3,
+                output: 2,
                 key_map: Vec::new(),
             },
             eng(0.5, 50.0, 220.0),
@@ -1068,19 +1059,16 @@ pub fn factory() -> Vec<Preset> {
             "Base: Double Bass",
             InstrumentGraph {
                 components: vec![
-                    Comp::Bow { speed: 0.45, force: 1.4 },
-                    Comp::String(string(1.06, 290.0, 2.5, GUT, 2.4, 0.5, 0.1)),
+                    Comp::BowedString { speed: 1.0, force: 0.9 },
                     Comp::Body { cavity_litres: 120.0, soundhole_cm: 11.5, top_hz: 60.0, decay_s: 0.6 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 0, gain: 1.0 },
-                    Edge { from: 1, to: 3, gain: 0.8 },
-                    Edge { from: 1, to: 2, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 0.3 },
+                    Edge { from: 0, to: 2, gain: 0.8 }, // dry string → out
+                    Edge { from: 0, to: 1, gain: 1.0 }, // string → body
+                    Edge { from: 1, to: 2, gain: 0.3 }, // body colour → out
                 ],
-                output: 3,
+                output: 2,
                 key_map: Vec::new(),
             },
             eng(0.5, 50.0, 250.0),
@@ -1089,24 +1077,16 @@ pub fn factory() -> Vec<Preset> {
             "Base: Hurdy-Gurdy",
             InstrumentGraph {
                 components: vec![
-                    Comp::Bow { speed: 0.5, force: 1.0 },
-                    Comp::String(string(0.34, 50.0, 0.55, GUT, 1.5, 0.4, 0.06)),
-                    Comp::String(string(0.68, 90.0, 0.95, GUT, 2.5, 0.4, 0.03)),
+                    Comp::BowedString { speed: 1.2, force: 0.7 },
                     Comp::Body { cavity_litres: 12.0, soundhole_cm: 0.0, top_hz: 160.0, decay_s: 0.4 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 0, to: 2, gain: 1.0 },
-                    Edge { from: 1, to: 0, gain: 1.0 },
-                    Edge { from: 2, to: 0, gain: 1.0 },
-                    Edge { from: 1, to: 4, gain: 0.7 },
-                    Edge { from: 2, to: 4, gain: 0.7 },
-                    Edge { from: 1, to: 3, gain: 1.0 },
-                    Edge { from: 2, to: 3, gain: 1.0 },
-                    Edge { from: 3, to: 4, gain: 0.3 },
+                    Edge { from: 0, to: 2, gain: 0.8 }, // dry string → out
+                    Edge { from: 0, to: 1, gain: 1.0 }, // string → body
+                    Edge { from: 1, to: 2, gain: 0.3 }, // body colour → out
                 ],
-                output: 4,
+                output: 2,
                 key_map: Vec::new(),
             },
             eng(0.5, 40.0, 250.0),
@@ -1795,6 +1775,7 @@ mod tests {
         assert!(!file_stem("a/b\\c").contains(['/', '\\']));
     }
 }
+
 
 
 
