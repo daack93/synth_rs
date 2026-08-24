@@ -22,7 +22,7 @@ use super::webster_horn::WebsterHorn;
 use super::{freq_to_midi, midi_name, unbounded_slider, FtmModel, ModeBuffer};
 use crate::graph::{
     BowExciter, DriveExciter, FormantResonator, Graph, HammerExciter, ImpulseExciter,
-    ModalResonator, Node, ReedExciter, SnareWires, Sum, VoiceExciter, WaveguideBow, WaveguideReed,
+    ModalResonator, Node, ReedExciter, SnareWires, Sum, VoiceExciter, WaveguideBore, WaveguideBow, WaveguideReed,
 };
 
 const PI: f32 = std::f32::consts::PI;
@@ -83,6 +83,9 @@ pub enum Comp {
     Voice { open_quotient: f32, level: f32 },
     /// A flaring air column (Webster horn) resonator.
     Horn(WebsterHorn),
+    /// A waveguide air column (delay line + bell reflection): a wind bore that a
+    /// reed/lip exciter drives (via a feedback edge) into self-oscillation.
+    Bore { tone: f32 },
     /// A mixer / output node: the (edge-scaled) sum of its inputs.
     Mix,
 }
@@ -107,6 +110,7 @@ impl Comp {
             Comp::Bow { .. } => "Bow (exciter)",
             Comp::Voice { .. } => "Voice / glottis (exciter)",
             Comp::Horn(_) => "Air column (resonator)",
+            Comp::Bore { .. } => "Air column (waveguide)",
             Comp::Mix => "Mix / output",
         }
     }
@@ -183,6 +187,7 @@ impl Comp {
                 Box::new(DriveExciter::new(*level, 300.0 * t, 3_000.0 * t, sr))
             }
             Comp::Horn(m) => reso(&bank_of(m)),
+            Comp::Bore { tone } => Box::new(WaveguideBore::new(freq_hz, *tone, sr)),
             Comp::Reed { pressure, stiffness } => Box::new(ReedExciter::new(*pressure, *stiffness, sr)),
             Comp::ReedPipe { pressure, stiffness, tone } => {
                 Box::new(WaveguideReed::new(freq_hz, *pressure, *stiffness, *tone, sr))
@@ -261,6 +266,9 @@ impl Comp {
                 c
             }
             Comp::Horn(m) => m.params_ui(ui),
+            Comp::Bore { tone } => {
+                ui.add(unbounded_slider(tone, 0.0..=1.5, "Bell brightness")).changed()
+            }
             Comp::Reed { pressure, stiffness } => {
                 let mut c = false;
                 c |= ui.add(unbounded_slider(pressure, 0.0..=2.0, "Mouth pressure")).changed();
@@ -369,7 +377,7 @@ impl Comp {
             Comp::Horn(_) => &["length"],
             Comp::MusicalString(_) | Comp::Bell(_) | Comp::Cymbal(_) | Comp::Strike | Comp::Mix
             | Comp::Wires { .. } | Comp::Breath { .. } | Comp::Reed { .. } | Comp::Hammer { .. }
-            | Comp::Bow { .. } | Comp::Voice { .. } | Comp::ReedPipe { .. } | Comp::BowedString { .. } => &[],
+            | Comp::Bow { .. } | Comp::Voice { .. } | Comp::ReedPipe { .. } | Comp::BowedString { .. } | Comp::Bore { .. } => &[],
         }
     }
 
@@ -679,6 +687,10 @@ impl FtmModel for InstrumentGraph {
                 self.components.push(Comp::Horn(WebsterHorn::default()));
                 changed = true;
             }
+            if ui.small_button("Bore (waveguide)").clicked() {
+                self.components.push(Comp::Bore { tone: 1.0 });
+                changed = true;
+            }
             if ui.small_button("Mix").clicked() {
                 self.components.push(Comp::Mix);
                 changed = true;
@@ -976,28 +988,28 @@ mod tests {
     }
     #[test]
     fn reed_feedback_is_stable_and_sounds() {
-        use crate::models::webster_horn::{Boundary, WebsterHorn};
+        // A reed exciter driving a waveguide bore over a feedback edge — the
+        // graph-decomposed wind. The traveling wave in the bore reflects, so the
+        // reed self-oscillates into a clean, sustained tone.
         let sr = 48_000.0;
         let g = InstrumentGraph {
             components: vec![
-                Comp::Reed { pressure: 0.6, stiffness: 1.5 },
-                Comp::Horn(WebsterHorn { boundary: Boundary::Brass, r1: 0.0073, r3: 0.002, length: 0.66, depth: 18, resolution: 300, damping: 4.0, ..WebsterHorn::default() }),
+                Comp::Reed { pressure: 0.9, stiffness: 1.0 },
+                Comp::Bore { tone: 1.0 },
                 Comp::Mix,
             ],
             edges: vec![
-                Edge { from: 0, to: 1, gain: 0.12 },
-                Edge { from: 1, to: 0, gain: 0.4 },
-                Edge { from: 1, to: 2, gain: 1.0 },
+                Edge { from: 0, to: 1, gain: 1.0 }, // reed → bore
+                Edge { from: 1, to: 0, gain: 1.0 }, // bore → reed (feedback)
+                Edge { from: 1, to: 2, gain: 1.0 }, // bore → out
             ],
             output: 2,
             key_map: Vec::new(),
         };
         let mut n = g.build_graph(220.0, 1.0, sr).unwrap();
         let y: Vec<f32> = (0..48_000).map(|_| n.tick(&[])).collect();
-        // The reed's tanh nonlinearity must bound the feedback loop (a real reed clips).
         assert!(y.iter().all(|v| v.is_finite() && v.abs() < 10.0), "reed loop is stable");
         let rms = |a: &[f32]| (a.iter().map(|v| v * v).sum::<f32>() / a.len() as f32).sqrt();
-        eprintln!("REED rms(settled) = {}", rms(&y[24_000..48_000]));
-        assert!(rms(&y[24_000..48_000]) > 1e-4, "reed drives the bore (makes sound)");
+        assert!(rms(&y[24_000..48_000]) > 0.05, "reed self-oscillates into a strong tone");
     }
 }
