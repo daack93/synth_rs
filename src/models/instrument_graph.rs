@@ -18,7 +18,7 @@ use super::metal_bell::MetalBell;
 use super::musical_string::MusicalString;
 use super::pure_plate::PurePlate;
 use super::pure_string::PureString;
-use super::webster_horn::WebsterHorn;
+use super::webster_horn::{PlayMode, WebsterHorn};
 use super::{freq_to_midi, midi_name, unbounded_slider, FtmModel, ModeBuffer};
 use crate::graph::{
     BowExciter, DriveExciter, FormantResonator, Graph, HammerExciter, ImpulseExciter,
@@ -473,17 +473,53 @@ impl Comp {
             _ => {}
         }
     }
+
+    /// Configure this component to overblow-track the key (the `Overblow` key-map
+    /// strategy). On a Webster horn it switches on the overblow-tracked render:
+    /// the horn picks an overblown bore length per key so a harmonic lands on it.
+    fn set_overblow(&mut self, anchor_hz: f32, steps: u32, microtune: bool) {
+        if let Comp::Horn(m) = self {
+            m.play_mode = PlayMode::OverblowTracked;
+            m.key_tracks_pitch = true;
+            m.overblow_anchor_hz = anchor_hz;
+            m.valve_steps = steps;
+            m.overblow_microtune = microtune;
+        }
+    }
 }
 
-/// One key→parameter mapping: the played note drives `component`'s `param` as
-/// `base · (f / C4)^amount`. `amount = 0` is fixed; `+1` scales the param up with
-/// pitch; `-1` inversely (e.g. a resonator that shortens as the note rises). One
-/// key can carry several of these, across different components.
+/// How the played key drives one component — a per-component *strategy*, so
+/// different components can respond to the keyboard in different ways.
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "strategy", rename_all = "snake_case")]
+pub enum KeyMapKind {
+    /// Power law: `param = base · (f/C4)^amount`. `amount = 0` is fixed; `+1`
+    /// scales up with pitch (a drum-head tension ∝ f²); `-1` inversely (a bore
+    /// length ∝ 1/f — chromatic transpose). The everyday geometric mapping.
+    Power { param: String, amount: f32 },
+    /// Overblow + steps: choose an overblown bore length so a harmonic lands on
+    /// the key — a brass player picking a fingering and register. Drives a
+    /// Webster horn's overblow-tracked rendering. `steps` = tube-length steps.
+    Overblow { anchor_hz: f32, steps: u32, microtune: bool },
+}
+
+impl KeyMapKind {
+    /// A short human label for the strategy (for the editor's dropdown).
+    pub fn label(&self) -> &'static str {
+        match self {
+            KeyMapKind::Power { .. } => "Chromatic / power",
+            KeyMapKind::Overblow { .. } => "Overblow + steps",
+        }
+    }
+}
+
+/// One key→component binding: which component the key drives, and by what
+/// strategy. A key can carry several bindings (usually one per component).
 #[derive(Clone, Serialize, Deserialize)]
-pub struct KeyTarget {
+pub struct KeyBinding {
     pub component: usize,
-    pub param: String,
-    pub amount: f32,
+    #[serde(flatten)]
+    pub map: KeyMapKind,
 }
 
 /// A directed, gained edge: `from`'s output feeds `to`, scaled by `gain` (the
@@ -505,7 +541,7 @@ pub struct InstrumentGraph {
     /// How the played key drives component parameters. Empty ⇒ resonators just
     /// track pitch on their own (their `key_tracks_pitch`).
     #[serde(default)]
-    pub key_map: Vec<KeyTarget>,
+    pub key_map: Vec<KeyBinding>,
 }
 
 impl InstrumentGraph {
@@ -686,14 +722,21 @@ impl FtmModel for InstrumentGraph {
         if self.components.is_empty() || self.output >= self.components.len() {
             return None;
         }
-        // Apply the key map: drive each targeted (component, param) from the note.
+        // Apply the key map: each binding drives its component by its strategy.
         let mut comps = self.components.clone();
         if !self.key_map.is_empty() {
             let ratio = (freq_hz / super::REF_PITCH_HZ).max(1e-4);
-            for kt in &self.key_map {
-                if let Some(c) = comps.get_mut(kt.component) {
-                    if let Some(base) = c.get_param(&kt.param) {
-                        c.set_param(&kt.param, base * ratio.powf(kt.amount));
+            for kb in &self.key_map {
+                if let Some(c) = comps.get_mut(kb.component) {
+                    match &kb.map {
+                        KeyMapKind::Power { param, amount } => {
+                            if let Some(base) = c.get_param(param) {
+                                c.set_param(param, base * ratio.powf(*amount));
+                            }
+                        }
+                        KeyMapKind::Overblow { anchor_hz, steps, microtune } => {
+                            c.set_overblow(*anchor_hz, *steps, *microtune);
+                        }
                     }
                 }
             }
@@ -907,33 +950,66 @@ impl FtmModel for InstrumentGraph {
         let params_of: Vec<&'static [&'static str]> =
             self.components.iter().map(|c| c.mappable()).collect();
         let mut remove: Option<usize> = None;
-        for (t, kt) in self.key_map.iter_mut().enumerate() {
-            ui.push_id(("kt", t), |ui| {
+        for (t, kb) in self.key_map.iter_mut().enumerate() {
+            ui.push_id(("kb", t), |ui| {
             ui.horizontal(|ui| {
-                let c = egui::ComboBox::from_id_salt(("kt_c", t))
-                    .selected_text(labels.get(kt.component).copied().unwrap_or("?"))
+                let c = egui::ComboBox::from_id_salt(("kb_c", t))
+                    .selected_text(labels.get(kb.component).copied().unwrap_or("?"))
                     .show_ui(ui, |ui| {
                         let mut ch = false;
                         for (i, lbl) in labels.iter().enumerate() {
-                            ch |= ui.selectable_value(&mut kt.component, i, *lbl).changed();
+                            ch |= ui.selectable_value(&mut kb.component, i, *lbl).changed();
                         }
                         ch
                     });
                 changed |= c.inner.unwrap_or(false);
 
-                let opts = params_of.get(kt.component).copied().unwrap_or(&[]);
-                let p = egui::ComboBox::from_id_salt(("kt_p", t))
-                    .selected_text(if kt.param.is_empty() { "—" } else { kt.param.as_str() })
+                // Strategy: how this key drives the component.
+                let s = egui::ComboBox::from_id_salt(("kb_s", t))
+                    .selected_text(kb.map.label())
                     .show_ui(ui, |ui| {
                         let mut ch = false;
-                        for name in opts {
-                            ch |= ui.selectable_value(&mut kt.param, name.to_string(), *name).changed();
+                        if ui.selectable_label(matches!(kb.map, KeyMapKind::Power { .. }), "Chromatic / power").clicked()
+                            && !matches!(kb.map, KeyMapKind::Power { .. })
+                        {
+                            kb.map = KeyMapKind::Power { param: String::new(), amount: -1.0 };
+                            ch = true;
+                        }
+                        if ui.selectable_label(matches!(kb.map, KeyMapKind::Overblow { .. }), "Overblow + steps").clicked()
+                            && !matches!(kb.map, KeyMapKind::Overblow { .. })
+                        {
+                            kb.map = KeyMapKind::Overblow { anchor_hz: 82.41, steps: 6, microtune: true };
+                            ch = true;
                         }
                         ch
                     });
-                changed |= p.inner.unwrap_or(false);
+                changed |= s.inner.unwrap_or(false);
 
-                changed |= ui.add(unbounded_slider(&mut kt.amount, -2.0..=2.0, "amount")).changed();
+                match &mut kb.map {
+                    KeyMapKind::Power { param, amount } => {
+                        let opts = params_of.get(kb.component).copied().unwrap_or(&[]);
+                        let p = egui::ComboBox::from_id_salt(("kb_p", t))
+                            .selected_text(if param.is_empty() { "—" } else { param.as_str() })
+                            .show_ui(ui, |ui| {
+                                let mut ch = false;
+                                for name in opts {
+                                    ch |= ui.selectable_value(param, name.to_string(), *name).changed();
+                                }
+                                ch
+                            });
+                        changed |= p.inner.unwrap_or(false);
+                        changed |= ui.add(unbounded_slider(amount, -2.0..=2.0, "amount")).changed();
+                    }
+                    KeyMapKind::Overblow { anchor_hz, steps, microtune } => {
+                        changed |= ui.add(unbounded_slider(anchor_hz, 40.0..=440.0, "anchor Hz")).changed();
+                        let mut s = *steps as f32;
+                        if ui.add(unbounded_slider(&mut s, 0.0..=12.0, "steps")).changed() {
+                            *steps = s.round() as u32;
+                            changed = true;
+                        }
+                        changed |= ui.checkbox(microtune, "in-tune").changed();
+                    }
+                }
                 if ui.button("✕").clicked() {
                     remove = Some(t);
                 }
@@ -945,7 +1021,7 @@ impl FtmModel for InstrumentGraph {
             changed = true;
         }
         if ui.button("➕ Add key mapping").clicked() {
-            self.key_map.push(KeyTarget { component: 0, param: String::new(), amount: 1.0 });
+            self.key_map.push(KeyBinding { component: 0, map: KeyMapKind::Power { param: String::new(), amount: -1.0 } });
             changed = true;
         }
         changed
@@ -1084,7 +1160,7 @@ mod tests {
                 Edge { from: 1, to: 2, gain: 1.0 },
             ],
             output: 2,
-            key_map: vec![KeyTarget { component: 1, param: "decay".into(), amount: -2.0 }],
+            key_map: vec![KeyBinding { component: 1, map: KeyMapKind::Power { param: "decay".into(), amount: -2.0 } }],
         };
         // Energy in a late window (0.3–0.5 s) — a proxy for how long it rings.
         let late_energy = |note: f32| -> f32 {
@@ -1104,7 +1180,7 @@ mod tests {
         // default: [Strike(0), String(1), Body(2), Mix(3)],
         // edges (0→1),(1→2),(1→3),(2→3), output 3.
         let mut g = InstrumentGraph::default();
-        g.key_map.push(KeyTarget { component: 2, param: "top_hz".into(), amount: 1.0 });
+        g.key_map.push(KeyBinding { component: 2, map: KeyMapKind::Power { param: "top_hz".into(), amount: 1.0 } });
         g.remove_component(1); // drop the String
         assert_eq!(g.components.len(), 3, "one fewer component");
         // edges touching 1 dropped; only old (2→3) survives, shifted to (1→2).

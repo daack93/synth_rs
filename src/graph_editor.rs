@@ -14,7 +14,7 @@
 
 use eframe::egui;
 
-use crate::models::instrument_graph::{Comp, Edge, InstrumentGraph, KeyTarget};
+use crate::models::instrument_graph::{Comp, Edge, InstrumentGraph, KeyBinding};
 use crate::models::cymbal::Cymbal;
 use crate::models::drum_membrane::DrumMembrane;
 use crate::models::metal_bell::MetalBell;
@@ -146,7 +146,7 @@ fn isolate(ig: &InstrumentGraph, i: usize) -> InstrumentGraph {
         .key_map
         .iter()
         .filter(|k| k.component == i)
-        .map(|k| KeyTarget { component: 1, param: k.param.clone(), amount: k.amount })
+        .map(|k| KeyBinding { component: 1, map: k.map.clone() })
         .collect();
     InstrumentGraph {
         components: vec![Comp::Sine { level: 1.0 }, ig.components[i].clone(), Comp::Mix],
