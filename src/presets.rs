@@ -1112,18 +1112,13 @@ pub fn factory() -> Vec<Preset> {
             "Base: Clarinet",
             InstrumentGraph {
                 components: vec![
-                    // The reed forward-drives the modal Webster horn (no feedback
-                    // loop) as broadband excitation; the horn RINGS at its own
-                    // resonances — that resonant overblown-horn tone. In
-                    // OverblowTracked mode the horn picks an overblown bore length
-                    // per key so its resonance lands on the note (chromatic, in
-                    // tune within a few cents across the range). Cylindrical bore
-                    // (14.6 mm, r1 = 7.3 mm, no taper) → odd harmonics, closed
-                    // mouthpiece + open bell.
-                    // NOTE: the horn's pitch tracking is still INTERNAL here (its
-                    // play_mode), not yet the explicit per-component key-map type
-                    // Dave wants — that's the next step.
-                    Comp::Reed { pressure: 0.9, stiffness: 1.0, freq_hz: 0.0 },
+                    // COUPLED reed↔bore, kept INTERNAL to the reed (a built-in
+                    // waveguide bore) so the coupling has no graph-edge delay and
+                    // pitch stays in tune across the range. The key-map drives the
+                    // reed's pitch (its bore length); the bore's returning wave
+                    // pushes the reed and it follows — the real coupled loop. The
+                    // Webster horn is the fixed-formant bell that colours the tone.
+                    Comp::Reed { pressure: 0.9, stiffness: 1.0, freq_hz: 261.63 },
                     Comp::Horn(WebsterHorn {
                         boundary: Boundary::Brass,
                         r1: 0.0073,
@@ -1137,17 +1132,22 @@ pub fn factory() -> Vec<Preset> {
                         freq_dep_damping: -0.08,
                         visco_loss: 0.8,
                         radiation: 0.6,
-                        play_mode: HornPlay::OverblowTracked,
+                        key_tracks_pitch: false, // fixed-formant bell (no own pitch)
                         ..WebsterHorn::default()
                     }),
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.6 }, // reed excites the horn
-                    Edge { from: 1, to: 2, gain: 0.5 }, // horn → out
+                    Edge { from: 0, to: 2, gain: 0.3 }, // reed dry → out
+                    Edge { from: 0, to: 1, gain: 1.0 }, // reed → bell
+                    Edge { from: 1, to: 2, gain: 0.4 }, // bell colour → out
                 ],
                 output: 2,
-                key_map: Vec::new(),
+                // The ONLY key→pitch path: the key drives the reed's bore pitch.
+                key_map: vec![KeyBinding {
+                    component: 0,
+                    map: KeyMapKind::Power { param: "freq".into(), amount: 1.0 },
+                }],
             },
             eng(0.5, 25.0, 90.0),
         ),
@@ -1162,7 +1162,7 @@ pub fn factory() -> Vec<Preset> {
                     // its brighter, more vocal formants. Fewer modes than the
                     // clarinet: its resonances are broader.
                     Comp::Reed { pressure: 1.0, stiffness: 0.8, freq_hz: 0.0 },
-                    Comp::Bore { tone: 1.3 },
+                    Comp::Bore { tone: 1.3, length: 0.0 },
                     Comp::Horn(WebsterHorn {
                         boundary: Boundary::Brass,
                         r1: 0.005,
@@ -1199,7 +1199,7 @@ pub fn factory() -> Vec<Preset> {
             InstrumentGraph {
                 components: vec![
                     Comp::Reed { pressure: 0.85, stiffness: 1.2, freq_hz: 0.0 },
-                    Comp::Bore { tone: 0.5 },
+                    Comp::Bore { tone: 0.5, length: 0.0 },
                     Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 500.0, decay_s: 0.08 },
                     Comp::Mix,
                 ],
@@ -1220,7 +1220,7 @@ pub fn factory() -> Vec<Preset> {
             InstrumentGraph {
                 components: vec![
                     Comp::Reed { pressure: 1.0, stiffness: 0.7, freq_hz: 0.0 },
-                    Comp::Bore { tone: 1.4 },
+                    Comp::Bore { tone: 1.4, length: 0.0 },
                     Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 2500.0, decay_s: 0.04 },
                     Comp::Mix,
                 ],
@@ -1241,7 +1241,7 @@ pub fn factory() -> Vec<Preset> {
             InstrumentGraph {
                 components: vec![
                     Comp::Reed { pressure: 1.0, stiffness: 0.8, freq_hz: 0.0 },
-                    Comp::Bore { tone: 1.2 },
+                    Comp::Bore { tone: 1.2, length: 0.0 },
                     Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 1200.0, decay_s: 0.05 },
                     Comp::Mix,
                 ],
@@ -1262,7 +1262,7 @@ pub fn factory() -> Vec<Preset> {
             InstrumentGraph {
                 components: vec![
                     Comp::Reed { pressure: 0.9, stiffness: 1.0, freq_hz: 0.0 },
-                    Comp::Bore { tone: 0.7 },
+                    Comp::Bore { tone: 0.7, length: 0.0 },
                     Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 900.0, decay_s: 0.06 },
                     Comp::Mix,
                 ],
@@ -1283,7 +1283,7 @@ pub fn factory() -> Vec<Preset> {
             InstrumentGraph {
                 components: vec![
                     Comp::Reed { pressure: 0.9, stiffness: 0.6, freq_hz: 0.0 },
-                    Comp::Bore { tone: 0.5 },
+                    Comp::Bore { tone: 0.5, length: 0.0 },
                     Comp::Voice { open_quotient: 0.5, level: 0.15 },
                     Comp::Body { cavity_litres: 0.15, soundhole_cm: 2.5, top_hz: 1200.0, decay_s: 0.05 },
                     Comp::Mix,

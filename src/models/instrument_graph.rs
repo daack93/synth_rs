@@ -88,8 +88,12 @@ pub enum Comp {
     /// A flaring air column (Webster horn) resonator.
     Horn(WebsterHorn),
     /// A waveguide air column (delay line + bell reflection): a wind bore that a
-    /// reed/lip exciter drives (via a feedback edge) into self-oscillation.
-    Bore { tone: f32 },
+    /// reed/lip exciter drives (via a feedback edge) into self-oscillation. Its
+    /// pitch comes from `length` (metres, `f = c/2L`) when `length > 0` — the
+    /// key-map drives that length, and the reed *follows* the bore (the coupled
+    /// reed↔bore loop that makes pitch track length). `length = 0` falls back to
+    /// tracking the played key directly.
+    Bore { tone: f32, length: f32 },
     /// A **traveling-wave flaring horn** — the geometry (`r(x) = r1 + r2·x +
     /// r3·x²`) built as segmented Kelly–Lochbaum waveguide, so a reed drives it
     /// into oscillation and its pitch tracks the bore `length` (a cylinder →
@@ -204,7 +208,11 @@ impl Comp {
                 Box::new(DriveExciter::new(*level, 300.0 * t, 3_000.0 * t, sr))
             }
             Comp::Horn(m) => reso(&bank_of(m)),
-            Comp::Bore { tone } => Box::new(WaveguideBore::new(freq_hz, *tone, sr)),
+            Comp::Bore { tone, length } => {
+                // Pitch from the (key-mapped) bore length when set; else the key.
+                let f = if *length > 0.0 { C_AIR / (2.0 * length.max(0.02)) } else { freq_hz };
+                Box::new(WaveguideBore::new(f, *tone, sr))
+            }
             Comp::WaveguideHorn { r1, r2, r3, length, segments, tone } => {
                 Box::new(WaveguideHorn::new(*r1, *r2, *r3, *length, *segments, *tone, sr))
             }
@@ -289,8 +297,13 @@ impl Comp {
                 c
             }
             Comp::Horn(m) => m.params_ui(ui),
-            Comp::Bore { tone } => {
-                ui.add(unbounded_slider(tone, 0.0..=1.5, "Bell brightness")).changed()
+            Comp::Bore { tone, length } => {
+                let mut c = ui.add(unbounded_slider(tone, 0.0..=1.5, "Bell brightness")).changed();
+                c |= ui
+                    .add(unbounded_slider(length, 0.0..=2.0, "Bore length (m, 0 = track key)"))
+                    .on_hover_text("f = c/2L. Usually key-mapped so the reed follows the bore.")
+                    .changed();
+                c
             }
             Comp::WaveguideHorn { r1, r2, r3, length, segments, tone } => {
                 let mut c = false;
@@ -426,12 +439,14 @@ impl Comp {
             Comp::Horn(_) => &["length"],
             // The traveling-wave bore whose length the key drives to set pitch.
             Comp::WaveguideHorn { .. } => &["length"],
+            // The waveguide bore's length — the coupled reed↔bore pitch control.
+            Comp::Bore { .. } => &["length"],
             // The reed's fixed pitch — so a key can drive embouchure/pitch on a
             // self-contained mouthpiece (`freq_hz > 0`).
             Comp::Reed { .. } => &["freq"],
             Comp::MusicalString(_) | Comp::Bell(_) | Comp::Cymbal(_) | Comp::Strike | Comp::Mix
             | Comp::Wires { .. } | Comp::Breath { .. } | Comp::Hammer { .. }
-            | Comp::Bow { .. } | Comp::Voice { .. } | Comp::ReedPipe { .. } | Comp::BowedString { .. } | Comp::Bore { .. }
+            | Comp::Bow { .. } | Comp::Voice { .. } | Comp::ReedPipe { .. } | Comp::BowedString { .. }
             | Comp::Sine { .. } => &[],
         }
     }
@@ -450,6 +465,7 @@ impl Comp {
             (Comp::Body { decay_s, .. }, "decay") => Some(*decay_s),
             (Comp::Horn(m), "length") => Some(m.length),
             (Comp::WaveguideHorn { length, .. }, "length") => Some(*length),
+            (Comp::Bore { length, .. }, "length") => Some(*length),
             (Comp::Reed { freq_hz, .. }, "freq") => Some(*freq_hz),
             _ => None,
         }
@@ -469,6 +485,7 @@ impl Comp {
             (Comp::Body { decay_s, .. }, "decay") => *decay_s = v,
             (Comp::Horn(m), "length") => m.length = v,
             (Comp::WaveguideHorn { length, .. }, "length") => *length = v,
+            (Comp::Bore { length, .. }, "length") => *length = v,
             (Comp::Reed { freq_hz, .. }, "freq") => *freq_hz = v,
             _ => {}
         }
@@ -876,7 +893,7 @@ impl FtmModel for InstrumentGraph {
                 changed = true;
             }
             if ui.small_button("Bore (waveguide)").clicked() {
-                self.components.push(Comp::Bore { tone: 1.0 });
+                self.components.push(Comp::Bore { tone: 1.0, length: 0.0 });
                 changed = true;
             }
             if ui.small_button("Mix").clicked() {
@@ -1270,7 +1287,7 @@ mod tests {
         let g = InstrumentGraph {
             components: vec![
                 Comp::Reed { pressure: 0.9, stiffness: 1.0, freq_hz: 0.0 },
-                Comp::Bore { tone: 1.0 },
+                Comp::Bore { tone: 1.0, length: 0.0 },
                 Comp::Mix,
             ],
             edges: vec![
@@ -1296,7 +1313,7 @@ mod tests {
         let g = InstrumentGraph {
             components: vec![
                 Comp::Reed { pressure: 0.9, stiffness: 1.0, freq_hz: 0.0 },
-                Comp::Bore { tone: 1.0 },
+                Comp::Bore { tone: 1.0, length: 0.0 },
                 Comp::Mix,
             ],
             edges: vec![
