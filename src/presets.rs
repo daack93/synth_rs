@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::models::basic_wave::{BasicWave, Waveform};
 use crate::models::cymbal::Cymbal;
 use crate::models::drum_membrane::DrumMembrane;
-use crate::models::instrument_graph::{Comp, Edge, InstrumentGraph};
+use crate::models::instrument_graph::{Comp, Edge, InstrumentGraph, KeyTarget};
 use crate::models::metal_bell::MetalBell;
 use crate::models::musical_string::MusicalString;
 use crate::models::pure_plate::PurePlate;
@@ -1125,7 +1125,7 @@ pub fn factory() -> Vec<Preset> {
                     Edge { from: 2, to: 3, gain: 0.3 }, // bell colour → out
                 ],
                 output: 3,
-                key_map: Vec::new(),
+                key_map: vec![KeyTarget { component: 2, param: "top_hz".into(), amount: 1.0 }],
             },
             eng(0.5, 25.0, 90.0),
         ),
@@ -1146,7 +1146,7 @@ pub fn factory() -> Vec<Preset> {
                     Edge { from: 2, to: 3, gain: 0.3 }, // bell colour → out
                 ],
                 output: 3,
-                key_map: Vec::new(),
+                key_map: vec![KeyTarget { component: 2, param: "top_hz".into(), amount: 1.0 }],
             },
             eng(0.55, 25.0, 90.0),
         ),
@@ -1167,7 +1167,7 @@ pub fn factory() -> Vec<Preset> {
                     Edge { from: 2, to: 3, gain: 0.3 }, // bell colour → out
                 ],
                 output: 3,
-                key_map: Vec::new(),
+                key_map: vec![KeyTarget { component: 2, param: "top_hz".into(), amount: 1.0 }],
             },
             eng(0.5, 25.0, 110.0),
         ),
@@ -1188,7 +1188,7 @@ pub fn factory() -> Vec<Preset> {
                     Edge { from: 2, to: 3, gain: 0.3 }, // bell colour → out
                 ],
                 output: 3,
-                key_map: Vec::new(),
+                key_map: vec![KeyTarget { component: 2, param: "top_hz".into(), amount: 1.0 }],
             },
             eng(0.55, 25.0, 90.0),
         ),
@@ -1209,7 +1209,7 @@ pub fn factory() -> Vec<Preset> {
                     Edge { from: 2, to: 3, gain: 0.3 }, // bell colour → out
                 ],
                 output: 3,
-                key_map: Vec::new(),
+                key_map: vec![KeyTarget { component: 2, param: "top_hz".into(), amount: 1.0 }],
             },
             eng(0.55, 25.0, 90.0),
         ),
@@ -1230,7 +1230,7 @@ pub fn factory() -> Vec<Preset> {
                     Edge { from: 2, to: 3, gain: 0.3 }, // bell colour → out
                 ],
                 output: 3,
-                key_map: Vec::new(),
+                key_map: vec![KeyTarget { component: 2, param: "top_hz".into(), amount: 1.0 }],
             },
             eng(0.5, 30.0, 150.0),
         ),
@@ -1253,7 +1253,7 @@ pub fn factory() -> Vec<Preset> {
                     Edge { from: 3, to: 4, gain: 0.3 }, // tract colour → out
                 ],
                 output: 4,
-                key_map: Vec::new(),
+                key_map: vec![KeyTarget { component: 3, param: "top_hz".into(), amount: 1.0 }],
             },
             eng(0.5, 30.0, 400.0),
         ),
@@ -1811,6 +1811,7 @@ mod tests {
         assert!(!file_stem("a/b\\c").contains(['/', '\\']));
     }
 }
+
 
 
 
