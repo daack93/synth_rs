@@ -32,6 +32,12 @@ const C_AIR: f32 = 343.0;
 /// ln(1000): a decay rate of `ln(1000)/T` reaches −60 dB at `t = T` seconds.
 const LN_1000: f32 = 6.907_755;
 
+/// Default reed-bore overblow ratio (a cylinder's twelfth) for presets predating
+/// the configurable register break.
+fn default_overblow() -> f32 {
+    3.0
+}
+
 /// One node in an instrument graph. Each variant is a physics component with
 /// its own inherent parameters (kept as their natural types).
 #[derive(Clone, Serialize, Deserialize)]
@@ -70,10 +76,24 @@ pub enum Comp {
     /// A **coupled reed + bore** — the physically-correct woodwind voice. The reed
     /// valve and a waveguide bore are one tightly-coupled loop solved *implicitly*
     /// each sample (no loop delay), so the pitch locks to the bore `length`
-    /// (`f ≈ c/2L`) in tune. A register hole a third down the bore lets it overblow
-    /// a 12th: `register` 0 = closed (chalumeau), ~0.3 = open (clarion). Self-
-    /// contained; drive a downstream Webster horn for bell colour. Key-map `length`.
-    ReedBore { pressure: f32, stiffness: f32, length: f32, tone: f32, register: f32 },
+    /// (`f ≈ c/2L`) in tune. A register vent lets it overblow: the `overblow`
+    /// ratio + `conical` flag define the register break per instrument — a
+    /// cylinder (`conical:false`, `overblow:3`) overblows a twelfth on odd
+    /// harmonics (clarinet), a cone (`conical:true`, `overblow:2`) overblows the
+    /// octave on the full harmonic series (saxophone). `register` 0 = closed
+    /// (low), open = overblown. Self-contained; drive a downstream Webster horn
+    /// for bell colour. Key-map `length`.
+    ReedBore {
+        pressure: f32,
+        stiffness: f32,
+        length: f32,
+        tone: f32,
+        register: f32,
+        #[serde(default = "default_overblow")]
+        overblow: f32,
+        #[serde(default)]
+        conical: bool,
+    },
     /// A digital-waveguide reed pipe — a self-contained wind voice (bore delay +
     /// bell + reed) that self-oscillates into a clean reed tone. `pressure` =
     /// breath, `stiffness` = reed hardness, `tone` = bell brightness.
@@ -228,8 +248,10 @@ impl Comp {
             Comp::Reed { pressure, stiffness, freq_hz } => {
                 Box::new(ReedExciter::new(*pressure, *stiffness, *freq_hz, sr))
             }
-            Comp::ReedBore { pressure, stiffness, length, tone, register } => {
-                Box::new(CoupledReed::new(*pressure, *stiffness, *length, *tone, *register, sr))
+            Comp::ReedBore { pressure, stiffness, length, tone, register, overblow, conical } => {
+                Box::new(CoupledReed::new(
+                    *pressure, *stiffness, *length, *tone, *register, *overblow, *conical, sr,
+                ))
             }
             Comp::ReedPipe { pressure, stiffness, tone } => {
                 Box::new(WaveguideReed::new(freq_hz, *pressure, *stiffness, *tone, sr))
@@ -346,7 +368,7 @@ impl Comp {
                     .changed();
                 c
             }
-            Comp::ReedBore { pressure, stiffness, length, tone, register } => {
+            Comp::ReedBore { pressure, stiffness, length, tone, register, overblow, conical } => {
                 let mut c = false;
                 c |= ui.add(unbounded_slider(pressure, 0.1..=2.0, "Mouth pressure")).changed();
                 c |= ui.add(unbounded_slider(stiffness, 0.0..=3.0, "Reed stiffness")).changed();
@@ -356,7 +378,15 @@ impl Comp {
                     .changed();
                 c |= ui
                     .add(unbounded_slider(register, 0.0..=0.6, "Register key"))
-                    .on_hover_text("0 = closed (low register); ~0.3 opens the register hole → overblows a 12th.")
+                    .on_hover_text("0 = closed (low register); open lifts the register vent → overblows.")
+                    .changed();
+                c |= ui
+                    .add(unbounded_slider(overblow, 2.0..=3.0, "Overblow ratio"))
+                    .on_hover_text("Register break: 3 = a cylinder's twelfth (clarinet), 2 = a cone's octave (sax).")
+                    .changed();
+                c |= ui
+                    .checkbox(conical, "Conical bore")
+                    .on_hover_text("Cone: full harmonic series, octave overblow (sax/oboe). Off = cylinder: odd harmonics, twelfth (clarinet).")
                     .changed();
                 c |= ui.add(unbounded_slider(tone, 0.0..=1.5, "Bell brightness")).changed();
                 c
@@ -536,24 +566,26 @@ impl Comp {
                 m.valve_steps = steps;
                 m.overblow_microtune = microtune;
             }
-            // A coupled reed bore does the clarinet register break: below the
-            // break (3× the lowest note) it plays the fundamental (chalumeau, hole
-            // closed); at/above it opens the register hole and plays the 3rd
-            // harmonic (clarion) — the *same* bore-length range, up a twelfth. So
-            // the bore only spans ~a twelfth of realistic lengths across the range.
-            Comp::ReedBore { length, register, pressure, .. } => {
+            // A coupled reed bore does the register break, generalised by the
+            // component's own `overblow` ratio: below the break (ratio× the lowest
+            // note) it plays the fundamental (low register, vent closed); at/above
+            // it lifts the register vent and plays the ratio-th harmonic (a twelfth
+            // up for a cylinder/clarinet at ratio 3, an octave for a cone/sax at
+            // ratio 2) over the *same* bore-length range.
+            Comp::ReedBore { length, register, pressure, overblow, .. } => {
                 let f = freq_hz.max(1.0);
-                let f_break = 3.0 * anchor_hz.max(1.0);
+                let ratio = overblow.max(1.5);
+                let f_break = ratio * anchor_hz.max(1.0);
                 // Position within the register (ratio above its lowest note) and
                 // the per-register micro-tune gain — the bore flattens as you play
-                // up, more so in the overblown clarion than the chalumeau.
+                // up, more so in the overblown upper register than the low one.
                 let (rel, gain) = if f < f_break {
                     *register = 0.0;
                     *length = C_AIR / (2.0 * f);
                     (f / anchor_hz.max(1.0), 0.05)
                 } else {
                     *register = 0.3;
-                    *length = C_AIR / (2.0 * (f / 3.0)); // bore fundamental = f/3
+                    *length = C_AIR / (2.0 * (f / ratio)); // bore fundamental = f/ratio
                     (f / f_break, 0.20)
                 };
                 // Pressure micro-tune, the way a player lips each note in tune:

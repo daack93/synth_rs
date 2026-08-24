@@ -789,7 +789,10 @@ pub struct CoupledReed {
     bell: f32,
     bell_a: f32,
     refl: f32,
-    register: f32, // register key: 0 = closed (fundamental), ~0.3 = open (overblow 12th)
+    conical: bool, // cone (all harmonics, octave overblow) vs cylinder (odd, 12th)
+    cone: f32,     // conical throat integrator state (spherical-wave spreading)
+    cone_a: f32,   // conical throat low-pass coefficient (even-harmonic shaping)
+    register: f32, // register key: 0 = closed (fundamental), open = overblow
     // drive
     pressure: f32,
     env: f32,
@@ -801,17 +804,39 @@ pub struct CoupledReed {
 
 impl CoupledReed {
     /// `length_m` = bore length (metres); pitch ≈ c/2L (register closed).
-    /// `register` 0 = closed (chalumeau/fundamental), ~0.3 = open (overblow a 12th,
-    /// the clarion register). `stiffness` shapes the reed's beating, `tone` the bell.
-    pub fn new(pressure: f32, stiffness: f32, length_m: f32, tone: f32, register: f32, sr: f32) -> Self {
+    /// `register` 0 = closed (low register), open = overblow. `overblow` is the
+    /// register-break ratio: 3 = a cylinder's twelfth (clarinet, odd harmonics),
+    /// 2 = a cone's octave (saxophone, full harmonic series). `conical` picks the
+    /// bore shape — a cone radiates ALL harmonics and overblows the octave, a
+    /// cylinder only the odd harmonics and overblows the twelfth. `stiffness`
+    /// shapes the reed's beating, `tone` the bell.
+    pub fn new(
+        pressure: f32,
+        stiffness: f32,
+        length_m: f32,
+        tone: f32,
+        register: f32,
+        overblow: f32,
+        conical: bool,
+        sr: f32,
+    ) -> Self {
         let c = 343.0_f32;
+        // The register vent that forces the `overblow`-th harmonic sits ~1/overblow
+        // of the way down the bore (a node of that harmonic): 1/3 for the clarinet's
+        // twelfth, 1/2 for the sax's octave.
+        let reg_pos = (1.0 / overblow.max(1.5)).clamp(0.1, 0.9);
         // One-way propagation over the whole bore (round-trip = 2·dtot), split at
-        // the register hole a third of the way down.
+        // the register hole.
         let dtot = (length_m.max(0.02) / (2.0 * c) * sr - CR_COMP).max(4.0);
-        let d1 = (dtot * REGISTER_POS).max(2.0);
-        let d2 = (dtot * (1.0 - REGISTER_POS)).max(2.0);
+        let d1 = (dtot * reg_pos).max(2.0);
+        let d2 = (dtot * (1.0 - reg_pos)).max(2.0);
         let wn = TAU * 1500.0 / sr;
         let beta = (0.65 + 0.14 * stiffness.clamp(0.0, 2.0)).clamp(0.7, 0.9);
+        // Cone throat filter: a one-pole low-pass modelling the apex's spherical
+        // spreading. A near-lossless non-inverting bell reflection turns the
+        // odd-only cylinder into the cone's full harmonic series (octave overblow);
+        // this throat low-pass shapes the even harmonics' balance.
+        let cone_a = 0.75_f32;
         CoupledReed {
             x: 0.0,
             v: 0.0,
@@ -831,6 +856,9 @@ impl CoupledReed {
             bell: 0.0,
             bell_a: (0.15 + 0.55 * tone.clamp(0.0, 1.5) / 1.5).clamp(0.05, 0.9),
             refl: -0.97,
+            conical,
+            cone: 0.0,
+            cone_a,
             register: register.clamp(0.0, 0.9),
             pressure,
             env: 0.0,
@@ -904,9 +932,19 @@ impl Node for CoupledReed {
         let f2_in = fo1 - w; // into segment 2 (toward the bell)
         let b1_in = bo2 - w; // into segment 1 (back toward the throat)
 
-        // Bell (end of segment 2): low-pass + invert (the open-end reflection).
+        // Bell (end of segment 2): low-pass, then reflect. A cylinder inverts at
+        // the open end (odd harmonics only → overblows a 12th). A cone's flare
+        // makes the standing-wave series complete (all harmonics → overblows the
+        // octave); model the flare's spherical spreading as a non-inverting
+        // reflection plus a leaky throat integrator that feeds in the even
+        // harmonics the inverting cylinder would cancel.
         self.bell += self.bell_a * (fo2 - self.bell);
-        let b2_in = self.refl * self.bell;
+        let b2_in = if self.conical {
+            self.cone += self.cone_a * (self.bell - self.cone);
+            0.97 * self.cone
+        } else {
+            self.refl * self.bell
+        };
 
         self.f1.write(p_minus);
         self.f2.write(f2_in);
@@ -1714,7 +1752,7 @@ mod new_exciter_tests {
         };
         for &f0 in &[147.0f32, 220.0, 330.0, 494.0] {
             let l = c / (2.0 * f0);
-            let mut r = CoupledReed::new(0.9, 1.0, l, 1.0, 0.0, sr);
+            let mut r = CoupledReed::new(0.9, 1.0, l, 1.0, 0.0, 3.0, false, sr);
             let y: Vec<f32> = (0..30_000).map(|_| r.tick(&[])).collect();
             assert!(y.iter().all(|v| v.is_finite() && v.abs() < 20.0), "coupled reed stable at {f0}");
             let tail = &y[20_000..];
@@ -1739,14 +1777,53 @@ mod new_exciter_tests {
         let c = 343.0f32;
         for &f0 in &[147.0f32, 220.0, 294.0] {
             let l = c / (2.0 * f0);
-            let mut closed = CoupledReed::new(0.9, 1.0, l, 1.0, 0.0, sr);
+            let mut closed = CoupledReed::new(0.9, 1.0, l, 1.0, 0.0, 3.0, false, sr);
             let yc: Vec<f32> = (0..28_000).map(|_| closed.tick(&[])).collect();
             let fc = acf_freq(&yc[20_000..], sr, f0);
-            let mut open = CoupledReed::new(0.9, 1.0, l, 1.0, 0.3, sr);
+            let mut open = CoupledReed::new(0.9, 1.0, l, 1.0, 0.3, 3.0, false, sr);
             let yo: Vec<f32> = (0..28_000).map(|_| open.tick(&[])).collect();
             let fo = acf_freq(&yo[20_000..], sr, f0 * 3.0);
             assert!((fc / f0 - 1.0).abs() < 0.06, "closed plays the fundamental at {f0} (got {fc})");
             assert!((fo / fc / 3.0 - 1.0).abs() < 0.1, "register-open overblows a 12th: {fc} → {fo}");
+        }
+    }
+
+    #[test]
+    fn conical_reed_bore_overblows_an_octave_with_full_harmonics() {
+        // A conical bore (sax/oboe) differs from the clarinet cylinder two ways:
+        // it radiates the FULL harmonic series (a strong even 2nd harmonic, not
+        // just odds), and its register vent at the half-way node overblows the
+        // OCTAVE (×2), not the twelfth.
+        let sr = 48_000.0;
+        let c = 343.0f32;
+        let goertzel = |y: &[f32], f: f32| -> f32 {
+            let w = TAU * f / sr;
+            let cs = w.cos();
+            let (mut q1, mut q2) = (0.0f32, 0.0f32);
+            for &x in y {
+                let q0 = 2.0 * cs * q1 - q2 + x;
+                q2 = q1;
+                q1 = q0;
+            }
+            (q1 * q1 + q2 * q2 - 2.0 * cs * q1 * q2).max(0.0).sqrt()
+        };
+        for &f0 in &[196.0f32, 262.0, 330.0] {
+            let l = c / (2.0 * f0);
+            let mut closed = CoupledReed::new(1.0, 1.0, l, 1.0, 0.0, 2.0, true, sr);
+            let yc: Vec<f32> = (0..40_000).map(|_| closed.tick(&[])).collect();
+            let t = &yc[28_000..];
+            let fc = acf_freq(t, sr, f0);
+            // The cone's fundamental sits a bit flat before calibration; allow it.
+            assert!((fc / f0 - 1.0).abs() < 0.08, "cone plays ~c/2L at {f0} (got {fc})");
+            // A cone has a strong even 2nd harmonic — the sax brightness a
+            // cylinder cancels. Require it to be a substantial fraction of h1.
+            let (h1, h2) = (goertzel(t, fc), goertzel(t, fc * 2.0));
+            assert!(h2 > 0.2 * h1, "cone radiates the 2nd harmonic (h2/h1 = {:.2})", h2 / h1);
+
+            let mut open = CoupledReed::new(1.0, 1.0, l, 1.0, 0.3, 2.0, true, sr);
+            let yo: Vec<f32> = (0..40_000).map(|_| open.tick(&[])).collect();
+            let fo = acf_freq(&yo[28_000..], sr, f0 * 2.0);
+            assert!((fo / fc / 2.0 - 1.0).abs() < 0.1, "register-open overblows an octave: {fc} → {fo}");
         }
     }
 
