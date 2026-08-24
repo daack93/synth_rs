@@ -1112,9 +1112,28 @@ pub fn factory() -> Vec<Preset> {
             "Base: Clarinet",
             InstrumentGraph {
                 components: vec![
+                    // ODE reed valve → cylindrical bore (odd harmonics, overblows
+                    // a 12th) → the horn as a fixed-formant bell that colours the
+                    // buzz. Bell geometry: 14.6 mm cylindrical bore (r1 = 7.3 mm,
+                    // no taper), ~0.66 m, closed mouthpiece + open bell.
                     Comp::Reed { pressure: 0.9, stiffness: 1.0 },
                     Comp::Bore { tone: 1.0 },
-                    Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 1500.0, decay_s: 0.05 },
+                    Comp::Horn(WebsterHorn {
+                        boundary: Boundary::Brass,
+                        r1: 0.0073,
+                        r2: 0.0,
+                        r3: 0.002,
+                        length: 0.66,
+                        blow_pos: 0.0,
+                        depth: 18,
+                        resolution: 300,
+                        damping: 4.0,
+                        freq_dep_damping: -0.08,
+                        visco_loss: 0.8,
+                        radiation: 0.6,
+                        play_mode: HornPlay::Overblow,
+                        ..WebsterHorn::default()
+                    }),
                     Comp::Mix,
                 ],
                 edges: vec![
@@ -1122,10 +1141,10 @@ pub fn factory() -> Vec<Preset> {
                     Edge { from: 1, to: 0, gain: 1.0 }, // bore → reed (feedback)
                     Edge { from: 1, to: 3, gain: 0.7 }, // bore → out (dry)
                     Edge { from: 1, to: 2, gain: 1.0 }, // bore → bell
-                    Edge { from: 2, to: 3, gain: 0.3 }, // bell colour → out
+                    Edge { from: 2, to: 3, gain: 0.4 }, // bell colour → out
                 ],
                 output: 3,
-                key_map: vec![KeyTarget { component: 2, param: "top_hz".into(), amount: 1.0 }],
+                key_map: Vec::new(),
             },
             eng(0.5, 25.0, 90.0),
         ),
@@ -1133,9 +1152,31 @@ pub fn factory() -> Vec<Preset> {
             "Base: Alto Sax",
             InstrumentGraph {
                 components: vec![
+                    // ODE reed valve → bore → the horn as a fixed-formant bell.
+                    // Bell geometry: a strongly flaring cone (r2 taper) ~1.0 m —
+                    // the conical flare fills the harmonic series back in (a sax
+                    // overblows the octave, unlike the clarinet's 12th) and gives
+                    // its brighter, more vocal formants. Fewer modes than the
+                    // clarinet: its resonances are broader.
                     Comp::Reed { pressure: 1.0, stiffness: 0.8 },
                     Comp::Bore { tone: 1.3 },
-                    Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 1800.0, decay_s: 0.05 },
+                    Comp::Horn(WebsterHorn {
+                        boundary: Boundary::Brass,
+                        r1: 0.005,
+                        r2: 0.030,
+                        r3: 0.002,
+                        length: 1.0,
+                        blow_pos: 0.0,
+                        depth: 12,
+                        resolution: 300,
+                        damping: 5.0,
+                        freq_dep_damping: -0.08,
+                        visco_loss: 1.0,
+                        radiation: 1.0,
+                        wavefront: Wavefront::Spherical,
+                        play_mode: HornPlay::Overblow,
+                        ..WebsterHorn::default()
+                    }),
                     Comp::Mix,
                 ],
                 edges: vec![
@@ -1143,10 +1184,10 @@ pub fn factory() -> Vec<Preset> {
                     Edge { from: 1, to: 0, gain: 1.0 }, // bore → reed (feedback)
                     Edge { from: 1, to: 3, gain: 0.7 }, // bore → out (dry)
                     Edge { from: 1, to: 2, gain: 1.0 }, // bore → bell
-                    Edge { from: 2, to: 3, gain: 0.3 }, // bell colour → out
+                    Edge { from: 2, to: 3, gain: 0.4 }, // bell colour → out
                 ],
                 output: 3,
-                key_map: vec![KeyTarget { component: 2, param: "top_hz".into(), amount: 1.0 }],
+                key_map: Vec::new(),
             },
             eng(0.55, 25.0, 90.0),
         ),
