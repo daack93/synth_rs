@@ -614,8 +614,9 @@ pub enum KeyMapKind {
     /// Webster horn's overblow-tracked rendering. `steps` = tube-length steps.
     Overblow { anchor_hz: f32, steps: u32, microtune: bool },
     /// Like `Overblow`, but instead of a linear pressure micro-tune it carries a
-    /// **calibrated** per-MIDI-note mouth-pressure table (solved once so every
-    /// note lands exactly in tune). `table[note]` is the pressure multiplier.
+    /// **calibrated** per-MIDI-note bore-length table (solved once so every note
+    /// lands exactly in tune). `table[note]` is the bore-length multiplier —
+    /// length has direct pitch authority for cones and cylinders alike.
     OverblowTuned { anchor_hz: f32, table: Vec<f32> },
 }
 
