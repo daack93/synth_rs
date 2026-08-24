@@ -479,13 +479,58 @@ impl InstrumentGraph {
     /// Auto-lay-out the nodes left-to-right by longest path from an exciter, so
     /// signal flows left→right. Returns one (x, y) per component. The editor
     /// keeps these in UI state and lets the user drag them.
+    ///
+    /// Feedback edges (a bore feeding its reed back, coupled membranes) would make
+    /// a naive longest-path count diverge — the columns grow every pass and the
+    /// nodes fly off the canvas. So we first find the back-edges with a DFS and
+    /// layer using only the forward edges (a DAG), which stays bounded.
     pub fn auto_layout(&self) -> Vec<[f32; 2]> {
         let n = self.components.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        // Outgoing adjacency (target node per outgoing edge of each node).
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for e in &self.edges {
+            if e.from < n && e.to < n {
+                adj[e.from].push(e.to);
+            }
+        }
+        // DFS marking back-edges: an edge to a node still on the DFS stack closes
+        // a cycle. (state: 0 = unvisited, 1 = on stack, 2 = done.)
+        let mut state = vec![0u8; n];
+        let mut is_back: Vec<Vec<bool>> = adj.iter().map(|a| vec![false; a.len()]).collect();
+        for s in 0..n {
+            if state[s] != 0 {
+                continue;
+            }
+            state[s] = 1;
+            let mut stack: Vec<(usize, usize)> = vec![(s, 0)];
+            while let Some((u, ci)) = stack.pop() {
+                if ci < adj[u].len() {
+                    stack.push((u, ci + 1));
+                    let v = adj[u][ci];
+                    match state[v] {
+                        1 => is_back[u][ci] = true, // v is an ancestor → back edge
+                        0 => {
+                            state[v] = 1;
+                            stack.push((v, 0));
+                        }
+                        _ => {}
+                    }
+                } else {
+                    state[u] = 2;
+                }
+            }
+        }
+        // Longest-path columns over the forward edges only (now a DAG → bounded).
         let mut col = vec![0usize; n];
         for _ in 0..n {
-            for e in &self.edges {
-                if e.from < n && e.to < n {
-                    col[e.to] = col[e.to].max(col[e.from] + 1);
+            for u in 0..n {
+                for (k, &v) in adj[u].iter().enumerate() {
+                    if !is_back[u][k] {
+                        col[v] = col[v].max(col[u] + 1);
+                    }
                 }
             }
         }
@@ -1117,5 +1162,35 @@ mod tests {
         assert!(y.iter().all(|v| v.is_finite() && v.abs() < 10.0), "reed loop is stable");
         let rms = |a: &[f32]| (a.iter().map(|v| v * v).sum::<f32>() / a.len() as f32).sqrt();
         assert!(rms(&y[24_000..48_000]) > 0.05, "reed self-oscillates into a strong tone");
+    }
+
+    #[test]
+    fn auto_layout_stays_on_canvas_with_feedback_loops() {
+        // A feedback edge (bore → reed) must not make the longest-path layout
+        // diverge and fling every node off the right of the canvas (the blank-
+        // editor bug). Columns are bounded by the node count.
+        let g = InstrumentGraph {
+            components: vec![
+                Comp::Reed { pressure: 0.9, stiffness: 1.0 },
+                Comp::Bore { tone: 1.0 },
+                Comp::Mix,
+            ],
+            edges: vec![
+                Edge { from: 0, to: 1, gain: 1.0 }, // reed → bore
+                Edge { from: 1, to: 0, gain: 1.0 }, // bore → reed (feedback)
+                Edge { from: 1, to: 2, gain: 1.0 }, // bore → out
+            ],
+            output: 2,
+            key_map: Vec::new(),
+        };
+        let layout = g.auto_layout();
+        assert_eq!(layout.len(), 3);
+        // Every node's column index stays < n, so x < 40 + n·175 — on-canvas.
+        let max_x = 40.0 + g.components.len() as f32 * 175.0;
+        for (i, p) in layout.iter().enumerate() {
+            assert!(p[0] >= 0.0 && p[0] < max_x, "node {i} x={} off canvas", p[0]);
+        }
+        // Forward flow is preserved: the reed sits left of its bore.
+        assert!(layout[0][0] < layout[1][0], "reed is left of the bore");
     }
 }
