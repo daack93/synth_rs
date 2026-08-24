@@ -192,7 +192,10 @@ fn draw_editor(ui: &mut egui::Ui, ig: &mut InstrumentGraph, ge: &mut GeState) ->
     // Give the canvas a bit over half the height and leave the rest for the
     // component-parameter panel, so its controls need far less scrolling.
     let avail = ui.available_size_before_wrap();
-    let canvas_h = (avail.y * 0.55).clamp(200.0, avail.y - 200.0);
+    // Leave room for the params panel below, but never let the upper bound fall
+    // under the lower one (short windows) — clamp(min, max) panics if max < min.
+    let canvas_hi = (avail.y - 200.0).max(200.0);
+    let canvas_h = (avail.y * 0.55).clamp(200.0, canvas_hi);
     let (rect, resp) =
         ui.allocate_exact_size(egui::vec2(avail.x.max(400.0), canvas_h), egui::Sense::click_and_drag());
     let painter = ui.painter_at(rect);
