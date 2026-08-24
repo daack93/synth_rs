@@ -1112,13 +1112,19 @@ pub fn factory() -> Vec<Preset> {
             "Base: Clarinet",
             InstrumentGraph {
                 components: vec![
-                    Comp::ReedPipe { pressure: 0.9, stiffness: 1.0, tone: 1.0 },
+                    Comp::Reed { pressure: 0.9, stiffness: 1.0 },
+                    Comp::Bore { tone: 1.0 },
+                    Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 1500.0, decay_s: 0.05 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 0, to: 1, gain: 1.0 }, // reed → bore
+                    Edge { from: 1, to: 0, gain: 1.0 }, // bore → reed (feedback)
+                    Edge { from: 1, to: 3, gain: 0.7 }, // bore → out (dry)
+                    Edge { from: 1, to: 2, gain: 1.0 }, // bore → bell
+                    Edge { from: 2, to: 3, gain: 0.3 }, // bell colour → out
                 ],
-                output: 1,
+                output: 3,
                 key_map: Vec::new(),
             },
             eng(0.5, 25.0, 90.0),
@@ -1127,13 +1133,19 @@ pub fn factory() -> Vec<Preset> {
             "Base: Alto Sax",
             InstrumentGraph {
                 components: vec![
-                    Comp::ReedPipe { pressure: 1.0, stiffness: 0.8, tone: 1.3 },
+                    Comp::Reed { pressure: 1.0, stiffness: 0.8 },
+                    Comp::Bore { tone: 1.3 },
+                    Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 1800.0, decay_s: 0.05 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 0, to: 1, gain: 1.0 }, // reed → bore
+                    Edge { from: 1, to: 0, gain: 1.0 }, // bore → reed (feedback)
+                    Edge { from: 1, to: 3, gain: 0.7 }, // bore → out (dry)
+                    Edge { from: 1, to: 2, gain: 1.0 }, // bore → bell
+                    Edge { from: 2, to: 3, gain: 0.3 }, // bell colour → out
                 ],
-                output: 1,
+                output: 3,
                 key_map: Vec::new(),
             },
             eng(0.55, 25.0, 90.0),
@@ -1142,13 +1154,19 @@ pub fn factory() -> Vec<Preset> {
             "Base: Bassoon",
             InstrumentGraph {
                 components: vec![
-                    Comp::ReedPipe { pressure: 0.85, stiffness: 1.2, tone: 0.5 },
+                    Comp::Reed { pressure: 0.85, stiffness: 1.2 },
+                    Comp::Bore { tone: 0.5 },
+                    Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 500.0, decay_s: 0.08 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 0, to: 1, gain: 1.0 }, // reed → bore
+                    Edge { from: 1, to: 0, gain: 1.0 }, // bore → reed (feedback)
+                    Edge { from: 1, to: 3, gain: 0.7 }, // bore → out (dry)
+                    Edge { from: 1, to: 2, gain: 1.0 }, // bore → bell
+                    Edge { from: 2, to: 3, gain: 0.3 }, // bell colour → out
                 ],
-                output: 1,
+                output: 3,
                 key_map: Vec::new(),
             },
             eng(0.5, 25.0, 110.0),
@@ -1157,13 +1175,19 @@ pub fn factory() -> Vec<Preset> {
             "Base: Trumpet",
             InstrumentGraph {
                 components: vec![
-                    Comp::ReedPipe { pressure: 1.0, stiffness: 0.7, tone: 1.4 },
+                    Comp::Reed { pressure: 1.0, stiffness: 0.7 },
+                    Comp::Bore { tone: 1.4 },
+                    Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 2500.0, decay_s: 0.04 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 0, to: 1, gain: 1.0 }, // reed → bore
+                    Edge { from: 1, to: 0, gain: 1.0 }, // bore → reed (feedback)
+                    Edge { from: 1, to: 3, gain: 0.7 }, // bore → out (dry)
+                    Edge { from: 1, to: 2, gain: 1.0 }, // bore → bell
+                    Edge { from: 2, to: 3, gain: 0.3 }, // bell colour → out
                 ],
-                output: 1,
+                output: 3,
                 key_map: Vec::new(),
             },
             eng(0.55, 25.0, 90.0),
@@ -1172,13 +1196,19 @@ pub fn factory() -> Vec<Preset> {
             "Base: Trombone",
             InstrumentGraph {
                 components: vec![
-                    Comp::ReedPipe { pressure: 1.0, stiffness: 0.8, tone: 1.2 },
+                    Comp::Reed { pressure: 1.0, stiffness: 0.8 },
+                    Comp::Bore { tone: 1.2 },
+                    Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 1200.0, decay_s: 0.05 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 0, to: 1, gain: 1.0 }, // reed → bore
+                    Edge { from: 1, to: 0, gain: 1.0 }, // bore → reed (feedback)
+                    Edge { from: 1, to: 3, gain: 0.7 }, // bore → out (dry)
+                    Edge { from: 1, to: 2, gain: 1.0 }, // bore → bell
+                    Edge { from: 2, to: 3, gain: 0.3 }, // bell colour → out
                 ],
-                output: 1,
+                output: 3,
                 key_map: Vec::new(),
             },
             eng(0.55, 25.0, 90.0),
@@ -1187,13 +1217,19 @@ pub fn factory() -> Vec<Preset> {
             "Base: French Horn",
             InstrumentGraph {
                 components: vec![
-                    Comp::ReedPipe { pressure: 0.9, stiffness: 1.0, tone: 0.7 },
+                    Comp::Reed { pressure: 0.9, stiffness: 1.0 },
+                    Comp::Bore { tone: 0.7 },
+                    Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 900.0, decay_s: 0.06 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
+                    Edge { from: 0, to: 1, gain: 1.0 }, // reed → bore
+                    Edge { from: 1, to: 0, gain: 1.0 }, // bore → reed (feedback)
+                    Edge { from: 1, to: 3, gain: 0.7 }, // bore → out (dry)
+                    Edge { from: 1, to: 2, gain: 1.0 }, // bore → bell
+                    Edge { from: 2, to: 3, gain: 0.3 }, // bell colour → out
                 ],
-                output: 1,
+                output: 3,
                 key_map: Vec::new(),
             },
             eng(0.5, 30.0, 150.0),
@@ -1203,18 +1239,18 @@ pub fn factory() -> Vec<Preset> {
             InstrumentGraph {
                 components: vec![
                     Comp::Reed { pressure: 0.9, stiffness: 0.6 },
-                    Comp::Horn(WebsterHorn { length: 1.4, wave_speed: 343.0, r1: 0.015, r2: 0.05, r3: 0.01, blow_pos: 0.0, depth: 20, resolution: 240, damping: 2.5, freq_dep_damping: -0.05, visco_loss: 0.6, radiation: 0.3, boundary: Boundary::Open, ..WebsterHorn::default() }),
+                    Comp::Bore { tone: 0.5 },
                     Comp::Voice { open_quotient: 0.5, level: 0.15 },
                     Comp::Body { cavity_litres: 0.15, soundhole_cm: 2.5, top_hz: 1200.0, decay_s: 0.05 },
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.5 },
-                    Edge { from: 1, to: 0, gain: 0.55 },
-                    Edge { from: 2, to: 1, gain: 0.5 },
-                    Edge { from: 1, to: 3, gain: 1.0 },
-                    Edge { from: 1, to: 4, gain: 1.0 },
-                    Edge { from: 3, to: 4, gain: 0.3 },
+                    Edge { from: 0, to: 1, gain: 1.0 }, // reed → bore
+                    Edge { from: 1, to: 0, gain: 1.0 }, // bore → reed (feedback)
+                    Edge { from: 2, to: 1, gain: 0.5 }, // voice → bore (vocalisation)
+                    Edge { from: 1, to: 4, gain: 0.7 }, // bore → out
+                    Edge { from: 1, to: 3, gain: 1.0 }, // bore → tract
+                    Edge { from: 3, to: 4, gain: 0.3 }, // tract colour → out
                 ],
                 output: 4,
                 key_map: Vec::new(),
@@ -1775,6 +1811,7 @@ mod tests {
         assert!(!file_stem("a/b\\c").contains(['/', '\\']));
     }
 }
+
 
 
 

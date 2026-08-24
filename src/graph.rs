@@ -380,22 +380,22 @@ impl Node for ReedExciter {
     fn tick(&mut self, inputs: &[f32]) -> f32 {
         let rate = if self.env < self.env_target { self.atk_rate } else { self.rel_rate };
         self.env += (self.env_target - self.env) * rate;
-        let bore: f32 = inputs.iter().sum(); // resonator pressure fed back
-        let p = self.pressure * self.env; // gated mouth pressure
-        let delta = p - bore; // pressure across the reed
-        // Reed opening closes as the pressure difference rises (nonlinear valve).
-        let opening = (1.0 - self.stiffness * delta).clamp(0.0, 1.0);
-        // Turbulent breath noise through the aperture — a continuous broadband
-        // stimulus (∝ the open flow) that kicks and keeps the bore singing,
-        // rather than waiting for the feedback to build. It is also the breathy
-        // hiss of a real reed.
+        // The bore's returning pressure wave, fed back over a graph edge. A real
+        // reed drives a *waveguide* bore (a delay line, `WaveguideBore`) — this is
+        // the reed junction that closes that loop, so it produces the right input
+        // to make the bore self-oscillate (a modal bank cannot do this).
+        let reflected: f32 = inputs.iter().sum();
         self.rng ^= self.rng << 13;
         self.rng ^= self.rng >> 17;
         self.rng ^= self.rng << 5;
         let white = (self.rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
-        let flow = delta * opening;
-        let turbulence = white * (opening * p).abs() * 0.25;
-        (flow + turbulence).tanh() // flow into the bore, bounded
+        let breath = self.pressure * self.env * (1.0 + 0.02 * white); // + turbulence
+        // Reed reflection table (STK/MSW): the reflection coefficient falls with
+        // the pressure difference and clips when the reed slaps shut.
+        let delta = reflected - breath;
+        let slope = -(0.08 + self.stiffness * 0.22);
+        let reed = (0.7 + slope * delta).clamp(-1.0, 1.0);
+        breath + delta * reed // pressure launched back into the bore
     }
     fn control(&mut self, c: Control) {
         if let Control::Gate(on) = c {
@@ -612,6 +612,57 @@ impl Node for VoiceExciter {
             Control::Gate(on) => self.env_target = if on { 1.0 } else { 0.0 },
             Control::Bend(r) => self.incr = (self.f0 * r.max(0.01)) * self.inv_sr,
         }
+    }
+}
+
+/// A **waveguide bore** resonator — a wind's air column as a delay line with an
+/// inverting one-pole low-pass reflection at the bell. Driven by a reed/lip
+/// exciter (which reads this bore's returning pressure over a feedback edge and
+/// launches flow back in), the traveling wave reflecting off the bell is what
+/// lets the reed self-oscillate. Its output — the returning pressure — is the
+/// bore's voice, which a secondary resonator (a flaring bell/body) can then
+/// colour. Pitch = the delay length. This is the graph-decomposed counterpart of
+/// the self-contained `WaveguideReed`.
+pub struct WaveguideBore {
+    line: Vec<f32>,
+    delay: f32,
+    pos: usize,
+    bell: f32,
+    bell_a: f32,
+    refl: f32,
+}
+
+impl WaveguideBore {
+    pub fn new(freq_hz: f32, tone: f32, sr: f32) -> Self {
+        let f = freq_hz.max(20.0);
+        // −3 samples compensates the two graph feedback edges + the bell filter.
+        let delay = (sr / (2.0 * f) - 3.0).max(2.0);
+        WaveguideBore {
+            line: vec![0.0; delay.ceil() as usize + 3],
+            delay,
+            pos: 0,
+            bell: 0.0,
+            bell_a: (0.15 + 0.55 * tone.clamp(0.0, 1.5) / 1.5).clamp(0.05, 0.9),
+            refl: -0.97,
+        }
+    }
+}
+
+impl Node for WaveguideBore {
+    #[inline]
+    fn tick(&mut self, inputs: &[f32]) -> f32 {
+        let flow: f32 = inputs.iter().sum(); // pressure launched in by the reed
+        let n = self.line.len();
+        let rp = self.pos as f32 + n as f32 - self.delay;
+        let i0 = rp.floor() as usize % n;
+        let i1 = (i0 + 1) % n;
+        let frac = rp - rp.floor();
+        let bore_out = self.line[i0] * (1.0 - frac) + self.line[i1] * frac;
+        self.bell += self.bell_a * (bore_out - self.bell);
+        let reflected = self.refl * self.bell;
+        self.line[self.pos] = flow;
+        self.pos = (self.pos + 1) % n;
+        reflected
     }
 }
 
@@ -1134,6 +1185,7 @@ mod new_exciter_tests {
         assert!(end.iter().all(|s| s.abs() < 1e-2), "voice goes silent after note-off");
     }
 }
+
 
 
 
