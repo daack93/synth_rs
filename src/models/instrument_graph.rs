@@ -554,7 +554,7 @@ impl Comp {
                 } else {
                     *register = 0.3;
                     *length = C_AIR / (2.0 * (f / 3.0)); // bore fundamental = f/3
-                    (f / f_break, 0.10)
+                    (f / f_break, 0.20)
                 };
                 // Pressure micro-tune, the way a player lips each note in tune:
                 // blow a little harder as the note rises in its register to cancel

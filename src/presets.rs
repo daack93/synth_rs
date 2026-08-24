@@ -1130,7 +1130,7 @@ pub fn factory() -> Vec<Preset> {
                         damping: 4.0,
                         freq_dep_damping: -0.08,
                         visco_loss: 0.8,
-                        radiation: 0.6,
+                        radiation: 50.0,
                         key_tracks_pitch: false, // fixed-formant bell (no own pitch)
                         ..WebsterHorn::default()
                     }),
@@ -1139,7 +1139,7 @@ pub fn factory() -> Vec<Preset> {
                 edges: vec![
                     Edge { from: 0, to: 2, gain: 1.3 }, // coupled voice (dry) → out
                     Edge { from: 0, to: 1, gain: 1.0 }, // voice → bell
-                    Edge { from: 1, to: 2, gain: 0.4 }, // bell colour → out
+                    Edge { from: 1, to: 2, gain: 0.7 }, // bell colour → out
                 ],
                 output: 2,
                 // Overblow-stepped: the key drives the coupled bore's register +
