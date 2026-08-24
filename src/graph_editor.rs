@@ -461,7 +461,7 @@ fn add_menu() -> Vec<(&'static str, Vec<(&'static str, fn() -> Comp)>)> {
                 ("Strike", || Comp::Strike),
                 ("Hammer", || Comp::Hammer { hardness: 0.6, felt: 2.5 }),
                 ("Reed / lip", || Comp::Reed { pressure: 0.9, stiffness: 1.0, freq_hz: 150.0 }),
-                ("Reed + bore (coupled)", || Comp::ReedBore { pressure: 0.9, stiffness: 1.0, length: 0.6555, tone: 1.0 }),
+                ("Reed + bore (coupled)", || Comp::ReedBore { pressure: 0.9, stiffness: 1.0, length: 0.6555, tone: 1.0, register: 0.0 }),
                 ("Breath", || Comp::Breath { level: 0.15, tone: 1.0 }),
                 ("Bow", || Comp::Bow { speed: 1.2, force: 0.6 }),
                 ("Voice", || Comp::Voice { open_quotient: 0.6, level: 0.5 }),

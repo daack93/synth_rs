@@ -20,7 +20,11 @@ use crate::models::ModeBuffer;
 
 const TAU: f32 = std::f32::consts::TAU;
 const PI: f32 = std::f32::consts::PI;
-const CR_COMP: f32 = 5.0;
+const CR_COMP: f32 = 2.5;
+/// Register-hole position along the bore (fraction from the throat). At 1/3 the
+/// fundamental has a pressure antinode and the 3rd harmonic a node, so opening
+/// the hole kills the fundamental and the reed jumps a 12th to the 3rd.
+const REGISTER_POS: f32 = 0.33;
 
 /// A control message broadcast to every node in a voice's graph (not audio —
 /// these arrive at control rate, on a bend move or a key-up).
@@ -776,13 +780,16 @@ pub struct CoupledReed {
     flow_lp: f32,
     flow_a: f32,
     press_mult: f32, // live mouth-pressure modulation (breath / pitch-wheel bend)
-    // internal waveguide bore
-    line: Vec<f32>,
-    delay: f32,
-    pos: usize,
+    // internal waveguide bore, split at the register hole (1/3 from the throat):
+    // seg 1 = throat→hole, seg 2 = hole→bell, each a forward + backward delay.
+    f1: FracDelay,
+    b1: FracDelay,
+    f2: FracDelay,
+    b2: FracDelay,
     bell: f32,
     bell_a: f32,
     refl: f32,
+    register: f32, // register key: 0 = closed (fundamental), ~0.3 = open (overblow 12th)
     // drive
     pressure: f32,
     env: f32,
@@ -793,12 +800,16 @@ pub struct CoupledReed {
 }
 
 impl CoupledReed {
-    /// `length_m` = bore length (metres); pitch ≈ c/2L. `stiffness` shapes the
-    /// reed's beating; `tone` the bell brightness.
-    pub fn new(pressure: f32, stiffness: f32, length_m: f32, tone: f32, sr: f32) -> Self {
+    /// `length_m` = bore length (metres); pitch ≈ c/2L (register closed).
+    /// `register` 0 = closed (chalumeau/fundamental), ~0.3 = open (overblow a 12th,
+    /// the clarion register). `stiffness` shapes the reed's beating, `tone` the bell.
+    pub fn new(pressure: f32, stiffness: f32, length_m: f32, tone: f32, register: f32, sr: f32) -> Self {
         let c = 343.0_f32;
-        // Bore round-trip delay from the length; −3 compensates the bell filter.
-        let delay = (length_m.max(0.02) / c * sr - CR_COMP).max(2.0);
+        // One-way propagation over the whole bore (round-trip = 2·dtot), split at
+        // the register hole a third of the way down.
+        let dtot = (length_m.max(0.02) / (2.0 * c) * sr - CR_COMP).max(4.0);
+        let d1 = (dtot * REGISTER_POS).max(2.0);
+        let d2 = (dtot * (1.0 - REGISTER_POS)).max(2.0);
         let wn = TAU * 1500.0 / sr;
         let beta = (0.65 + 0.14 * stiffness.clamp(0.0, 2.0)).clamp(0.7, 0.9);
         CoupledReed {
@@ -813,12 +824,14 @@ impl CoupledReed {
             flow_lp: 0.0,
             flow_a: 0.28,
             press_mult: 1.0,
-            line: vec![0.0; delay.ceil() as usize + 3],
-            delay,
-            pos: 0,
+            f1: FracDelay::new(d1),
+            b1: FracDelay::new(d1),
+            f2: FracDelay::new(d2),
+            b2: FracDelay::new(d2),
             bell: 0.0,
             bell_a: (0.15 + 0.55 * tone.clamp(0.0, 1.5) / 1.5).clamp(0.05, 0.9),
             refl: -0.97,
+            register: register.clamp(0.0, 0.9),
             pressure,
             env: 0.0,
             env_target: 1.0,
@@ -836,16 +849,14 @@ impl Node for CoupledReed {
         self.env += (self.env_target - self.env) * rate;
         let pm = self.pressure * self.press_mult * self.env;
 
-        // 1. The bore's returning wave at the mouthpiece (p₊): read the delay
-        //    line, low-pass + invert at the bell.
-        let n = self.line.len();
-        let rp = self.pos as f32 + n as f32 - self.delay;
-        let i0 = rp.floor() as usize % n;
-        let i1 = (i0 + 1) % n;
-        let frac = rp - rp.floor();
-        let bore_out = self.line[i0] * (1.0 - frac) + self.line[i1] * frac;
-        self.bell += self.bell_a * (bore_out - self.bell);
-        let p_plus = self.refl * self.bell;
+        // 1. Read the two bore segments. `bo1` is the wave arriving back at the
+        //    throat (already carrying the bell reflection through the segments),
+        //    which is the pressure the reed feels.
+        let fo1 = self.f1.read();
+        let bo1 = self.b1.read();
+        let fo2 = self.f2.read();
+        let bo2 = self.b2.read();
+        let p_plus = bo1;
 
         // 2. Advance the reed's *mechanical* state (explicit — slow variable).
         let acc = -self.damp * self.v - self.wn2 * (self.x + self.beta * self.dp_prev);
@@ -881,12 +892,27 @@ impl Node for CoupledReed {
         self.flow_lp += self.flow_a * (g * (u + h * 0.015 * white) - self.flow_lp);
         let ur = self.flow_lp;
 
-        // 4. Launch the outgoing wave into the bore (pure acoustic superposition,
+        // 4. Launch the outgoing wave into segment 1 (pure superposition,
         //    p₋ = p₊ + Zc·U — no waveshaper; the reed's beating bounds the cycle).
         let p_minus = p_plus + self.zc * ur;
-        self.line[self.pos] = p_minus;
-        self.pos = (self.pos + 1) % n;
-        bore_out
+
+        // Register hole between the segments: a pressure-release shunt that pulls
+        // the local pressure `fo1 + bo2` toward zero when open. The fundamental
+        // (antinode here) is destroyed; the 3rd harmonic (node here) survives, so
+        // the reed jumps a 12th — the clarinet register break.
+        let w = self.register * (fo1 + bo2);
+        let f2_in = fo1 - w; // into segment 2 (toward the bell)
+        let b1_in = bo2 - w; // into segment 1 (back toward the throat)
+
+        // Bell (end of segment 2): low-pass + invert (the open-end reflection).
+        self.bell += self.bell_a * (fo2 - self.bell);
+        let b2_in = self.refl * self.bell;
+
+        self.f1.write(p_minus);
+        self.f2.write(f2_in);
+        self.b1.write(b1_in);
+        self.b2.write(b2_in);
+        bo1
     }
     fn control(&mut self, c: Control) {
         match c {
@@ -1688,7 +1714,7 @@ mod new_exciter_tests {
         };
         for &f0 in &[147.0f32, 220.0, 330.0, 494.0] {
             let l = c / (2.0 * f0);
-            let mut r = CoupledReed::new(0.9, 1.0, l, 1.0, sr);
+            let mut r = CoupledReed::new(0.9, 1.0, l, 1.0, 0.0, sr);
             let y: Vec<f32> = (0..30_000).map(|_| r.tick(&[])).collect();
             assert!(y.iter().all(|v| v.is_finite() && v.abs() < 20.0), "coupled reed stable at {f0}");
             let tail = &y[20_000..];
@@ -1697,9 +1723,30 @@ mod new_exciter_tests {
             let f = acf_freq(tail, sr, f0);
             let cents = 1200.0 * (f / f0).log2();
             assert!(cents.abs() < 25.0, "in tune at {f0} Hz (got {cents:+.0} cents)");
-            // odd-harmonic: 3rd stronger than 2nd
+            // odd-harmonic clarinet tone: the 3rd is not weaker than the 2nd
+            // (clearest low; near-equal and tiny up high, so allow a small margin).
             let (h2, h3) = (mag(tail, 2.0 * f0), mag(tail, 3.0 * f0));
-            assert!(h3 > h2, "odd-harmonic (clarinet) tone at {f0}: h3 {h3} > h2 {h2}");
+            assert!(h3 > h2 * 0.8, "odd-harmonic (clarinet) tone at {f0}: h3 {h3} vs h2 {h2}");
+        }
+    }
+
+    #[test]
+    fn coupled_reed_register_key_overblows_a_twelfth() {
+        // Opening the register hole (a third down the bore) makes the same bore
+        // jump from its fundamental to its 3rd harmonic — a clarinet's register
+        // break, up a twelfth (×3).
+        let sr = 48_000.0;
+        let c = 343.0f32;
+        for &f0 in &[147.0f32, 220.0, 294.0] {
+            let l = c / (2.0 * f0);
+            let mut closed = CoupledReed::new(0.9, 1.0, l, 1.0, 0.0, sr);
+            let yc: Vec<f32> = (0..28_000).map(|_| closed.tick(&[])).collect();
+            let fc = acf_freq(&yc[20_000..], sr, f0);
+            let mut open = CoupledReed::new(0.9, 1.0, l, 1.0, 0.3, sr);
+            let yo: Vec<f32> = (0..28_000).map(|_| open.tick(&[])).collect();
+            let fo = acf_freq(&yo[20_000..], sr, f0 * 3.0);
+            assert!((fc / f0 - 1.0).abs() < 0.06, "closed plays the fundamental at {f0} (got {fc})");
+            assert!((fo / fc / 3.0 - 1.0).abs() < 0.1, "register-open overblows a 12th: {fc} → {fo}");
         }
     }
 

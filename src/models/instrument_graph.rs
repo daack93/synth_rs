@@ -70,9 +70,10 @@ pub enum Comp {
     /// A **coupled reed + bore** — the physically-correct woodwind voice. The reed
     /// valve and a waveguide bore are one tightly-coupled loop solved *implicitly*
     /// each sample (no loop delay), so the pitch locks to the bore `length`
-    /// (`f ≈ c/2L`) in tune. Self-contained; drive a downstream Webster horn for
-    /// bell colour. Key-map `length` for pitch.
-    ReedBore { pressure: f32, stiffness: f32, length: f32, tone: f32 },
+    /// (`f ≈ c/2L`) in tune. A register hole a third down the bore lets it overblow
+    /// a 12th: `register` 0 = closed (chalumeau), ~0.3 = open (clarion). Self-
+    /// contained; drive a downstream Webster horn for bell colour. Key-map `length`.
+    ReedBore { pressure: f32, stiffness: f32, length: f32, tone: f32, register: f32 },
     /// A digital-waveguide reed pipe — a self-contained wind voice (bore delay +
     /// bell + reed) that self-oscillates into a clean reed tone. `pressure` =
     /// breath, `stiffness` = reed hardness, `tone` = bell brightness.
@@ -227,8 +228,8 @@ impl Comp {
             Comp::Reed { pressure, stiffness, freq_hz } => {
                 Box::new(ReedExciter::new(*pressure, *stiffness, *freq_hz, sr))
             }
-            Comp::ReedBore { pressure, stiffness, length, tone } => {
-                Box::new(CoupledReed::new(*pressure, *stiffness, *length, *tone, sr))
+            Comp::ReedBore { pressure, stiffness, length, tone, register } => {
+                Box::new(CoupledReed::new(*pressure, *stiffness, *length, *tone, *register, sr))
             }
             Comp::ReedPipe { pressure, stiffness, tone } => {
                 Box::new(WaveguideReed::new(freq_hz, *pressure, *stiffness, *tone, sr))
@@ -345,13 +346,17 @@ impl Comp {
                     .changed();
                 c
             }
-            Comp::ReedBore { pressure, stiffness, length, tone } => {
+            Comp::ReedBore { pressure, stiffness, length, tone, register } => {
                 let mut c = false;
                 c |= ui.add(unbounded_slider(pressure, 0.1..=2.0, "Mouth pressure")).changed();
                 c |= ui.add(unbounded_slider(stiffness, 0.0..=3.0, "Reed stiffness")).changed();
                 c |= ui
                     .add(unbounded_slider(length, 0.05..=2.0, "Bore length (m)"))
                     .on_hover_text("Sets the pitch (usually key-mapped): f ≈ c/2L.")
+                    .changed();
+                c |= ui
+                    .add(unbounded_slider(register, 0.0..=0.6, "Register key"))
+                    .on_hover_text("0 = closed (low register); ~0.3 opens the register hole → overblows a 12th.")
                     .changed();
                 c |= ui.add(unbounded_slider(tone, 0.0..=1.5, "Bell brightness")).changed();
                 c
@@ -464,7 +469,7 @@ impl Comp {
             // The waveguide bore's length — the coupled reed↔bore pitch control.
             Comp::Bore { .. } => &["length"],
             // The coupled reed+bore's length sets its (in-tune) pitch.
-            Comp::ReedBore { .. } => &["length"],
+            Comp::ReedBore { .. } => &["length", "register"],
             // The reed's fixed pitch — so a key can drive embouchure/pitch on a
             // self-contained mouthpiece (`freq_hz > 0`).
             Comp::Reed { .. } => &["freq"],
@@ -491,6 +496,7 @@ impl Comp {
             (Comp::WaveguideHorn { length, .. }, "length") => Some(*length),
             (Comp::Bore { length, .. }, "length") => Some(*length),
             (Comp::ReedBore { length, .. }, "length") => Some(*length),
+            (Comp::ReedBore { register, .. }, "register") => Some(*register),
             (Comp::Reed { freq_hz, .. }, "freq") => Some(*freq_hz),
             _ => None,
         }
@@ -512,6 +518,7 @@ impl Comp {
             (Comp::WaveguideHorn { length, .. }, "length") => *length = v,
             (Comp::Bore { length, .. }, "length") => *length = v,
             (Comp::ReedBore { length, .. }, "length") => *length = v,
+            (Comp::ReedBore { register, .. }, "register") => *register = v,
             (Comp::Reed { freq_hz, .. }, "freq") => *freq_hz = v,
             _ => {}
         }

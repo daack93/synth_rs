@@ -1117,7 +1117,7 @@ pub fn factory() -> Vec<Preset> {
                     // key-map drives the bore LENGTH; the Webster horn is the
                     // fixed-formant bell that colours the tone. Cylindrical bore →
                     // odd harmonics, closed–open (the hollow clarinet register).
-                    Comp::ReedBore { pressure: 0.9, stiffness: 1.0, length: 0.6555, tone: 1.0 },
+                    Comp::ReedBore { pressure: 0.9, stiffness: 1.0, length: 0.6555, tone: 1.0, register: 0.0 },
                     Comp::Horn(WebsterHorn {
                         boundary: Boundary::Brass,
                         r1: 0.0073,
