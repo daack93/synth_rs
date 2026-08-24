@@ -162,6 +162,12 @@ pub trait FtmModel: Send {
     ) -> Option<Box<dyn crate::graph::Node>> {
         None
     }
+
+    /// Downcast hook for the visual graph editor. `Some` only for the
+    /// `InstrumentGraph` model, so the UI can edit its components/edges directly.
+    fn as_instrument_graph_mut(&mut self) -> Option<&mut instrument_graph::InstrumentGraph> {
+        None
+    }
 }
 
 /// Rebuild a model from its `id` and serialized parameters (the inverse of

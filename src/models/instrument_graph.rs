@@ -119,7 +119,7 @@ impl Comp {
     /// the instrument's *voice* and resonates (struck normalization); one fed by
     /// another resonator is a coupling *filter* (so its Q colours the drive
     /// instead of amplifying it into a blow-up).
-    fn is_exciter(&self) -> bool {
+    pub(crate) fn is_exciter(&self) -> bool {
         matches!(
             self,
             Comp::Strike
@@ -449,6 +449,47 @@ pub struct InstrumentGraph {
     pub key_map: Vec<KeyTarget>,
 }
 
+impl InstrumentGraph {
+    /// Human label for each component (for the graph editor).
+    pub fn labels(&self) -> Vec<&'static str> {
+        self.components.iter().map(|c| c.label()).collect()
+    }
+
+    /// True if component `i` is an exciter (energy source) — for the editor.
+    pub fn is_exciter_at(&self, i: usize) -> bool {
+        self.components.get(i).map(|c| c.is_exciter()).unwrap_or(false)
+    }
+
+    /// Draw one component's parameter editor (used by the node editor).
+    pub fn component_params_ui(&mut self, i: usize, ui: &mut egui::Ui) -> bool {
+        self.components.get_mut(i).map(|c| c.params_ui(ui)).unwrap_or(false)
+    }
+
+    /// Auto-lay-out the nodes left-to-right by longest path from an exciter, so
+    /// signal flows left→right. Returns one (x, y) per component. The editor
+    /// keeps these in UI state and lets the user drag them.
+    pub fn auto_layout(&self) -> Vec<[f32; 2]> {
+        let n = self.components.len();
+        let mut col = vec![0usize; n];
+        for _ in 0..n {
+            for e in &self.edges {
+                if e.from < n && e.to < n {
+                    col[e.to] = col[e.to].max(col[e.from] + 1);
+                }
+            }
+        }
+        let mut per_col: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        (0..n)
+            .map(|i| {
+                let c = col[i];
+                let r = *per_col.entry(c).or_insert(0);
+                per_col.entry(c).and_modify(|v| *v += 1);
+                [40.0 + c as f32 * 175.0, 40.0 + r as f32 * 95.0]
+            })
+            .collect()
+    }
+}
+
 impl Default for InstrumentGraph {
     /// A struck string coloured by a body: `Strike → String → Body`, mixed dry
     /// (string) + a light wet (body) at the output.
@@ -476,7 +517,7 @@ impl InstrumentGraph {
     /// Remove component `r`, fixing up every index that referenced it: edges
     /// touching it are dropped and higher indices shifted down; key-map targets
     /// and the output node are adjusted the same way.
-    fn remove_component(&mut self, r: usize) {
+    pub(crate) fn remove_component(&mut self, r: usize) {
         if r >= self.components.len() {
             return;
         }
@@ -811,6 +852,9 @@ impl FtmModel for InstrumentGraph {
     fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
     }
+    fn as_instrument_graph_mut(&mut self) -> Option<&mut InstrumentGraph> {
+        Some(self)
+    }
 }
 
 #[cfg(test)]
@@ -868,6 +912,26 @@ mod tests {
         assert!(bank.freq[..bank.n].iter().any(|f| (*f - f_h).abs() < 1.0), "air mode present");
         assert!(bank.freq[..bank.n].iter().any(|f| (*f - 195.0).abs() < 1.0), "top mode present");
     }
+    #[test]
+    fn repointing_output_auditions_that_component() {
+        // The graph editor auditions a component by cloning the graph with
+        // `output` repointed at it. Default graph: Strike(0) → String(1) → Body(2)
+        // → Mix(3). Tapping the String rings; tapping the Strike is a one-shot.
+        let sr = 48_000.0;
+        let base = InstrumentGraph::default();
+        let render = |out: usize| -> Vec<f32> {
+            let mut g = base.clone();
+            g.output = out;
+            let mut n = g.build_graph(220.0, 1.0, sr).unwrap();
+            (0..24_000).map(|_| n.tick(&[])).collect()
+        };
+        let rms = |a: &[f32]| (a.iter().map(|v| v * v).sum::<f32>() / a.len() as f32).sqrt();
+        let string = render(1); // the String node
+        let strike = render(0); // the Strike exciter (impulse then silence)
+        assert!(rms(&string[2000..]) > 1e-4, "auditioning the string rings");
+        assert!(rms(&strike[2000..]) < rms(&string[2000..]), "the strike is a one-shot, quieter tail");
+    }
+
     #[test]
     fn key_map_drives_a_param() {
         // The grounded string tracks pitch itself, so the key map drives a
