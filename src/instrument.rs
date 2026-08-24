@@ -354,6 +354,11 @@ impl Instrument {
         if graph.is_some() {
             v.graph = graph;
             v.graph_env = 0.0;
+            // Restart the "rung out?" grace so a rebuilt sustained voice gets time
+            // to build up its oscillation before the silence check can free it.
+            if !fresh {
+                v.elapsed = 0.0;
+            }
             v.n_modes = 0;
             v.noise_level = 0.0;
             self.scratch = buf;
@@ -520,8 +525,11 @@ impl Instrument {
                 v.gate = 1.0;
             }
         }
-        // Free once rung out (short grace so a slow onset isn't cut).
-        if v.elapsed > 0.05 && v.graph_env <= 1e-4 {
+        // Free once rung out. A *released* voice frees as soon as it's silent;
+        // a held voice is only freed after a long grace, so a sustained wind that
+        // is momentarily silent — while building up its oscillation, e.g. right
+        // after a live parameter edit rebuilds it — is not killed.
+        if v.graph_env <= 1e-4 && (v.releasing || v.elapsed > 0.4) {
             v.active = false;
         }
         soft_limit(raw * v.gate)
