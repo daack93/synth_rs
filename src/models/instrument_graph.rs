@@ -61,8 +61,12 @@ pub enum Comp {
     Wires { level: f32, tone: f32 },
     /// A continuous breath drive (band-passed noise) — sustains a resonator.
     Breath { level: f32, tone: f32 },
-    /// A self-oscillating reed/lip (needs a feedback edge from its resonator).
-    Reed { pressure: f32, stiffness: f32 },
+    /// A single-reed mouthpiece. `freq_hz > 0` makes it a *self-contained*
+    /// mouthpiece buzzing at that one fixed pitch (a built-in bore — like a reed
+    /// with the horn pulled off) that then drives a downstream resonator forward;
+    /// `freq_hz = 0` makes it a bare valve that reads its resonant load back over
+    /// a feedback edge (pitch comes from the bore it drives).
+    Reed { pressure: f32, stiffness: f32, freq_hz: f32 },
     /// A digital-waveguide reed pipe — a self-contained wind voice (bore delay +
     /// bell + reed) that self-oscillates into a clean reed tone. `pressure` =
     /// breath, `stiffness` = reed hardness, `tone` = bell brightness.
@@ -194,7 +198,9 @@ impl Comp {
             }
             Comp::Horn(m) => reso(&bank_of(m)),
             Comp::Bore { tone } => Box::new(WaveguideBore::new(freq_hz, *tone, sr)),
-            Comp::Reed { pressure, stiffness } => Box::new(ReedExciter::new(*pressure, *stiffness, sr)),
+            Comp::Reed { pressure, stiffness, freq_hz } => {
+                Box::new(ReedExciter::new(*pressure, *stiffness, *freq_hz, sr))
+            }
             Comp::ReedPipe { pressure, stiffness, tone } => {
                 Box::new(WaveguideReed::new(freq_hz, *pressure, *stiffness, *tone, sr))
             }
@@ -276,10 +282,17 @@ impl Comp {
             Comp::Bore { tone } => {
                 ui.add(unbounded_slider(tone, 0.0..=1.5, "Bell brightness")).changed()
             }
-            Comp::Reed { pressure, stiffness } => {
+            Comp::Reed { pressure, stiffness, freq_hz } => {
                 let mut c = false;
                 c |= ui.add(unbounded_slider(pressure, 0.0..=2.0, "Mouth pressure")).changed();
                 c |= ui.add(unbounded_slider(stiffness, 0.0..=3.0, "Reed stiffness")).changed();
+                c |= ui
+                    .add(unbounded_slider(freq_hz, 0.0..=600.0, "Fixed pitch (Hz)"))
+                    .on_hover_text(
+                        "0 = a bare valve driven by a feedback edge (pitch from the bore it drives). \
+                         >0 = a self-contained mouthpiece buzzing at this one fixed pitch, to drive a resonator forward.",
+                    )
+                    .changed();
                 c
             }
             Comp::ReedPipe { pressure, stiffness, tone } => {
@@ -385,8 +398,11 @@ impl Comp {
             Comp::Plate(_) => &["ring"],
             Comp::Body { .. } => &["top_hz", "decay"],
             Comp::Horn(_) => &["length"],
+            // The reed's fixed pitch — so a key can drive embouchure/pitch on a
+            // self-contained mouthpiece (`freq_hz > 0`).
+            Comp::Reed { .. } => &["freq"],
             Comp::MusicalString(_) | Comp::Bell(_) | Comp::Cymbal(_) | Comp::Strike | Comp::Mix
-            | Comp::Wires { .. } | Comp::Breath { .. } | Comp::Reed { .. } | Comp::Hammer { .. }
+            | Comp::Wires { .. } | Comp::Breath { .. } | Comp::Hammer { .. }
             | Comp::Bow { .. } | Comp::Voice { .. } | Comp::ReedPipe { .. } | Comp::BowedString { .. } | Comp::Bore { .. }
             | Comp::Sine { .. } => &[],
         }
@@ -405,6 +421,7 @@ impl Comp {
             (Comp::Body { top_hz, .. }, "top_hz") => Some(*top_hz),
             (Comp::Body { decay_s, .. }, "decay") => Some(*decay_s),
             (Comp::Horn(m), "length") => Some(m.length),
+            (Comp::Reed { freq_hz, .. }, "freq") => Some(*freq_hz),
             _ => None,
         }
     }
@@ -422,6 +439,7 @@ impl Comp {
             (Comp::Body { top_hz, .. }, "top_hz") => *top_hz = v,
             (Comp::Body { decay_s, .. }, "decay") => *decay_s = v,
             (Comp::Horn(m), "length") => m.length = v,
+            (Comp::Reed { freq_hz, .. }, "freq") => *freq_hz = v,
             _ => {}
         }
     }
@@ -757,7 +775,7 @@ impl FtmModel for InstrumentGraph {
                 changed = true;
             }
             if ui.small_button("Reed / lip").clicked() {
-                self.components.push(Comp::Reed { pressure: 0.6, stiffness: 1.5 });
+                self.components.push(Comp::Reed { pressure: 0.6, stiffness: 1.5, freq_hz: 0.0 });
                 changed = true;
             }
             if ui.small_button("Reed pipe").clicked() {
@@ -1145,7 +1163,7 @@ mod tests {
         let sr = 48_000.0;
         let g = InstrumentGraph {
             components: vec![
-                Comp::Reed { pressure: 0.9, stiffness: 1.0 },
+                Comp::Reed { pressure: 0.9, stiffness: 1.0, freq_hz: 0.0 },
                 Comp::Bore { tone: 1.0 },
                 Comp::Mix,
             ],
@@ -1171,7 +1189,7 @@ mod tests {
         // editor bug). Columns are bounded by the node count.
         let g = InstrumentGraph {
             components: vec![
-                Comp::Reed { pressure: 0.9, stiffness: 1.0 },
+                Comp::Reed { pressure: 0.9, stiffness: 1.0, freq_hz: 0.0 },
                 Comp::Bore { tone: 1.0 },
                 Comp::Mix,
             ],

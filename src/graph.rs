@@ -377,10 +377,19 @@ pub struct ReedExciter {
     atk_rate: f32,
     rel_rate: f32,
     rng: u32,
+    // Optional built-in bore. `Some` → the reed is a *self-contained mouthpiece*
+    // that buzzes at its own fixed pitch (like a reed with the horn pulled off),
+    // ignoring its graph inputs; the buzz is emitted for a downstream resonator
+    // to shape. `None` → the reed is a bare valve that reads its resonant load
+    // back over a feedback edge (the pitch comes from whatever bore it drives).
+    bore: Option<WaveguideBore>,
+    bore_out: f32,
 }
 
 impl ReedExciter {
-    pub fn new(pressure: f32, stiffness: f32, sr: f32) -> Self {
+    /// `freq_hz > 0` makes a self-contained mouthpiece buzzing at that fixed
+    /// pitch (a built-in bore); `0` makes a bare valve driven by a feedback edge.
+    pub fn new(pressure: f32, stiffness: f32, freq_hz: f32, sr: f32) -> Self {
         // Reed resonance sits ~1.5 kHz and is heavily damped (ζ ≈ 0.8) — a broad
         // formant, not a sharp peak, so the *bore* controls the pitch and the reed
         // never squeaks at its own resonance. `stiffness` nudges the beating point
@@ -406,6 +415,8 @@ impl ReedExciter {
             atk_rate: 1.0 - (-1.0 / (0.02 * sr)).exp(), // ~20 ms onset
             rel_rate: 1.0 - (-1.0 / (0.03 * sr)).exp(),
             rng: 0x1234_5678,
+            bore: (freq_hz > 0.0).then(|| WaveguideBore::new(freq_hz, 1.0, sr)),
+            bore_out: 0.0,
         }
     }
 }
@@ -420,7 +431,9 @@ impl Node for ReedExciter {
         // (pressure-doubling at the reed end), so the pressure across the reed is
         //   ΔP = P_mouth − p = P_mouth − 2·p₊ + Zc·U.
         // U depends on ΔP (implicit) — we break the loop with last sample's flow.
-        let p_in: f32 = inputs.iter().sum();
+        // Self-contained mouthpiece reads its own built-in bore; a bare valve
+        // reads its resonant load back over the graph edge.
+        let p_in: f32 = if self.bore.is_some() { self.bore_out } else { inputs.iter().sum() };
         // The open pipe end reflects no DC, so the reed feels only the AC standing
         // wave; tracking and removing the DC also kills a DC runaway in the loop.
         self.p_dc += self.dc_a * (p_in - self.p_dc);
@@ -453,10 +466,18 @@ impl Node for ReedExciter {
         self.flow_lp += self.flow_a * (ur_raw - self.flow_lp);
         let ur = self.flow_lp;
         self.ur_prev = ur;
-        // Launch the outgoing wave back into the bore: p₋ = p₊ − Zc·U. A gentle
-        // saturation stands in for flow/radiation losses and keeps the limit
-        // cycle bounded no matter how hard it is blown.
-        (p_plus - self.zc * ur).tanh()
+        // Launch the outgoing wave: p₋ = p₊ − Zc·U. A gentle saturation stands in
+        // for flow/radiation losses and keeps the limit cycle bounded.
+        let p_minus = (p_plus - self.zc * ur).tanh();
+        // A self-contained mouthpiece runs its own bore and emits the bore's
+        // returning wave (the buzz); a bare valve just launches p₋ down the edge.
+        match self.bore.as_mut() {
+            Some(b) => {
+                self.bore_out = b.tick(&[p_minus]);
+                self.bore_out
+            }
+            None => p_minus,
+        }
     }
     fn control(&mut self, c: Control) {
         if let Control::Gate(on) = c {
@@ -1316,7 +1337,7 @@ mod new_exciter_tests {
         // register — the failure mode that plagues coupled reed models.
         let sr = 48_000.0;
         for &f0 in &[123.0f32, 165.0, 220.0, 311.0, 440.0, 622.0, 831.0] {
-            let mut reed = ReedExciter::new(0.8, 1.0, sr);
+            let mut reed = ReedExciter::new(0.8, 1.0, 0.0, sr);
             let mut bore = WaveguideBore::new(f0, 1.0, sr);
             let mut fb = 0.0f32;
             let y: Vec<f32> = (0..36_000)
@@ -1340,7 +1361,7 @@ mod new_exciter_tests {
         // No breath ⇒ no flow through the reed: on note-off the drive dies and the
         // loop rings down (it must not self-oscillate on the standing wave alone).
         let sr = 48_000.0;
-        let mut reed = ReedExciter::new(0.8, 1.0, sr);
+        let mut reed = ReedExciter::new(0.8, 1.0, 0.0, sr);
         let mut bore = WaveguideBore::new(220.0, 1.0, sr);
         let mut fb = 0.0f32;
         let mut on = 0.0f32;
@@ -1361,5 +1382,20 @@ mod new_exciter_tests {
         let end = &tail[16_000..];
         let end_rms = (end.iter().map(|v| v * v).sum::<f32>() / end.len() as f32).sqrt();
         assert!(end_rms < 0.05, "reed rings down after note-off (rms {end_rms})");
+    }
+
+    #[test]
+    fn self_contained_reed_buzzes_at_its_fixed_pitch() {
+        // freq_hz > 0 gives a self-contained mouthpiece: it buzzes on its own (no
+        // external bore / feedback edge) at that one fixed pitch, ready to drive a
+        // resonator forward.
+        let sr = 48_000.0;
+        let mut reed = ReedExciter::new(0.9, 1.0, 196.0, sr);
+        let y: Vec<f32> = (0..36_000).map(|_| reed.tick(&[])).collect();
+        assert!(y.iter().all(|v| v.is_finite() && v.abs() < 20.0), "self-contained reed is stable");
+        let tail = &y[24_000..];
+        let rms = (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt();
+        assert!(rms > 0.1, "self-contained reed buzzes on its own (rms {rms})");
+        assert!((acf_freq(tail, sr, 196.0) / 196.0 - 1.0).abs() < 0.07, "buzzes at its fixed pitch");
     }
 }
