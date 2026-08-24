@@ -776,6 +776,11 @@ impl FtmModel for InstrumentGraph {
                             if let Some(base) = c.get_param(param) {
                                 c.set_param(param, base * ratio.powf(*amount));
                             }
+                            // A key-mapped horn is driven by the map, so switch off
+                            // its own internal key-tracking (no competing control).
+                            if let Comp::Horn(m) = c {
+                                m.key_tracks_pitch = false;
+                            }
                         }
                         KeyMapKind::Overblow { anchor_hz, steps, microtune } => {
                             c.set_overblow(*anchor_hz, *steps, *microtune);
