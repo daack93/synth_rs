@@ -346,31 +346,66 @@ impl Node for DriveExciter {
     }
 }
 
-/// A self-oscillating reed/lip — a nonlinear exciter that reads the resonator's
-/// pressure back (a feedback edge) and produces flow through a reed valve. Wired
-/// `Reed → Resonator` and `Resonator → Reed`, the nonlinearity + the resonator's
-/// feedback form a limit cycle: it oscillates on its own (a reed/brass tone)
-/// rather than just ringing a struck/breathed resonance. `tanh` bounds the loop.
+/// A single-reed woodwind mouthpiece (clarinet / saxophone) — a **lumped-element
+/// ODE reed**, not a static reflection table. It reads the bore pressure back (a
+/// feedback edge) and models the reed as a real pressure-controlled valve:
+///
+/// * the reed cane is a damped **mass-spring oscillator** driven by the pressure
+///   difference `ΔP = P_mouth − P_bore`:  `x'' + 2ζω·x' + ω²(x + β·ΔP) = 0`;
+/// * the tip **opening** is `H = max(0, 1 + x)` — the `max(0, …)` is the reed
+///   *beating* shut against the lay, the hard once-per-cycle event that gives a
+///   reed its buzz (a smooth curve can't);
+/// * the flow injected into the bore is **Bernoulli**: `Q = H·sign(ΔP)·√|ΔP|`.
+///
+/// Wired `Reed → Bore` and `Bore → Reed`, the reed resonance + the beating flow
+/// + the bore's feedback form a limit cycle — a sustained, buzzing reed tone.
 pub struct ReedExciter {
-    pressure: f32,
-    stiffness: f32,
-    rng: u32,
+    pressure: f32, // P_mouth (blowing pressure, normalized)
+    x: f32,        // reed displacement (0 = rest/open, −1 = beat shut)
+    v: f32,        // reed velocity
+    wn2: f32,      // ω² per sample² (reed spring / resonance)
+    damp: f32,     // 2ζω per sample (reed damping)
+    beta: f32,     // pressure→closure compliance (how far ΔP bends the reed)
+    zc: f32,       // flow→pressure coupling (bore characteristic impedance)
+    ur_prev: f32,  // last reed flow (breaks the junction's algebraic loop)
+    p_dc: f32,     // running DC of the bore wave (an open pipe reflects no DC)
+    dc_a: f32,     // DC-tracker coefficient
+    flow_lp: f32,  // reed/air inertia: lowpasses the flow (kills HF squeak modes)
+    flow_a: f32,
     env: f32,
     env_target: f32,
     atk_rate: f32,
     rel_rate: f32,
+    rng: u32,
 }
 
 impl ReedExciter {
     pub fn new(pressure: f32, stiffness: f32, sr: f32) -> Self {
+        // Reed resonance sits ~1.5 kHz and is heavily damped (ζ ≈ 0.8) — a broad
+        // formant, not a sharp peak, so the *bore* controls the pitch and the reed
+        // never squeaks at its own resonance. `stiffness` nudges the beating point
+        // (β): a harder reed beats sooner, adding a little buzz. Values here were
+        // swept for stable oscillation on the bore across the whole register.
+        let wn = std::f32::consts::TAU * 1500.0 / sr;
+        let beta = (0.65 + 0.14 * stiffness.clamp(0.0, 2.0)).clamp(0.7, 0.9);
         ReedExciter {
             pressure,
-            stiffness,
-            rng: 0x1234_5678,
+            x: 0.0,
+            v: 0.0,
+            wn2: wn * wn,
+            damp: 2.0 * 0.8 * wn, // ζ ≈ 0.8
+            beta,
+            zc: 0.6,
+            ur_prev: 0.0,
+            p_dc: 0.0,
+            dc_a: 1.0 - (-TAU * 15.0 / sr).exp(), // ~15 Hz DC tracker
+            flow_lp: 0.0,
+            flow_a: 0.28, // ~2.6 kHz flow lowpass
             env: 0.0,
             env_target: 1.0,
             atk_rate: 1.0 - (-1.0 / (0.02 * sr)).exp(), // ~20 ms onset
             rel_rate: 1.0 - (-1.0 / (0.03 * sr)).exp(),
+            rng: 0x1234_5678,
         }
     }
 }
@@ -380,22 +415,48 @@ impl Node for ReedExciter {
     fn tick(&mut self, inputs: &[f32]) -> f32 {
         let rate = if self.env < self.env_target { self.atk_rate } else { self.rel_rate };
         self.env += (self.env_target - self.env) * rate;
-        // The bore's returning pressure wave, fed back over a graph edge. A real
-        // reed drives a *waveguide* bore (a delay line, `WaveguideBore`) — this is
-        // the reed junction that closes that loop, so it produces the right input
-        // to make the bore self-oscillate (a modal bank cannot do this).
-        let reflected: f32 = inputs.iter().sum();
+        // Waveguide scattering junction at the mouthpiece. `p_plus` is the wave
+        // returning from the bore; the mouthpiece pressure is `p = 2·p₊ − Zc·U`
+        // (pressure-doubling at the reed end), so the pressure across the reed is
+        //   ΔP = P_mouth − p = P_mouth − 2·p₊ + Zc·U.
+        // U depends on ΔP (implicit) — we break the loop with last sample's flow.
+        let p_in: f32 = inputs.iter().sum();
+        // The open pipe end reflects no DC, so the reed feels only the AC standing
+        // wave; tracking and removing the DC also kills a DC runaway in the loop.
+        self.p_dc += self.dc_a * (p_in - self.p_dc);
+        let p_plus = p_in - self.p_dc;
+        let pm = self.pressure * self.env;
+        let dp = pm - 2.0 * p_plus + self.zc * self.ur_prev;
+
+        // Reed mass-spring-damper (semi-implicit Euler). Positive ΔP bends the
+        // reed toward shut; its static equilibrium is x = −β·ΔP.
+        let acc = -self.damp * self.v - self.wn2 * (self.x + self.beta * dp);
+        self.v += acc;
+        self.x += self.v;
+
+        // Tip opening: clamped at 0 (the reed beating shut) and bounded above (a
+        // reed can only lift so far off the lay) so a hard transient can't run away.
+        let h = (1.0 + self.x).clamp(0.0, 3.0);
+
+        // Bernoulli flow through the opening, + a little breath turbulence that
+        // only passes while the reed is open (jet noise at the aperture).
         self.rng ^= self.rng << 13;
         self.rng ^= self.rng >> 17;
         self.rng ^= self.rng << 5;
         let white = (self.rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
-        let breath = self.pressure * self.env * (1.0 + 0.02 * white); // + turbulence
-        // Reed reflection table (STK/MSW): the reflection coefficient falls with
-        // the pressure difference and clips when the reed slaps shut.
-        let delta = reflected - breath;
-        let slope = -(0.08 + self.stiffness * 0.22);
-        let reed = (0.7 + slope * delta).clamp(-1.0, 1.0);
-        breath + delta * reed // pressure launched back into the bore
+        // Flow needs breath: with none (env → 0 on note-off) there's no air
+        // through the reed, so the drive dies and the bore rings down — the reed
+        // can't self-oscillate on the standing wave alone. Gate sharply so this
+        // only bites near note-off and leaves the (multistable) attack untouched.
+        let g = (self.env * 4.0).min(1.0);
+        let ur_raw = g * h * (dp.signum() * dp.abs().sqrt() + 0.015 * white);
+        self.flow_lp += self.flow_a * (ur_raw - self.flow_lp);
+        let ur = self.flow_lp;
+        self.ur_prev = ur;
+        // Launch the outgoing wave back into the bore: p₋ = p₊ − Zc·U. A gentle
+        // saturation stands in for flow/radiation losses and keeps the limit
+        // cycle bounded no matter how hard it is blown.
+        (p_plus - self.zc * ur).tanh()
     }
     fn control(&mut self, c: Control) {
         if let Control::Gate(on) = c {
@@ -1229,10 +1290,76 @@ mod new_exciter_tests {
         let end = &tail[8_000..];
         assert!(end.iter().all(|s| s.abs() < 1e-2), "voice goes silent after note-off");
     }
+
+    /// Autocorrelation pitch estimate — robust to the harmonic-rich buzz, unlike
+    /// zero-crossing counting (whose extra crossings are the harmonics themselves).
+    fn acf_freq(y: &[f32], sr: f32, f0: f32) -> f32 {
+        let mean: f32 = y.iter().sum::<f32>() / y.len() as f32;
+        let s: Vec<f32> = y.iter().map(|v| v - mean).collect();
+        let lo = (sr / (f0 * 2.2)) as usize;
+        let hi = ((sr / (f0 * 0.45)) as usize).min(s.len() / 2);
+        let (mut best, mut best_c) = (lo, f32::MIN);
+        for lag in lo..hi {
+            let c: f32 = (0..s.len() - lag).map(|i| s[i] * s[i + lag]).sum();
+            if c > best_c {
+                best_c = c;
+                best = lag;
+            }
+        }
+        sr / best as f32
+    }
+
+    #[test]
+    fn ode_reed_plays_the_bore_pitch_across_the_register() {
+        // The reed ↔ bore loop must lock onto the *bore* fundamental (a clarinet
+        // tone), not squeak at the reed's own resonance, all the way down the
+        // register — the failure mode that plagues coupled reed models.
+        let sr = 48_000.0;
+        for &f0 in &[123.0f32, 165.0, 220.0, 311.0, 440.0, 622.0, 831.0] {
+            let mut reed = ReedExciter::new(0.8, 1.0, sr);
+            let mut bore = WaveguideBore::new(f0, 1.0, sr);
+            let mut fb = 0.0f32;
+            let y: Vec<f32> = (0..36_000)
+                .map(|_| {
+                    let r = reed.tick(&[fb]);
+                    fb = bore.tick(&[r]);
+                    fb
+                })
+                .collect();
+            assert!(y.iter().all(|v| v.is_finite() && v.abs() < 20.0), "reed loop stable at {f0} Hz");
+            let tail = &y[24_000..];
+            let rms = (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt();
+            assert!(rms > 0.15, "reed sustains a strong tone at {f0} Hz (rms {rms})");
+            let f = acf_freq(tail, sr, f0);
+            assert!((f / f0 - 1.0).abs() < 0.06, "reed plays the bore pitch {f0} Hz, got {f}");
+        }
+    }
+
+    #[test]
+    fn ode_reed_stops_when_the_breath_stops() {
+        // No breath ⇒ no flow through the reed: on note-off the drive dies and the
+        // loop rings down (it must not self-oscillate on the standing wave alone).
+        let sr = 48_000.0;
+        let mut reed = ReedExciter::new(0.8, 1.0, sr);
+        let mut bore = WaveguideBore::new(220.0, 1.0, sr);
+        let mut fb = 0.0f32;
+        let mut on = 0.0f32;
+        for i in 0..24_000 {
+            let r = reed.tick(&[fb]);
+            fb = bore.tick(&[r]);
+            on += fb * fb;
+        }
+        assert!((on / 24_000.0).sqrt() > 0.15, "reed sounds while blown");
+        reed.control(Control::Gate(false));
+        let tail: Vec<f32> = (0..24_000)
+            .map(|_| {
+                let r = reed.tick(&[fb]);
+                fb = bore.tick(&[r]);
+                fb
+            })
+            .collect();
+        let end = &tail[16_000..];
+        let end_rms = (end.iter().map(|v| v * v).sum::<f32>() / end.len() as f32).sqrt();
+        assert!(end_rms < 0.05, "reed rings down after note-off (rms {end_rms})");
+    }
 }
-
-
-
-
-
-
