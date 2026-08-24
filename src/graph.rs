@@ -31,6 +31,10 @@ pub enum Control {
     /// Key gate: `false` on note-off — driven exciters stop so the resonator
     /// rings out. Struck/one-shot exciters ignore it.
     Gate(bool),
+    /// Live mouth-pressure multiplier (1.0 = nominal) — a wind's breath/embouchure
+    /// axis. On a coupled reed it bends the pitch (harder = sharper) the way a
+    /// player lips a note; map it to an expression pedal / breath controller.
+    Breath(f32),
 }
 
 /// A per-voice, per-sample DSP block. `tick` advances one sample: it reads its
@@ -694,6 +698,7 @@ impl Node for VoiceExciter {
         match c {
             Control::Gate(on) => self.env_target = if on { 1.0 } else { 0.0 },
             Control::Bend(r) => self.incr = (self.f0 * r.max(0.01)) * self.inv_sr,
+            Control::Breath(_) => {}
         }
     }
 }
@@ -770,6 +775,7 @@ pub struct CoupledReed {
     u_prev: f32,
     flow_lp: f32,
     flow_a: f32,
+    press_mult: f32, // live mouth-pressure modulation (breath / pitch-wheel bend)
     // internal waveguide bore
     line: Vec<f32>,
     delay: f32,
@@ -806,6 +812,7 @@ impl CoupledReed {
             u_prev: 0.0,
             flow_lp: 0.0,
             flow_a: 0.28,
+            press_mult: 1.0,
             line: vec![0.0; delay.ceil() as usize + 3],
             delay,
             pos: 0,
@@ -827,7 +834,7 @@ impl Node for CoupledReed {
     fn tick(&mut self, _inputs: &[f32]) -> f32 {
         let rate = if self.env < self.env_target { self.atk } else { self.rel };
         self.env += (self.env_target - self.env) * rate;
-        let pm = self.pressure * self.env;
+        let pm = self.pressure * self.press_mult * self.env;
 
         // 1. The bore's returning wave at the mouthpiece (p₊): read the delay
         //    line, low-pass + invert at the bell.
@@ -882,8 +889,14 @@ impl Node for CoupledReed {
         bore_out
     }
     fn control(&mut self, c: Control) {
-        if let Control::Gate(on) = c {
-            self.env_target = if on { 1.0 } else { 0.0 };
+        match c {
+            Control::Gate(on) => self.env_target = if on { 1.0 } else { 0.0 },
+            // Breath is the pressure axis directly.
+            Control::Breath(m) => self.press_mult = m.clamp(0.2, 2.5),
+            // The pitch wheel bends a wind the *physical* way — via mouth
+            // pressure (harder = sharper), not by retuning. A ±2-semitone wheel
+            // (ratio ≈ 0.89–1.12) maps to a usable embouchure bend.
+            Control::Bend(r) => self.press_mult = (1.0 + 5.0 * (r - 1.0)).clamp(0.3, 2.0),
         }
     }
 }

@@ -216,6 +216,18 @@ impl Instrument {
         }
     }
 
+    /// Set the live mouth-pressure / breath multiplier (1.0 = nominal). Broadcast
+    /// to graph voices — a coupled reed swells and bends with it. Cheap, no rebuild.
+    pub fn set_breath(&mut self, mult: f32) {
+        for v in &mut self.voices {
+            if v.active {
+                if let Some(g) = v.graph.as_mut() {
+                    g.control(Control::Breath(mult));
+                }
+            }
+        }
+    }
+
     #[inline]
     fn sine_at(&self, phase: f32) -> f32 {
         let x = phase * TABLE_SIZE as f32;
