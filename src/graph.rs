@@ -702,6 +702,96 @@ impl Node for WaveguideReed {
     }
 }
 
+/// A digital-waveguide **bowed string** — the STK bowed-string model. The string
+/// is two delay lines meeting at the bow point; the bridge end reflects through a
+/// one-pole low-pass, the nut end rigidly; the bow is a nonlinear friction table
+/// on the slip velocity (bow speed − string velocity) that closes the loop. As
+/// with the reed, the traveling wave reflecting off the ends is what lets it lock
+/// into Helmholtz stick-slip — a modal bank can't. Self-contained; pitch = total
+/// delay length, bow position = where the string is split.
+pub struct WaveguideBow {
+    nut: Vec<f32>,      // nut-side delay line
+    nut_pos: usize,
+    nut_len: usize,
+    bridge: Vec<f32>,   // bridge-side delay line (fractional, carries tuning)
+    bridge_pos: usize,
+    bridge_delay: f32,
+    br_lp: f32,         // bridge low-pass state
+    br_a: f32,          // bridge brightness
+    speed: f32,
+    slope: f32,         // friction-curve sharpness (bow force)
+    env: f32,
+    env_target: f32,
+    atk: f32,
+    rel: f32,
+    rng: u32,
+}
+
+impl WaveguideBow {
+    pub fn new(freq_hz: f32, speed: f32, force: f32, sr: f32) -> Self {
+        let f = freq_hz.max(20.0);
+        let total = (sr / (2.0 * f) - 1.0).max(4.0); // both ends reflect → sr/(2·total)
+        let bow_pos = 0.13; // near the bridge (brighter, stable stick-slip)
+        let bridge_delay = (total * bow_pos).max(2.0);
+        let nut_len = ((total * (1.0 - bow_pos)).round() as usize).max(2);
+        WaveguideBow {
+            nut: vec![0.0; nut_len + 1],
+            nut_pos: 0,
+            nut_len,
+            bridge: vec![0.0; bridge_delay.ceil() as usize + 3],
+            bridge_pos: 0,
+            bridge_delay,
+            br_lp: 0.0,
+            br_a: 0.5,
+            speed: speed * 0.12, // bow velocity (scaled into the wave domain)
+            slope: 3.0 + force * 3.0, // more force = sharper stick-slip
+            env: 0.0,
+            env_target: 1.0,
+            atk: 1.0 - (-1.0 / (0.04 * sr)).exp(), // ~40 ms bow onset
+            rel: 1.0 - (-1.0 / (0.06 * sr)).exp(),
+            rng: 0x1f35_3c6d,
+        }
+    }
+}
+
+impl Node for WaveguideBow {
+    #[inline]
+    fn tick(&mut self, _inputs: &[f32]) -> f32 {
+        let rate = if self.env < self.env_target { self.atk } else { self.rel };
+        self.env += (self.env_target - self.env) * rate;
+        // Waves arriving at the bow point from each side.
+        let neck = self.nut[self.nut_pos];
+        let nb = self.bridge.len();
+        let rp = self.bridge_pos as f32 + nb as f32 - self.bridge_delay;
+        let i0 = rp.floor() as usize % nb;
+        let i1 = (i0 + 1) % nb;
+        let frac = rp - rp.floor();
+        let bridge_in = self.bridge[i0] * (1.0 - frac) + self.bridge[i1] * frac;
+        let string_vel = neck + bridge_in;
+        // Friction table on the slip velocity: high near sticking, falling off as
+        // the string slips (the negative-resistance stick-slip characteristic).
+        let mut dv = self.speed * self.env - string_vel;
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        dv += (self.rng as f32 / u32::MAX as f32 - 0.5) * 0.005 * self.env; // bow noise
+        let fr = ((dv.abs() * self.slope + 0.75).powi(4)).max(1.0);
+        let bow = (dv / fr) * self.env; // velocity the bow injects
+        // Scatter into the two delay lines; the bridge reflects through a low-pass.
+        self.br_lp += self.br_a * (neck - self.br_lp);
+        self.nut[self.nut_pos] = bridge_in + bow;
+        self.bridge[self.bridge_pos] = -self.br_lp + bow;
+        self.nut_pos = (self.nut_pos + 1) % self.nut_len;
+        self.bridge_pos = (self.bridge_pos + 1) % nb;
+        string_vel
+    }
+    fn control(&mut self, c: Control) {
+        if let Control::Gate(on) = c {
+            self.env_target = if on { 1.0 } else { 0.0 };
+        }
+    }
+}
+
 /// A passthrough mixer: outputs the (already edge-scaled) sum of its inputs.
 /// Used as a graph's output node so several components (e.g. a dry primary and a
 /// wet body) can be blended by their edge gains.
@@ -1044,6 +1134,8 @@ mod new_exciter_tests {
         assert!(end.iter().all(|s| s.abs() < 1e-2), "voice goes silent after note-off");
     }
 }
+
+
 
 
 
