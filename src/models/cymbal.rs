@@ -89,6 +89,14 @@ impl FtmModel for Cymbal {
             out.noise_decay = (self.damping * 1.5).max(0.5);
             out.noise_hp = 4000.0;
             out.noise_lp = 18_000.0;
+            // A crash is a living wash, not a static hiss: it BLOOMS after the
+            // strike as energy cascades into the high modes (a longer swell on a
+            // big, slow plate; short splashes barely bloom), and beats/shimmers
+            // as those modes couple. We can't do the nonlinear coupling in a
+            // linear modal engine, so we emulate its audible signature with a
+            // noise swell + a slow undulation over the wash.
+            out.noise_bloom_s = (0.06 / self.damping.max(0.05)).clamp(0.005, 0.25);
+            out.noise_shimmer = 0.6;
         }
     }
 

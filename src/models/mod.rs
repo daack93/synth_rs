@@ -74,6 +74,13 @@ pub struct ModeBuffer {
     /// at `noise_lp` (a band-pass).
     pub noise_hp: f32,
     pub noise_lp: f32,
+    /// Wash swell time (s): the noise fades IN over this long before decaying,
+    /// so a cymbal blooms after the strike instead of starting at full hiss.
+    /// 0 = instant onset (snare/breath/click — the original behaviour).
+    pub noise_bloom_s: f32,
+    /// Slow amplitude undulation depth (0..1): a living, beating shimmer laid
+    /// over the wash (two incommensurate slow LFOs). 0 = steady (the original).
+    pub noise_shimmer: f32,
 }
 
 impl Default for ModeBuffer {
@@ -88,6 +95,8 @@ impl Default for ModeBuffer {
             noise_decay: 0.0,
             noise_hp: 20.0,
             noise_lp: 20_000.0,
+            noise_bloom_s: 0.0,
+            noise_shimmer: 0.0,
         }
     }
 }
@@ -100,6 +109,8 @@ impl ModeBuffer {
         self.noise_decay = 0.0;
         self.noise_hp = 20.0;
         self.noise_lp = 20_000.0;
+        self.noise_bloom_s = 0.0;
+        self.noise_shimmer = 0.0;
     }
 
     /// Append one mode. Silently ignores modes past `MAX_MODES`.

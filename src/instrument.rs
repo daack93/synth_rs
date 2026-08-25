@@ -84,6 +84,14 @@ struct Voice {
     noise_lp_a: f32,
     noise_hp_s: f32,
     noise_lp_s: f32,
+    // Evolving cymbal wash (0/steady = the original burst for other models).
+    noise_rise: f32,     // swell state, 0 → 1 over the bloom time
+    noise_rise_a: f32,   // swell attack coefficient
+    noise_shimmer: f32,  // slow-undulation depth
+    lfo1: (f32, f32),    // quadrature LFO states (shimmer beat)
+    lfo2: (f32, f32),
+    lfo1_rot: (f32, f32),// per-sample (cos,sin) rotation for each LFO
+    lfo2_rot: (f32, f32),
     rng: u32,
     // Per-sample graph render path (`Some` = this voice renders through the
     // voice graph instead of the mode bank). `graph_env` is an amplitude
@@ -118,6 +126,13 @@ impl Voice {
             noise_lp_a: 0.0,
             noise_hp_s: 0.0,
             noise_lp_s: 0.0,
+            noise_rise: 1.0,
+            noise_rise_a: 1.0,
+            noise_shimmer: 0.0,
+            lfo1: (1.0, 0.0),
+            lfo2: (1.0, 0.0),
+            lfo1_rot: (1.0, 0.0),
+            lfo2_rot: (1.0, 0.0),
             rng: 1,
             graph: None,
             graph_env: 0.0,
@@ -410,10 +425,25 @@ impl Instrument {
             } else {
                 (-buf.noise_decay.max(0.0) / sr).exp()
             };
+            // Evolving-wash controls (cymbal). Zero = the original instant burst.
+            v.noise_shimmer = buf.noise_shimmer.max(0.0);
+            let blooms = buf.noise_bloom_s > 1e-4;
+            v.noise_rise_a = if blooms {
+                1.0 - (-1.0 / (buf.noise_bloom_s * sr)).exp()
+            } else {
+                1.0
+            };
+            // Two incommensurate slow LFOs (~5.3 & ~8.1 Hz) → a non-repeating beat.
+            let tau = std::f32::consts::TAU;
+            v.lfo1_rot = ((tau * 5.3 / sr).cos(), (tau * 5.3 / sr).sin());
+            v.lfo2_rot = ((tau * 8.1 / sr).cos(), (tau * 8.1 / sr).sin());
             if fresh {
                 v.noise_env = 1.0;
                 v.noise_hp_s = 0.0;
                 v.noise_lp_s = 0.0;
+                v.noise_rise = if blooms { 0.0 } else { 1.0 };
+                v.lfo1 = (1.0, 0.0);
+                v.lfo2 = (1.0, 0.0);
                 // Seed the per-voice noise RNG (never zero).
                 v.rng = (self.age_counter as u32)
                     .wrapping_mul(2_654_435_761)
@@ -479,9 +509,23 @@ impl Instrument {
             v.noise_hp_s += v.noise_hp_a * (white - v.noise_hp_s);
             let hp = white - v.noise_hp_s;
             v.noise_lp_s += v.noise_lp_a * (hp - v.noise_lp_s);
-            acc += v.noise_lp_s * v.noise_env * v.noise_level;
+            // Swell the wash in (bloom), so a cymbal grows after the strike.
+            v.noise_rise += v.noise_rise_a * (1.0 - v.noise_rise);
+            // Living shimmer: modulate by two incommensurate slow LFOs (rotate
+            // each quadrature oscillator one step). Depth 0 ⇒ factor 1 (steady).
+            let shimmer = if v.noise_shimmer > 1e-4 {
+                let (c1, s1) = v.lfo1_rot;
+                v.lfo1 = (v.lfo1.0 * c1 - v.lfo1.1 * s1, v.lfo1.0 * s1 + v.lfo1.1 * c1);
+                let (c2, s2) = v.lfo2_rot;
+                v.lfo2 = (v.lfo2.0 * c2 - v.lfo2.1 * s2, v.lfo2.0 * s2 + v.lfo2.1 * c2);
+                (1.0 + v.noise_shimmer * 0.5 * (v.lfo1.1 + v.lfo2.1)).max(0.0)
+            } else {
+                1.0
+            };
+            acc += v.noise_lp_s * v.noise_env * v.noise_level * v.noise_rise * shimmer;
             v.noise_env *= v.noise_dmul;
-            if v.noise_env > 1e-4 {
+            // Alive while the burst still has level OR is still swelling in.
+            if v.noise_env * v.noise_rise > 1e-4 {
                 alive = true;
             }
         }
