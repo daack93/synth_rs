@@ -1507,7 +1507,7 @@ impl Node for WaveguideReed {
 /// one-way delay is sr/f. Velocity-wave domain, like the bow.
 /// Number of first-order allpass stages in the string's dispersion cascade —
 /// enough to make stiffness/inharmonicity audible without heavy cost.
-const DISP_STAGES: usize = 16;
+const DISP_STAGES: usize = 8;
 
 /// Phase delay (in samples) of one first-order allpass H(z)=(a+z⁻¹)/(1+a·z⁻¹)
 /// at radian frequency ω — used to compensate the loop so the fundamental stays
@@ -1518,6 +1518,30 @@ fn allpass_phase_delay(a: f32, w: f32) -> f32 {
     let den = (-a * sw).atan2(1.0 + a * cw); // phase of (1 + a·e^-jω)
     let phase = num - den;
     if w > 1e-6 { -phase / w } else { 0.0 }
+}
+
+/// Solve for the (negative) allpass coefficient so a cascade of `m` sections
+/// produces `target_dv` samples of phase-delay CHANGE between the fundamental
+/// `w0` and a design partial `wd` — i.e. it realizes a specified string
+/// inharmonicity. `target_dv` is negative (high partials travel faster → shorter
+/// delay → sharp). Monotonic in |a|, so a short bisection nails it at note-on.
+fn solve_allpass_coeff(m: usize, w0: f32, wd: f32, target_dv: f32) -> f32 {
+    if target_dv >= 0.0 {
+        return 0.0;
+    }
+    let variation = |a: f32| {
+        m as f32 * (allpass_phase_delay(a, wd) - allpass_phase_delay(a, w0))
+    };
+    let (mut lo, mut hi) = (-0.95f32, 0.0f32); // variation(lo) ≪ 0, variation(hi) = 0
+    for _ in 0..48 {
+        let mid = 0.5 * (lo + hi);
+        if variation(mid) < target_dv {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
 }
 
 pub struct StringCore {
@@ -1545,7 +1569,9 @@ impl StringCore {
     /// `pos` is the interaction point (0 = nut, 1 = bridge). `decay_time` is the
     /// fundamental's -60 dB time (s); `hf_damping` 0..1 darkens the tail; `disp`
     /// is the dispersion-allpass coefficient (0 = an ideal flexible string).
-    pub fn new(freq_hz: f32, pos: f32, decay_time: f32, hf_damping: f32, disp: f32, sr: f32) -> Self {
+    /// `b_target` is the physical inharmonicity coefficient B (0 = ideal
+    /// flexible string). The dispersion allpass is DESIGNED to realize it.
+    pub fn new(freq_hz: f32, pos: f32, decay_time: f32, hf_damping: f32, b_target: f32, sr: f32) -> Self {
         let f = freq_hz.clamp(20.0, sr * 0.45);
         // The loop's one-pole bridge filter adds ~half a sample of phase; fold it
         // into the target so the pitch lands right. Split the delay so the nut
@@ -1560,24 +1586,26 @@ impl StringCore {
         let lp_a = 1.0 - (-tau * cutoff / sr).exp();
         // A one-pole adds ≈(1-a)/a samples of phase at DC; fold it into the delay.
         let lp_phase = (1.0 - lp_a) / lp_a;
-        // A cascade of first-order allpasses disperses the string: high partials
-        // travel slower, stretching sharp off the harmonic series (piano /
-        // steel-string inharmonicity). `disp` (0..1 = stiffness) drives a NEGATIVE
-        // coefficient (sharp stretch). The cascade also adds delay at the
-        // fundamental — a lot on a short (high) string — so cap its magnitude so
-        // that delay never exceeds ~25% of the loop (else the tuning breaks and
-        // the treble over-disperses). Net: inharmonicity is strongest in the bass
-        // (long strings) and gentle up top, as on a real piano.
-        let want = disp.clamp(0.0, 1.0) * 0.85;
-        let r = 0.25 * (sr / f);
-        let m_max = ((r - DISP_STAGES as f32) / (r + DISP_STAGES as f32)).clamp(0.0, 0.85);
-        let disp_a = -want.min(m_max);
+        // Dispersion: a cascade of first-order allpasses DESIGNED to realize the
+        // physical inharmonicity B. A stiff string's partials sit at
+        // f_n = n·f0·√(1+B·n²), so the loop's phase delay must fall from D0 at the
+        // fundamental to D0/√(1+B·n²) at partial n (high partials travel faster).
+        // Solve the allpass coefficient to hit that delay CHANGE at a design
+        // partial; the coefficient is sized to B, so it stays tiny for a nearly
+        // ideal string and never over-disperses. Then compensate the loop delay
+        // by the cascade's delay at the fundamental so the pitch stays exact.
         let w0 = tau * f / sr;
-        let disp_phase = if disp_a != 0.0 {
-            allpass_phase_delay(disp_a, w0) * DISP_STAGES as f32
+        let d0 = sr / f;
+        let disp_a = if b_target > 1e-7 {
+            // design partial: a high-ish partial that's still well below Nyquist
+            let n_d = 12.0f32.min(sr * 0.40 / f).max(2.0);
+            let wd = tau * n_d * f / sr;
+            let target_dv = d0 * (1.0 / (1.0 + b_target * n_d * n_d).sqrt() - 1.0);
+            solve_allpass_coeff(DISP_STAGES, w0, wd, target_dv)
         } else {
             0.0
         };
+        let disp_phase = DISP_STAGES as f32 * allpass_phase_delay(disp_a, w0);
         let total = (sr / f - lp_phase - disp_phase - 0.05).max(4.0);
         let pos = pos.clamp(0.05, 0.95);
         let left_len = ((total * (1.0 - pos)).floor() as usize).max(1);
@@ -1678,15 +1706,14 @@ impl StringCore {
         // Bridge termination: note-tracking low-pass (HF damping) → loop gain.
         self.lp_state += self.lp_a * (right_out - self.lp_state);
         let mut b = self.loss_g * self.lp_state;
-        if self.disp_a != 0.0 {
-            // cascade of first-order allpasses: y = a·x + x1 − a·y1
-            let a = self.disp_a;
-            for i in 0..DISP_STAGES {
-                let y = a * b + self.disp_x[i] - a * self.disp_y[i];
-                self.disp_x[i] = b;
-                self.disp_y[i] = y;
-                b = y;
-            }
+        // Dispersion cascade — always run so its delay matches the compensation
+        // in `new()` (at a=0 each stage is a plain unit delay, still compensated).
+        let a = self.disp_a;
+        for i in 0..DISP_STAGES {
+            let y = a * b + self.disp_x[i] - a * self.disp_y[i];
+            self.disp_x[i] = b;
+            self.disp_y[i] = y;
+            b = y;
         }
         let bridge_refl = -b;
         let nut_refl = -left_out;
@@ -1727,7 +1754,8 @@ impl WaveguidePluck {
         vel: f32,
         sr: f32,
     ) -> Self {
-        let mut core = StringCore::new(freq_hz, pos, decay_time, hf_damping, stiffness, sr);
+        let b_target = stiffness.clamp(0.0, 1.0) * 0.001; // provisional stiffness->B until specs ground it
+        let mut core = StringCore::new(freq_hz, pos, decay_time, hf_damping, b_target, sr);
         // Seed the excitation from the pitch so every note gets its own noise.
         let seed = (freq_hz * 131.0) as u32 ^ 0x9e37_79b9;
         core.pluck_coherent(vel.clamp(0.05, 1.0), seed);
