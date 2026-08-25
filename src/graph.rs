@@ -20,7 +20,7 @@ use crate::models::ModeBuffer;
 
 const TAU: f32 = std::f32::consts::TAU;
 const PI: f32 = std::f32::consts::PI;
-const CR_COMP: f32 = 2.5;
+const CR_COMP: f32 = 1.6;
 /// Register-hole position along the bore (fraction from the throat). At 1/3 the
 /// fundamental has a pressure antinode and the 3rd harmonic a node, so opening
 /// the hole kills the fundamental and the reed jumps a 12th to the 3rd.
@@ -825,11 +825,19 @@ impl CoupledReed {
         // twelfth, 1/2 for the sax's octave.
         let reg_pos = (1.0 / overblow.max(1.5)).clamp(0.1, 0.9);
         // One-way propagation over the whole bore (round-trip = 2·dtot), split at
-        // the register hole.
-        let dtot = (length_m.max(0.02) / (2.0 * c) * sr - CR_COMP).max(4.0);
+        // the register hole. `CR_COMP` recenters the raw pitch (a fixed length the
+        // reed/mouthpiece add); a cone's throat filter adds extra delay, so it
+        // needs more compensation than a cylinder to sit in tune before calibration.
+        let comp = if conical { CR_COMP + 1.4 } else { CR_COMP };
+        let dtot = (length_m.max(0.02) / (2.0 * c) * sr - comp).max(4.0);
         let d1 = (dtot * reg_pos).max(2.0);
         let d2 = (dtot * (1.0 - reg_pos)).max(2.0);
-        let wn = TAU * 1500.0 / sr;
+        // The reed's mechanical resonance sets the top of the range: the reed can
+        // only beat (and so sustain the tone) well below it. A real clarinet/sax
+        // reed resonates at ~2–3 kHz; a stiffer reed resonates higher (∝√(k/m)),
+        // so tie it to `stiffness` — stiffer reeds play higher and brighter.
+        let reed_hz = (2000.0 + 800.0 * stiffness.clamp(0.0, 2.5)).clamp(1600.0, 4000.0);
+        let wn = TAU * reed_hz / sr;
         let beta = (0.65 + 0.14 * stiffness.clamp(0.0, 2.0)).clamp(0.7, 0.9);
         // Cone throat filter: a one-pole low-pass modelling the apex's spherical
         // spreading. A near-lossless non-inverting bell reflection turns the
