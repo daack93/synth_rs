@@ -1498,6 +1498,174 @@ impl Node for WaveguideReed {
     }
 }
 
+/// The shared digital-waveguide **string** behind the plucked / hammered / bowed
+/// models. Two delay lines meet at an interaction point where an exciter couples
+/// in; the nut reflects rigidly (inverting), the bridge reflects through a loss
+/// filter (loop gain → decay; one-pole low-pass → HF damping) and, optionally, a
+/// first-order dispersion allpass (string stiffness → inharmonic partials). Both
+/// ends invert, so one trip through both segments is a full period → the total
+/// one-way delay is sr/f. Velocity-wave domain, like the bow.
+pub struct StringCore {
+    left: Vec<f32>,      // interaction-point → nut delay line
+    left_pos: usize,
+    left_len: usize,
+    right: Vec<f32>,     // interaction-point → bridge delay line
+    right_pos: usize,
+    right_int: usize,    // integer part of the bridge delay
+    tune_c: f32,         // first-order allpass coeff for the fractional delay
+    tune_x1: f32,
+    tune_y1: f32,
+    loss_g: f32,         // per-round-trip loop gain (<1) → overall decay
+    lp_a: f32,           // bridge low-pass coefficient (HF damping); 1 = bright
+    lp_state: f32,
+    disp_a: f32,         // dispersion allpass coeff (0 = none)
+    disp_x1: f32,
+    disp_y1: f32,
+    rng: u32,
+}
+
+impl StringCore {
+    /// `pos` is the interaction point (0 = nut, 1 = bridge). `decay_time` is the
+    /// fundamental's -60 dB time (s); `hf_damping` 0..1 darkens the tail; `disp`
+    /// is the dispersion-allpass coefficient (0 = an ideal flexible string).
+    pub fn new(freq_hz: f32, pos: f32, decay_time: f32, hf_damping: f32, disp: f32, sr: f32) -> Self {
+        let f = freq_hz.clamp(20.0, sr * 0.45);
+        // The loop's one-pole bridge filter adds ~half a sample of phase; fold it
+        // into the target so the pitch lands right. Split the delay so the nut
+        // (integer) line takes the whole part and the fractional bridge line
+        // carries the remainder exactly (left_len + right_delay == total).
+        let total = (sr / f - 0.05).max(4.0);
+        let pos = pos.clamp(0.05, 0.95);
+        let left_len = ((total * (1.0 - pos)).floor() as usize).max(1);
+        let right_delay = (total - left_len as f32).max(1.0);
+        // Bridge delay = integer taps + a first-order allpass for the fraction
+        // (accurate, lossless — unlike linear interpolation, which phase-advances
+        // the highs and plays sharp). Keep the fraction in [0.1, 1.1) so the
+        // allpass coefficient stays away from ±1 (transient-free).
+        let mut right_int = right_delay.floor() as usize;
+        let mut frac = right_delay - right_int as f32;
+        if frac < 0.1 && right_int >= 1 { right_int -= 1; frac += 1.0; }
+        let tune_c = (1.0 - frac) / (1.0 + frac);
+        // Per-round-trip gain for the requested -60 dB decay: g^(loops) = 1e-3,
+        // loops = decay_time·f (round trips in that time).
+        let loops = (decay_time.max(0.02) * f).max(1.0);
+        let loss_g = (-6.9078 / loops).exp();
+        StringCore {
+            left: vec![0.0; left_len + 1],
+            left_pos: 0,
+            left_len,
+            right: vec![0.0; right_int + 2],
+            right_pos: 0,
+            right_int,
+            tune_c,
+            tune_x1: 0.0,
+            tune_y1: 0.0,
+            loss_g,
+            lp_a: (1.0 - hf_damping.clamp(0.0, 0.9) * 0.3).clamp(0.05, 1.0),
+            lp_state: 0.0,
+            disp_a: disp.clamp(-0.9, 0.9),
+            disp_x1: 0.0,
+            disp_y1: 0.0,
+            rng: 0x2545_f491,
+        }
+    }
+
+    /// Excite by filling the delay lines with a velocity burst (Karplus-Strong):
+    /// white noise, comb-coloured by the interaction position, scaled by `vel`.
+    pub fn pluck(&mut self, vel: f32, seed: u32) {
+        self.rng = seed | 1;
+        let mut white = |s: &mut Self| -> f32 {
+            s.rng ^= s.rng << 13;
+            s.rng ^= s.rng >> 17;
+            s.rng ^= s.rng << 5;
+            (s.rng as f32 / u32::MAX as f32) * 2.0 - 1.0
+        };
+        for i in 0..self.left.len() {
+            self.left[i] = white(self) * vel * 0.4;
+        }
+        for i in 0..self.right.len() {
+            self.right[i] = white(self) * vel * 0.4;
+        }
+    }
+
+    /// One sample. `inject` is added into both outgoing directions at the
+    /// interaction point (a continuous exciter — bow/hammer; 0 for a free pluck).
+    /// Returns the string signal at the interaction point.
+    #[inline]
+    pub fn tick(&mut self, inject: f32) -> f32 {
+        let left_out = self.left[self.left_pos];
+        let nr = self.right.len();
+        let ri = (self.right_pos + nr - self.right_int) % nr;
+        let raw = self.right[ri];
+        // First-order allpass fractional-delay (tuning): y = c·x + x1 − c·y1.
+        let right_out = self.tune_c * raw + self.tune_x1 - self.tune_c * self.tune_y1;
+        self.tune_x1 = raw;
+        self.tune_y1 = right_out;
+        // Bridge termination: low-pass (HF damping) → loop gain → dispersion.
+        self.lp_state += self.lp_a * (right_out - self.lp_state);
+        let mut b = self.loss_g * self.lp_state;
+        if self.disp_a != 0.0 {
+            // first-order allpass: y = a·x + x1 − a·y1
+            let y = self.disp_a * b + self.disp_x1 - self.disp_a * self.disp_y1;
+            self.disp_x1 = b;
+            self.disp_y1 = y;
+            b = y;
+        }
+        let bridge_refl = -b;
+        let nut_refl = -left_out;
+        // Waves cross the interaction point; the exciter injection adds to both.
+        self.left[self.left_pos] = bridge_refl + inject;
+        self.right[self.right_pos] = nut_refl + inject;
+        self.left_pos = (self.left_pos + 1) % self.left_len;
+        self.right_pos = (self.right_pos + 1) % nr;
+        nut_refl + bridge_refl
+    }
+}
+
+/// A **plucked / struck string**: a `StringCore` excited by a Karplus-Strong
+/// velocity burst at note-on, then left to ring and decay. Self-contained (it
+/// ignores its inputs); note-off damps it like a hand stopping the string.
+pub struct WaveguidePluck {
+    core: StringCore,
+    rel: f32,
+    rel_mul: f32,
+    rel_off: f32,
+}
+
+impl WaveguidePluck {
+    pub fn new(
+        freq_hz: f32,
+        pos: f32,
+        decay_time: f32,
+        hf_damping: f32,
+        stiffness: f32,
+        vel: f32,
+        sr: f32,
+    ) -> Self {
+        let mut core = StringCore::new(freq_hz, pos, decay_time, hf_damping, stiffness, sr);
+        // Seed the excitation from the pitch so every note gets its own noise.
+        let seed = (freq_hz * 131.0) as u32 ^ 0x9e37_79b9;
+        core.pluck(vel.clamp(0.05, 1.0), seed);
+        let rel_off = (-1.0 / (0.08 * sr)).exp();
+        WaveguidePluck { core, rel: 1.0, rel_mul: 1.0, rel_off }
+    }
+}
+
+impl Node for WaveguidePluck {
+    #[inline]
+    fn tick(&mut self, _inputs: &[f32]) -> f32 {
+        let s = self.core.tick(0.0) * self.rel;
+        self.rel *= self.rel_mul;
+        s
+    }
+    fn control(&mut self, c: Control) {
+        if let Control::Gate(false) = c {
+            // Release: damp the string over ~80 ms (a hand muting it).
+            self.rel_mul = self.rel_off;
+        }
+    }
+}
+
 /// A digital-waveguide **bowed string** — the STK bowed-string model. The string
 /// is two delay lines meeting at the bow point; the bridge end reflects through a
 /// one-pole low-pass, the nut end rigidly; the bow is a nonlinear friction table

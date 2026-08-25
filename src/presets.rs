@@ -376,17 +376,46 @@ pub fn factory() -> Vec<Preset> {
     }
 
 
+    // A plucked/struck string on the shared waveguide core (StringCore), lightly
+    // coloured by an instrument body. Pitch tracks the played note; these are the
+    // physical tone controls (pluck position, decay, HF damping, stiffness).
+    fn plucked(
+        pos: f32,
+        decay: f32,
+        damping: f32,
+        stiffness: f32,
+        body_litres: f32,
+        body_hz: f32,
+        dry: f32,
+        body_gain: f32,
+    ) -> InstrumentGraph {
+        InstrumentGraph {
+            components: vec![
+                Comp::PluckedString { pos, decay, damping, stiffness },
+                Comp::Body { cavity_litres: body_litres, soundhole_cm: 3.0, top_hz: body_hz, decay_s: 0.2 },
+                Comp::Mix,
+            ],
+            edges: vec![
+                Edge { from: 0, to: 2, gain: dry },   // dry string → out
+                Edge { from: 0, to: 1, gain: 1.0 },   // string → body
+                Edge { from: 1, to: 2, gain: body_gain }, // body colour → out
+            ],
+            output: 2,
+            key_map: Vec::new(),
+        }
+    }
+
     let mut base = vec![
-        // ---- Pure String (feedback: pluck toward saw, stronger HF damping) ----
-        make("Acoustic Bass", string(0.864, 60.0, 1.30, NICKEL, 2.0, 0.5, 0.15), eng(0.75, 4.0, 120.0)),
-        make("Electric Bass", string(0.864, 55.0, 1.25, NICKEL, 2.6, 0.4, 0.12), eng(0.75, 4.0, 140.0)),
-        make("Acoustic Guitar", string(0.648, 90.0, 1.10, BRONZE, 2.5, 0.6, 0.12), eng(0.6, 3.0, 120.0)),
-        make("Electric Guitar", string(0.648, 78.0, 1.00, NICKEL, 3.0, 0.4, 0.10), eng(0.6, 3.0, 200.0)),
+        // ---- Plucked / struck strings on the shared waveguide (StringCore) ----
+        make("Acoustic Bass", plucked(0.15, 2.0, 0.40, 0.0, 30.0, 90.0, 0.8, 0.30), eng(0.75, 4.0, 120.0)),
+        make("Electric Bass", plucked(0.12, 2.6, 0.32, 0.0, 8.0, 100.0, 0.85, 0.20), eng(0.75, 4.0, 140.0)),
+        make("Acoustic Guitar", plucked(0.12, 2.5, 0.28, 0.0, 3.5, 200.0, 0.8, 0.35), eng(0.6, 3.0, 120.0)),
+        make("Electric Guitar", plucked(0.10, 3.0, 0.20, 0.0, 2.0, 250.0, 0.9, 0.15), eng(0.6, 3.0, 200.0)),
         // Less bass-heavy: brighter (more modes) with the highs allowed to sustain.
         make("Piano", string(0.600, 700.0, 1.10, STEEL, 3.5, 0.3, 0.12), eng(0.6, 2.0, 150.0)),
-        make("Banjo", string(0.670, 55.0, 0.40, STEEL, 0.8, 1.2, 0.08), eng(0.6, 2.0, 80.0)),
+        make("Banjo", plucked(0.08, 0.8, 0.12, 0.0, 4.0, 300.0, 0.85, 0.30), eng(0.6, 2.0, 80.0)),
         // Rounder pluck + more HF damping to tame the "electric" low end.
-        make("Harp", string(0.900, 55.0, 0.80, NYLON, 2.5, 0.5, 0.16), eng(0.6, 3.0, 180.0)),
+        make("Harp", plucked(0.16, 2.5, 0.25, 0.0, 20.0, 150.0, 0.8, 0.30), eng(0.6, 3.0, 180.0)),
         // ---- Multi-component graph: Strike → String → Body (A/B vs Acoustic Guitar) ----
         make(
             "Guitar + Body (graph)",
@@ -1415,15 +1444,16 @@ mod graph_twin_tests {
     fn struck_string_membrane_plate_presets_get_graph_twins() {
         let f = factory();
         let has = |n: &str| f.iter().any(|p| p.name == n);
-        // struck string + membrane + plate → twinned
-        assert!(has("Acoustic Guitar (graph)"), "struck string twinned");
+        // A remaining modal struck string (Piano) + membrane + plate → twinned.
+        // The plucked/bowed strings are now waveguide graphs natively (no twin).
+        assert!(has("Piano (graph)"), "struck string twinned");
         assert!(has("Tom (graph)"), "membrane twinned");
         assert!(has("Pure Plate (graph)"), "plate twinned");
-        // bowed strings + musical_string → NOT twinned
+        // bowed/plucked waveguide strings + musical_string handled separately
         assert!(!has("Violin (graph)"), "bowed strings excluded");
         assert!(has("Soft Nylon (graph)"), "musical_string twinned");
         // a twin points at the graph model, wraps the original params, and rebuilds
-        let g = f.iter().find(|p| p.name == "Acoustic Guitar (graph)").unwrap();
+        let g = f.iter().find(|p| p.name == "Piano (graph)").unwrap();
         assert_eq!(g.model_id, "graph_string");
         assert!(g.params.get("inner").is_some(), "params re-homed under inner");
         assert!(g.build_model().is_some(), "twin rebuilds via model_from_id");

@@ -22,7 +22,7 @@ use super::webster_horn::{PlayMode, WebsterHorn};
 use super::{freq_to_midi, midi_name, unbounded_slider, FtmModel, ModeBuffer};
 use crate::graph::{
     BowExciter, CoupledDoubleReed, CoupledReed, DriveExciter, FormantResonator, Graph, HammerExciter, ImpulseExciter,
-    JetPipe, LipReed, ModalResonator, Node, ReedExciter, SineExciter, SnareWires, Sum, VoiceExciter, WaveguideBore, WaveguideBow, WaveguideHorn, WaveguideReed,
+    JetPipe, LipReed, ModalResonator, Node, ReedExciter, SineExciter, SnareWires, Sum, VoiceExciter, WaveguideBore, WaveguideBow, WaveguidePluck, WaveguideHorn, WaveguideReed,
 };
 
 const PI: f32 = std::f32::consts::PI;
@@ -194,6 +194,12 @@ pub enum Comp {
     /// bridge + friction junction) that locks into Helmholtz stick-slip.
     /// `speed` = bow velocity, `force` = bow pressure.
     BowedString { speed: f32, force: f32 },
+    /// A digital-waveguide plucked/struck string — a self-contained voice
+    /// (`StringCore`) excited by a note-on burst, then ringing and decaying.
+    /// `pos` = pluck point (0 = nut, 1 = bridge); `decay` = the fundamental's
+    /// -60 dB time (s); `damping` = HF damping 0..1 (darker tail); `stiffness` =
+    /// dispersion coefficient (string stiffness → inharmonic partials).
+    PluckedString { pos: f32, decay: f32, damping: f32, stiffness: f32 },
     /// A vocal-fold (glottal) source, pitched at the played note. `open_quotient`
     /// = how long the folds stay open (breathy → pressed), `level` = drive.
     Voice { open_quotient: f32, level: f32 },
@@ -240,6 +246,7 @@ impl Comp {
             Comp::ReedPipe { .. } => "Reed pipe (waveguide)",
             Comp::AirJet { .. } => "Air jet / flute (flue)",
             Comp::BowedString { .. } => "Bowed string (waveguide)",
+            Comp::PluckedString { .. } => "Plucked string (waveguide)",
             Comp::Hammer { .. } => "Hammer (exciter)",
             Comp::Bow { .. } => "Bow (exciter)",
             Comp::Voice { .. } => "Voice / glottis (exciter)",
@@ -270,6 +277,7 @@ impl Comp {
                 | Comp::ReedPipe { .. }
                 | Comp::AirJet { .. }
                 | Comp::BowedString { .. }
+                | Comp::PluckedString { .. }
                 | Comp::Sine { .. }
         )
     }
@@ -385,6 +393,9 @@ impl Comp {
             }
             Comp::BowedString { speed, force } => {
                 Box::new(WaveguideBow::new(freq_hz, *speed, *force, sr))
+            }
+            Comp::PluckedString { pos, decay, damping, stiffness } => {
+                Box::new(WaveguidePluck::new(freq_hz, *pos, *decay, *damping, *stiffness, vel, sr))
             }
             Comp::Hammer { hardness, felt } => {
                 Box::new(HammerExciter::new(vel, *hardness, *felt, sr))
@@ -608,6 +619,16 @@ impl Comp {
                 c |= ui.add(unbounded_slider(force, 0.1..=2.0, "Bow force")).changed();
                 c
             }
+            Comp::PluckedString { pos, decay, damping, stiffness } => {
+                let mut c = false;
+                c |= ui.add(unbounded_slider(pos, 0.02..=0.5, "Pluck position")).changed();
+                c |= ui.add(unbounded_slider(decay, 0.2..=12.0, "Decay time (s)")).changed();
+                c |= ui.add(unbounded_slider(damping, 0.0..=0.9, "HF damping")).changed();
+                c |= ui
+                    .add(unbounded_slider(stiffness, 0.0..=0.5, "Stiffness (inharmonicity)"))
+                    .changed();
+                c
+            }
             Comp::Hammer { hardness, felt } => {
                 let mut c = false;
                 c |= ui
@@ -718,6 +739,7 @@ impl Comp {
             Comp::MusicalString(_) | Comp::Bell(_) | Comp::Cymbal(_) | Comp::Strike | Comp::Mix
             | Comp::Wires { .. } | Comp::Breath { .. }
             | Comp::Bow { .. } | Comp::Voice { .. } | Comp::ReedPipe { .. } | Comp::BowedString { .. }
+            | Comp::PluckedString { .. }
             | Comp::Sine { .. } => &[],
         }
     }
@@ -1416,6 +1438,10 @@ impl FtmModel for InstrumentGraph {
             }
             if ui.small_button("Bowed string").clicked() {
                 self.components.push(Comp::BowedString { speed: 1.2, force: 0.6 });
+                changed = true;
+            }
+            if ui.small_button("Plucked string").clicked() {
+                self.components.push(Comp::PluckedString { pos: 0.13, decay: 4.0, damping: 0.15, stiffness: 0.0 });
                 changed = true;
             }
             if ui.small_button("Hammer").clicked() {
