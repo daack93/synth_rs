@@ -1761,6 +1761,7 @@ pub struct LipReed {
     atk: f32,
     rel: f32,
     rng: u32,
+    amp_env: f32, // running wave amplitude — drives the brass "brassiness"
 }
 
 impl LipReed {
@@ -1817,6 +1818,7 @@ impl LipReed {
             atk: 1.0 - (-1.0 / (0.02 * sr)).exp(),
             rel: 1.0 - (-1.0 / (0.03 * sr)).exp(),
             rng: 0x2c9e_6d1b,
+            amp_env: 0.0,
         }
     }
 }
@@ -1868,9 +1870,8 @@ impl Node for LipReed {
         self.flow_lp += self.flow_a * (g * (u + h * 0.015 * white * breath) - self.flow_lp);
         let ur = self.flow_lp;
 
-        // 4. Launch the outgoing wave (p₋ = p₊ + Zc·U). A gentle saturation stands
-        //    in for the bore's flow/radiation losses and bounds the (positive-
-        //    feedback) limit cycle so the outward-striking lip can't run away.
+        // 4. Launch the outgoing wave (p₋ = p₊ + Zc·U), bounded by a saturation
+        //    that stands in for the bore's losses.
         let p_minus = (p_plus + self.zc * ur).tanh();
 
         // Bell: low-pass, then reflect NON-invertingly (same-sign loop → the full
@@ -1883,7 +1884,15 @@ impl Node for LipReed {
 
         self.fwd.write(p_minus);
         self.bwd.write(b_in);
-        p_plus
+
+        // BRASSINESS on the RADIATED tone only (outside the loop, so it colours the
+        // sound without shifting the oscillation's pitch or stability): as the note
+        // gets loud, push the output harder through a waveshaper — the nonlinear
+        // wave-steepening that gives a trumpet its cutting edge when blown hard,
+        // staying mellow when soft.
+        self.amp_env += 0.002 * (p_plus.abs() - self.amp_env);
+        const BRASS: f32 = 1.6;
+        (p_plus * (1.0 + BRASS * self.amp_env)).tanh()
     }
     fn control(&mut self, c: Control) {
         match c {
