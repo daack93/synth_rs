@@ -21,7 +21,7 @@ use super::pure_string::PureString;
 use super::webster_horn::{PlayMode, WebsterHorn};
 use super::{freq_to_midi, midi_name, unbounded_slider, FtmModel, ModeBuffer};
 use crate::graph::{
-    BowExciter, CoupledReed, DriveExciter, FormantResonator, Graph, HammerExciter, ImpulseExciter,
+    BowExciter, CoupledDoubleReed, CoupledReed, DriveExciter, FormantResonator, Graph, HammerExciter, ImpulseExciter,
     ModalResonator, Node, ReedExciter, SineExciter, SnareWires, Sum, VoiceExciter, WaveguideBore, WaveguideBow, WaveguideHorn, WaveguideReed,
 };
 
@@ -36,6 +36,14 @@ const LN_1000: f32 = 6.907_755;
 /// the configurable register break.
 fn default_overblow() -> f32 {
     3.0
+}
+
+/// A double reed is always conical and overblows the octave — its serde defaults.
+fn default_double_overblow() -> f32 {
+    2.0
+}
+fn default_true() -> bool {
+    true
 }
 
 /// Reed range floor: a single reed's lowest note is its full-length tube (the
@@ -107,6 +115,33 @@ pub enum Comp {
         #[serde(default)]
         tract_q: f32,
     },
+    /// A **coupled double-reed + bore** — the oboe / bassoon / cor-anglais voice.
+    /// Two stiff blades beat against each other (a high reed resonance) on a
+    /// strongly conical bore, driving a very constricted, pinched flow through the
+    /// same implicit reed↔bore solve as [`Comp::ReedBore`] — so the pitch still
+    /// locks to `length` (`f ≈ c/2L`). It overblows the OCTAVE (full harmonic
+    /// series) and carries a fixed nasal formant. Uses the same `OverblowTuned`
+    /// key-map + calibration machinery as the single-reed family. Key-map `length`.
+    DoubleReed {
+        pressure: f32,
+        stiffness: f32,
+        length: f32,
+        tone: f32,
+        register: f32,
+        /// Register-break ratio; a cone overblows the octave (2). Defaults to 2.
+        #[serde(default = "default_double_overblow")]
+        overblow: f32,
+        /// Double reeds are conical; defaults true.
+        #[serde(default = "default_true")]
+        conical: bool,
+        /// Vocal-tract voicing (as [`Comp::ReedBore`]): 0 = off, raise to voice the
+        /// altissimo registers.
+        #[serde(default)]
+        tract_gain: f32,
+        /// Sharpness (Q) of that tract resonance. 0 = a sensible default.
+        #[serde(default)]
+        tract_q: f32,
+    },
     /// A digital-waveguide reed pipe — a self-contained wind voice (bore delay +
     /// bell + reed) that self-oscillates into a clean reed tone. `pressure` =
     /// breath, `stiffness` = reed hardness, `tone` = bell brightness.
@@ -163,6 +198,7 @@ impl Comp {
             Comp::Breath { .. } => "Breath (exciter)",
             Comp::Reed { .. } => "Reed / lip (exciter)",
             Comp::ReedBore { .. } => "Reed + bore (coupled)",
+            Comp::DoubleReed { .. } => "Double reed + bore (coupled)",
             Comp::ReedPipe { .. } => "Reed pipe (waveguide)",
             Comp::BowedString { .. } => "Bowed string (waveguide)",
             Comp::Hammer { .. } => "Hammer (exciter)",
@@ -188,6 +224,7 @@ impl Comp {
                 | Comp::Breath { .. }
                 | Comp::Reed { .. }
                 | Comp::ReedBore { .. }
+                | Comp::DoubleReed { .. }
                 | Comp::Bow { .. }
                 | Comp::Voice { .. }
                 | Comp::ReedPipe { .. }
@@ -272,6 +309,21 @@ impl Comp {
                 // first overblow) — there it enables the lock; on the normal two
                 // registers it would just detune the calibrated tone. (`overblow`
                 // now carries the played note's harmonic, set by the key-map.)
+                let nat_h = if *conical { 2.0 } else { 3.0 };
+                let voiced = *tract_gain > 0.0 && *overblow > nat_h + 0.5;
+                let q = if *tract_q > 0.0 { *tract_q } else { 12.0 };
+                reed.set_tract(freq_hz, q, if voiced { *tract_gain } else { 0.0 }, sr);
+                Box::new(reed)
+            }
+            Comp::DoubleReed {
+                pressure, stiffness, length, tone, register, overblow, conical, tract_gain, tract_q,
+            } => {
+                let mut reed = CoupledDoubleReed::new(
+                    *pressure, *stiffness, *length, *tone, *register, *overblow, *conical, sr,
+                );
+                // Engage the tract voicing only in the altissimo (above the first
+                // overblow), exactly as the single reed — it detunes the calibrated
+                // low/overblown registers otherwise.
                 let nat_h = if *conical { 2.0 } else { 3.0 };
                 let voiced = *tract_gain > 0.0 && *overblow > nat_h + 0.5;
                 let q = if *tract_q > 0.0 { *tract_q } else { 12.0 };
@@ -426,6 +478,42 @@ impl Comp {
                     .changed();
                 c
             }
+            Comp::DoubleReed {
+                pressure, stiffness, length, tone, register, overblow, conical, tract_gain, tract_q,
+            } => {
+                let mut c = false;
+                c |= ui.add(unbounded_slider(pressure, 0.1..=2.0, "Mouth pressure")).changed();
+                c |= ui
+                    .add(unbounded_slider(stiffness, 0.0..=3.0, "Reed stiffness"))
+                    .on_hover_text("Stiff double-reed blades resonate high (bright, buzzy).")
+                    .changed();
+                c |= ui
+                    .add(unbounded_slider(length, 0.05..=2.0, "Bore length (m)"))
+                    .on_hover_text("Sets the pitch (usually key-mapped): f ≈ c/2L.")
+                    .changed();
+                c |= ui
+                    .add(unbounded_slider(register, 0.0..=0.6, "Register key"))
+                    .on_hover_text("0 = closed (low register); open lifts the vent → overblows the octave.")
+                    .changed();
+                c |= ui
+                    .add(unbounded_slider(overblow, 2.0..=3.0, "Overblow ratio"))
+                    .on_hover_text("A cone overblows the octave (2). Kept for parity with the single reed.")
+                    .changed();
+                c |= ui
+                    .checkbox(conical, "Conical bore")
+                    .on_hover_text("Double reeds are conical: full harmonic series, octave overblow.")
+                    .changed();
+                c |= ui.add(unbounded_slider(tone, 0.0..=1.5, "Bell brightness")).changed();
+                c |= ui
+                    .add(unbounded_slider(tract_gain, 0.0..=8.0, "Vocal-tract voicing"))
+                    .on_hover_text("Airway resonance inside the reed loop. 0 = off; raise to voice the altissimo registers.")
+                    .changed();
+                c |= ui
+                    .add(unbounded_slider(tract_q, 0.0..=40.0, "Tract Q"))
+                    .on_hover_text("Sharpness of the tract resonance. 0 = default (~12).")
+                    .changed();
+                c
+            }
             Comp::ReedPipe { pressure, stiffness, tone } => {
                 let mut c = false;
                 c |= ui.add(unbounded_slider(pressure, 0.1..=1.5, "Breath pressure")).changed();
@@ -534,7 +622,7 @@ impl Comp {
             // The waveguide bore's length — the coupled reed↔bore pitch control.
             Comp::Bore { .. } => &["length"],
             // The coupled reed+bore's length sets its (in-tune) pitch.
-            Comp::ReedBore { .. } => &["length", "register"],
+            Comp::ReedBore { .. } | Comp::DoubleReed { .. } => &["length", "register"],
             // The reed's fixed pitch — so a key can drive embouchure/pitch on a
             // self-contained mouthpiece (`freq_hz > 0`).
             Comp::Reed { .. } => &["freq"],
@@ -562,6 +650,8 @@ impl Comp {
             (Comp::Bore { length, .. }, "length") => Some(*length),
             (Comp::ReedBore { length, .. }, "length") => Some(*length),
             (Comp::ReedBore { register, .. }, "register") => Some(*register),
+            (Comp::DoubleReed { length, .. }, "length") => Some(*length),
+            (Comp::DoubleReed { register, .. }, "register") => Some(*register),
             (Comp::Reed { freq_hz, .. }, "freq") => Some(*freq_hz),
             _ => None,
         }
@@ -584,6 +674,8 @@ impl Comp {
             (Comp::Bore { length, .. }, "length") => *length = v,
             (Comp::ReedBore { length, .. }, "length") => *length = v,
             (Comp::ReedBore { register, .. }, "register") => *register = v,
+            (Comp::DoubleReed { length, .. }, "length") => *length = v,
+            (Comp::DoubleReed { register, .. }, "register") => *register = v,
             (Comp::Reed { freq_hz, .. }, "freq") => *freq_hz = v,
             _ => {}
         }
@@ -649,7 +741,9 @@ impl Comp {
     /// engaged, the harmonic climbs freely, reaching the altissimo registers.
     /// No-op for non-reed components.
     fn set_reed_register(&mut self, freq: f32, anchor_hz: f32, steps: f32) {
-        if let Comp::ReedBore { length, register, overblow, conical, tract_gain, .. } = self {
+        if let Comp::ReedBore { length, register, overblow, conical, tract_gain, .. }
+        | Comp::DoubleReed { length, register, overblow, conical, tract_gain, .. } = self
+        {
             let f = freq.max(1.0);
             let anchor = anchor_hz.max(1.0);
             let nat_h = if *conical { 2.0 } else { 3.0 }; // first overblow harmonic
@@ -794,7 +888,7 @@ impl InstrumentGraph {
                 None => return (0.0, 0.0),
             };
             c.set_reed_register(f, anchor_hz, steps); // register + length only
-            if let Comp::ReedBore { length, .. } = &mut c {
+            if let Comp::ReedBore { length, .. } | Comp::DoubleReed { length, .. } = &mut c {
                 *length *= mult;
             }
             let g = InstrumentGraph {
@@ -1057,7 +1151,9 @@ impl FtmModel for InstrumentGraph {
                             // longest tube (the anchor is its lowest note). Notes
                             // more than ~a half-semitone below go silent.
                             if freq_hz < anchor_hz * REED_FLOOR {
-                                if let Comp::ReedBore { pressure, .. } = c {
+                                if let Comp::ReedBore { pressure, .. }
+                                | Comp::DoubleReed { pressure, .. } = c
+                                {
                                     *pressure = 0.0;
                                 }
                             } else {
@@ -1066,7 +1162,9 @@ impl FtmModel for InstrumentGraph {
                                 c.set_reed_register(freq_hz, *anchor_hz, *steps);
                                 let note = super::freq_to_midi(freq_hz).clamp(0, 127) as usize;
                                 if let Some(&mult) = table.get(note) {
-                                    if let Comp::ReedBore { length, .. } = c {
+                                    if let Comp::ReedBore { length, .. }
+                                    | Comp::DoubleReed { length, .. } = c
+                                    {
                                         *length *= mult;
                                     }
                                 }

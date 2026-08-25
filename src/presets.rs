@@ -57,6 +57,16 @@ fn reed_wind_table(i: usize) -> Vec<f32> {
     reed_tables::TABLES.get(i).map(|t| t.to_vec()).unwrap_or_default()
 }
 
+/// Oboe: a conical double reed anchored at concert Bb3 (its lowest note).
+const OBOE_ANCHOR_HZ: f32 = 233.08;
+/// Pre-solved per-note bore-length calibration for the `Base: Oboe` double reed
+/// (128 MIDI slots, 1.0 = no correction). Regenerate with the `dump_oboe_table`
+/// test and paste the printed array here whenever the double-reed model changes.
+#[rustfmt::skip]
+const OBOE_LEN_TABLE: [f32; 128] = [
+    1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0004,1.0004,1.0004,1.0011,1.0011,1.0011,1.0011,1.0011,1.0011,1.0011,1.0011,1.0011,1.0011,1.0011,1.0011,1.0018,1.0018,1.0018,1.0018,1.0018,1.0018,1.0025,1.0025,1.0025,1.0025,1.0025,1.0025,1.0025,1.0032,1.0032,1.0032,1.0039,1.0039,1.0039,1.0039,1.0046,1.0046,1.0053,1.0053,1.0053,1.0053,1.0067,1.0060,1.0067,1.0074,1.0074,0.9982,0.9982,0.9982,0.9982,0.9975,0.9975,0.9975,0.9968,0.9968,0.9968,0.9961,0.9968,0.9961,0.9954,0.9947,0.9954,0.9933,0.9933,0.9912,0.9898,0.9863,1.0000,0.9771,0.9743,0.9546,0.9589,0.9659,0.9729,0.9870,1.0000,1.0116,1.0221,1.0376,1.0510,1.0650,1.0840,1.0826,1.0812,1.0904,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,
+];
+
 /// A saved instrument: everything needed to reconstruct a playable sound.
 ///
 /// A preset is either a **single instrument** (`zones` empty — `model_id` /
@@ -246,6 +256,58 @@ pub fn factory() -> Vec<Preset> {
             }],
         };
         make(name, g, eng(0.5, 25.0, 90.0))
+    }
+
+    // The oboe: a conical double-reed voice (bright, nasal, octave overblow) into a
+    // small fixed-formant Webster bell, tuned by the pre-solved length table. The
+    // same OverblowTuned machinery as the single-reed family.
+    fn oboe_graph() -> InstrumentGraph {
+        InstrumentGraph {
+            components: vec![
+                Comp::DoubleReed {
+                    pressure: 1.0,
+                    stiffness: 1.2,
+                    length: 343.0 / (2.0 * OBOE_ANCHOR_HZ),
+                    tone: 1.2,
+                    register: 0.0,
+                    overblow: 2.0,
+                    conical: true,
+                    tract_gain: 0.0,
+                    tract_q: 0.0,
+                },
+                Comp::Horn(WebsterHorn {
+                    boundary: Boundary::Brass,
+                    r1: 0.0060,
+                    r2: 0.02,
+                    r3: 0.002,
+                    length: 0.038, // small bright oboe bell
+                    blow_pos: 0.0,
+                    depth: 18,
+                    resolution: 300,
+                    damping: 4.0,
+                    freq_dep_damping: -0.08,
+                    visco_loss: 0.8,
+                    radiation: 50.0,
+                    key_tracks_pitch: false,
+                    ..WebsterHorn::default()
+                }),
+                Comp::Mix,
+            ],
+            edges: vec![
+                Edge { from: 0, to: 2, gain: 1.3 }, // coupled voice (dry) → out
+                Edge { from: 0, to: 1, gain: 1.0 }, // voice → bell
+                Edge { from: 1, to: 2, gain: 0.9 }, // bell colour → out
+            ],
+            output: 2,
+            key_map: vec![KeyBinding {
+                component: 0,
+                map: KeyMapKind::OverblowTuned {
+                    anchor_hz: OBOE_ANCHOR_HZ,
+                    steps: 0.0,
+                    table: OBOE_LEN_TABLE.to_vec(),
+                },
+            }],
+        }
     }
 
     let mut base = vec![
@@ -1178,6 +1240,7 @@ pub fn factory() -> Vec<Preset> {
             },
             eng(0.5, 25.0, 110.0),
         ),
+        make("Base: Oboe", oboe_graph(), eng(0.5, 20.0, 90.0)),
         make(
             "Base: Trumpet",
             InstrumentGraph {
@@ -1687,6 +1750,62 @@ mod tests {
     use super::*;
     use crate::models::basic_wave::BasicWave;
     use crate::models::instrument_graph::InstrumentGraph;
+
+    #[test]
+    #[ignore] // run manually to regenerate OBOE_LEN_TABLE: cargo test dump_oboe_table --release -- --ignored --nocapture
+    fn dump_oboe_table() {
+        let sr = 48_000.0;
+        let p = factory().into_iter().find(|p| p.name == "Base: Oboe").unwrap();
+        let g: InstrumentGraph = serde_json::from_value(p.params.clone()).unwrap();
+        let table = g.calibrate_tuning(0, OBOE_ANCHOR_HZ, 0.0, sr);
+        print!("const OBOE_LEN_TABLE: [f32; 128] = [\n    ");
+        for v in &table {
+            print!("{v:.4},");
+        }
+        println!("\n];");
+    }
+
+    #[test]
+    fn oboe_double_reed_sounds_in_tune_with_ac_across_its_range() {
+        // The Base: Oboe voice must (a) sound with genuine AC — mean-subtracted rms,
+        // NOT plain rms, which would hide a silent-DC blow-up — across its low AND
+        // overblown registers, (b) play ~c/2L in tune, and (c) overblow the octave.
+        let sr = 48_000.0;
+        let p = factory().into_iter().find(|p| p.name == "Base: Oboe").unwrap();
+        let g: InstrumentGraph = serde_json::from_value(p.params.clone()).unwrap();
+        let acf = |y: &[f32], f0: f32| -> f32 {
+            let m: f32 = y.iter().sum::<f32>() / y.len() as f32;
+            let s: Vec<f32> = y.iter().map(|v| v - m).collect();
+            let corr = |l: usize| -> f32 { (0..s.len() - l).map(|i| s[i] * s[i + l]).sum() };
+            let lo = ((sr / (f0 * 1.5)) as usize).max(2);
+            let hi = ((sr / (f0 * 0.66)) as usize).min(s.len() / 2 - 2);
+            let (mut b, mut bc) = (lo, f32::MIN);
+            for l in lo..hi {
+                let c = corr(l);
+                if c > bc {
+                    bc = c;
+                    b = l;
+                }
+            }
+            sr / b as f32
+        };
+        // Semitones above the Bb3 anchor: 0 (low), 5, 11 (top of the low register),
+        // 13 & 19 (overblown octave register).
+        for st in [0, 5, 11, 13, 19] {
+            let f0 = OBOE_ANCHOR_HZ * 2f32.powf(st as f32 / 12.0);
+            let mut n = g.build_graph(f0, 1.0, sr).unwrap();
+            let warm = (0.35 * sr) as usize;
+            let tail = ((30.0 * sr / f0) as usize).clamp(8_000, 40_000);
+            let y: Vec<f32> = (0..warm + tail).map(|_| n.tick(&[])).collect();
+            assert!(y.iter().all(|v| v.is_finite() && v.abs() < 30.0), "oboe stable at {f0:.0} Hz");
+            let t = &y[warm..];
+            let mean: f32 = t.iter().sum::<f32>() / t.len() as f32;
+            let ac = (t.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / t.len() as f32).sqrt();
+            assert!(ac > 1e-2, "oboe sounds with real AC at {f0:.0} Hz (ac {ac}) — not silent DC");
+            let cents = 1200.0 * (acf(t, f0) / f0).log2();
+            assert!(cents.abs() < 35.0, "oboe in tune at {f0:.0} Hz (off {cents:+.0}c)");
+        }
+    }
 
     #[test]
     fn reed_wind_family_is_calibrated_in_tune() {

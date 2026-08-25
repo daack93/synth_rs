@@ -1022,6 +1022,277 @@ impl Node for CoupledReed {
     }
 }
 
+/// A **coupled double-reed + bore** — the oboe/bassoon/cor-anglais voice. It is
+/// the double-reed sibling of [`CoupledReed`]: the same implicitly-solved reed↔
+/// bore loop (Newton on the flow each sample, so pitch locks to `f ≈ c/2L`), but
+/// two blades beating against *each other* rather than one reed against a fixed
+/// lay. That symmetric valve is short and stiff (a **much higher reed resonance**
+/// than a clarinet/sax reed), its flow channel is tiny and very **constricted**
+/// (a harder-beating, more pinched nonlinearity), and it sits on a strongly
+/// **conical** bore — so it overblows the *octave* (full harmonic series) with a
+/// bright, nasal, reedy buzz. A fixed **formant** boost on the radiated pressure
+/// gives the characteristic nasal "honk". Self-contained; pitch = `length`.
+pub struct CoupledDoubleReed {
+    // reed valve (mass–spring–damper on the blade gap)
+    x: f32,
+    v: f32,
+    wn2: f32,
+    damp: f32,
+    beta: f32,
+    zc: f32,
+    hmax: f32, // max blade opening — smaller than a single reed (pinched channel)
+    dp_prev: f32,
+    u_prev: f32,
+    flow_lp: f32,
+    flow_a: f32,
+    press_mult: f32,
+    // internal waveguide bore, split at the register vent (1/overblow from throat)
+    f1: FracDelay,
+    b1: FracDelay,
+    f2: FracDelay,
+    b2: FracDelay,
+    bell: f32,
+    bell_a: f32,
+    refl: f32,
+    conical: bool,
+    cone: f32,
+    cone_a: f32,
+    register: f32,
+    // nasal formant on the radiated pressure (a constant-peak-gain band-pass) —
+    // the double reed's strong fixed resonance, the "honk". Colours the output
+    // only; it is OUTSIDE the reed loop, so it can't destabilise the oscillation.
+    form_b1: f32,
+    form_r2: f32,
+    form_b0: f32,
+    form_g: f32,
+    form_y1: f32,
+    form_y2: f32,
+    // vocal-tract load (mouth side of the reed) — voices the altissimo, as on the
+    // single reed. Inside the loop; gain 0 = off.
+    tract_b1: f32,
+    tract_r2: f32,
+    tract_gain: f32,
+    tract_y1: f32,
+    tract_y2: f32,
+    // drive
+    pressure: f32,
+    env: f32,
+    env_target: f32,
+    atk: f32,
+    rel: f32,
+    rng: u32,
+}
+
+impl CoupledDoubleReed {
+    /// `length_m` = bore length (metres); pitch ≈ c/2L (register closed).
+    /// `register` 0 = closed (low register), open = overblown. `overblow` is the
+    /// register-break ratio (2 = the cone's octave — the double reed is always
+    /// conical, but the flag is kept for parity with the single reed). `stiffness`
+    /// raises the (already high) blade resonance and hardens the beating; `tone`
+    /// the bell.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        pressure: f32,
+        stiffness: f32,
+        length_m: f32,
+        tone: f32,
+        register: f32,
+        overblow: f32,
+        conical: bool,
+        sr: f32,
+    ) -> Self {
+        let c = 343.0_f32;
+        let reg_pos = (1.0 / overblow.max(1.5)).clamp(0.1, 0.9);
+        // Length compensation (a fixed sample offset the reed/mouthpiece add). The
+        // stiff double-reed blade is far less compliant than a clarinet/sax reed, so
+        // it adds ~1.6 fewer samples of effective length — hence a SMALLER comp than
+        // CoupledReed's cone (else the bore runs short and the pitch sits sharp).
+        let comp = if conical { CR_COMP - 0.2 } else { CR_COMP };
+        let dtot = (length_m.max(0.02) / (2.0 * c) * sr - comp).max(4.0);
+        let d1 = (dtot * reg_pos).max(2.0);
+        let d2 = (dtot * (1.0 - reg_pos)).max(2.0);
+        // Double-reed blades are short and stiff → resonate MUCH higher than a
+        // clarinet/sax reed (~2–3 kHz). That high resonance is what lets the reed
+        // beat up into the oboe's bright upper register and shape its buzzy spectrum.
+        let reed_hz = (3000.0 + 1000.0 * stiffness.clamp(0.0, 2.5)).clamp(2600.0, 6000.0);
+        let wn = TAU * reed_hz / sr;
+        // Harder, more pressure-coupled beating than a single reed (the blades slam
+        // against each other), and heavier damping from the lips gripping the reed.
+        let beta = (0.72 + 0.14 * stiffness.clamp(0.0, 2.0)).clamp(0.72, 0.95);
+        let cone_a = 0.75_f32;
+        let mut dr = CoupledDoubleReed {
+            x: 0.0,
+            v: 0.0,
+            wn2: wn * wn,
+            damp: 2.0 * 0.85 * wn,
+            beta,
+            zc: 0.72, // a touch higher than the single reed: the constricted channel
+            hmax: 2.2, // smaller than the single reed's 3.0 — the pinched aperture
+            dp_prev: 0.0,
+            u_prev: 0.0,
+            flow_lp: 0.0,
+            flow_a: 0.30,
+            press_mult: 1.0,
+            f1: FracDelay::new(d1),
+            b1: FracDelay::new(d1),
+            f2: FracDelay::new(d2),
+            b2: FracDelay::new(d2),
+            bell: 0.0,
+            bell_a: (0.15 + 0.55 * tone.clamp(0.0, 1.5) / 1.5).clamp(0.05, 0.9),
+            refl: -0.97,
+            conical,
+            cone: 0.0,
+            cone_a,
+            register: register.clamp(0.0, 0.9),
+            form_b1: 0.0,
+            form_r2: 0.0,
+            form_b0: 0.0,
+            form_g: 0.0,
+            form_y1: 0.0,
+            form_y2: 0.0,
+            tract_b1: 0.0,
+            tract_r2: 0.0,
+            tract_gain: 0.0,
+            tract_y1: 0.0,
+            tract_y2: 0.0,
+            pressure,
+            env: 0.0,
+            env_target: 1.0,
+            atk: 1.0 - (-1.0 / (0.02 * sr)).exp(),
+            rel: 1.0 - (-1.0 / (0.03 * sr)).exp(),
+            rng: 0x2b7e_1516,
+        };
+        // Nasal formant ~1150 Hz (the oboe/cor-anglais reed-cavity resonance). A
+        // constant-peak-gain band-pass: |H| at the centre is exactly `peak`,
+        // independent of Q, so it colours without amplifying the loop into a blow-up.
+        dr.set_formant(1150.0, 2.5, 0.9, sr);
+        dr
+    }
+
+    /// Tune the nasal formant band-pass applied to the radiated pressure.
+    fn set_formant(&mut self, freq: f32, q: f32, peak: f32, sr: f32) {
+        let w = TAU * freq.clamp(20.0, sr * 0.45) / sr;
+        let r = (-w / (2.0 * q.max(0.5))).exp().clamp(0.0, 0.9995);
+        let c = w.cos();
+        // Match the constant-peak-gain design used by `Mode::new_filter`.
+        let d_re = (1.0 - r) * ((1.0 + r) - 2.0 * r * c * c);
+        let d_im = r * (1.0 - r) * (2.0 * w).sin();
+        let d_mag = (d_re * d_re + d_im * d_im).sqrt();
+        self.form_b1 = 2.0 * r * c;
+        self.form_r2 = r * r;
+        self.form_b0 = peak * d_mag;
+        self.form_g = 1.0;
+    }
+
+    /// Vocal-tract load, tuned to the played note (see [`CoupledReed::set_tract`]).
+    pub fn set_tract(&mut self, freq: f32, q: f32, gain: f32, sr: f32) {
+        if gain <= 0.0 {
+            self.tract_gain = 0.0;
+            return;
+        }
+        let w = TAU * freq.clamp(20.0, sr * 0.45) / sr;
+        let r = (-w / (2.0 * q.max(0.5))).exp().clamp(0.0, 0.9995);
+        self.tract_b1 = 2.0 * r * w.cos();
+        self.tract_r2 = r * r;
+        self.tract_gain = gain;
+    }
+}
+
+impl Node for CoupledDoubleReed {
+    #[inline]
+    fn tick(&mut self, _inputs: &[f32]) -> f32 {
+        let rate = if self.env < self.env_target { self.atk } else { self.rel };
+        self.env += (self.env_target - self.env) * rate;
+        let p_tract = self.tract_gain * self.tract_y1;
+        let pm = self.pressure * self.press_mult * self.env + p_tract;
+
+        // 1. Read the bore segments; `bo1` is the pressure arriving back at the reed.
+        let fo1 = self.f1.read();
+        let bo1 = self.b1.read();
+        let fo2 = self.f2.read();
+        let bo2 = self.b2.read();
+        let p_plus = bo1;
+
+        // 2. Advance the reed's mechanical state (explicit — its resonance is high
+        //    but still slow next to the sample rate).
+        let acc = -self.damp * self.v - self.wn2 * (self.x + self.beta * self.dp_prev);
+        self.v += acc;
+        self.x += self.v;
+        // Pinched aperture: the blades meet with a smaller maximum gap than a single
+        // reed against its lay, so `hmax` caps the opening tighter → a more
+        // constricted, harder-beating (harmonic-rich) valve.
+        let h = (1.0 + self.x).clamp(0.0, self.hmax);
+
+        // 3. Resolve flow ↔ pressure this sample (Newton, no loop delay), identical
+        //    scattering to the single reed: P = 2·p₊ + Zc·U, U = h·sign(ΔP)·√|ΔP|.
+        let mut u = self.u_prev;
+        for _ in 0..4 {
+            let dp = pm - 2.0 * p_plus - self.zc * u;
+            let sq = dp.abs().max(1e-9).sqrt();
+            let resid = u - h * dp.signum() * sq;
+            let deriv = 1.0 + h * self.zc * (0.5 / sq);
+            u -= resid / deriv;
+        }
+        let dp = pm - 2.0 * p_plus - self.zc * u;
+        self.dp_prev = dp;
+        self.u_prev = u;
+
+        if self.tract_gain != 0.0 {
+            let ty = self.tract_b1 * self.tract_y1 - self.tract_r2 * self.tract_y2
+                + (1.0 - self.tract_r2) * 0.5 * u;
+            self.tract_y2 = self.tract_y1;
+            self.tract_y1 = ty;
+        }
+
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        let white = (self.rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+        let g = (self.env * 4.0).min(1.0);
+        let breath = (pm.abs() * 3.0).min(1.0);
+        self.flow_lp += self.flow_a * (g * (u + h * 0.015 * white * breath) - self.flow_lp);
+        let ur = self.flow_lp;
+
+        // 4. Launch the outgoing wave into segment 1 (p₋ = p₊ + Zc·U).
+        let p_minus = p_plus + self.zc * ur;
+
+        // Register vent between the segments (pressure-release shunt), as CoupledReed.
+        let w = self.register * (fo1 + bo2);
+        let f2_in = fo1 - w;
+        let b1_in = bo2 - w;
+
+        // Bell reflection. Inherit the single-reed fix: the cone's NON-inverting
+        // reflection overblows the octave but traps DC with the vent CLOSED (which
+        // back-pressures the reed silent), so use it only when overblowing; with the
+        // vent shut fall back to the inverting reflection (a proper fundamental).
+        self.bell += self.bell_a * (fo2 - self.bell);
+        let b2_in = if self.conical && self.register > 0.1 {
+            self.cone += self.cone_a * (self.bell - self.cone);
+            0.97 * self.cone
+        } else {
+            self.refl * self.bell
+        };
+
+        self.f1.write(p_minus);
+        self.f2.write(f2_in);
+        self.b1.write(b1_in);
+        self.b2.write(b2_in);
+
+        // Nasal formant on the radiated pressure (colour only, outside the loop).
+        let fy = self.form_b1 * self.form_y1 - self.form_r2 * self.form_y2 + self.form_b0 * bo1;
+        self.form_y2 = self.form_y1;
+        self.form_y1 = fy;
+        bo1 + self.form_g * fy
+    }
+    fn control(&mut self, c: Control) {
+        match c {
+            Control::Gate(on) => self.env_target = if on { 1.0 } else { 0.0 },
+            Control::Breath(m) => self.press_mult = m.clamp(0.2, 2.5),
+            Control::Bend(r) => self.press_mult = (1.0 + 5.0 * (r - 1.0)).clamp(0.3, 2.0),
+        }
+    }
+}
+
 /// A short fractional delay line (linear interpolation) — one waveguide segment.
 struct FracDelay {
     buf: Vec<f32>,
@@ -1912,6 +2183,52 @@ mod new_exciter_tests {
             let tail = &y[20_000..];
             let rms = (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt();
             assert!(rms > 1e-3, "reed sustains the horn at L={length} (rms {rms})");
+        }
+    }
+
+    #[test]
+    fn coupled_double_reed_plays_in_tune_with_real_ac() {
+        // The oboe voice: a conical double reed. Its closed (low) register must
+        // sound with genuine AC (mean-subtracted rms — plain rms would hide a
+        // silent-DC blow-up), and lock ~c/2L in tune, NOT a silent DC trap.
+        let sr = 48_000.0;
+        let c = 343.0f32;
+        for &f0 in &[233.08f32, 293.66, 369.99, 466.16] {
+            let l = c / (2.0 * f0);
+            let mut r = CoupledDoubleReed::new(1.0, 1.0, l, 1.2, 0.0, 2.0, true, sr);
+            let y: Vec<f32> = (0..40_000).map(|_| r.tick(&[])).collect();
+            assert!(y.iter().all(|v| v.is_finite() && v.abs() < 20.0), "double reed stable at {f0}");
+            let t = &y[28_000..];
+            let mean: f32 = t.iter().sum::<f32>() / t.len() as f32;
+            let ac = (t.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / t.len() as f32).sqrt();
+            assert!(ac > 0.1, "double reed's low register sounds with AC (ac {ac}) — not silent DC at {f0}");
+            let f = acf_freq(t, sr, f0);
+            let cents = 1200.0 * (f / f0).log2();
+            assert!(cents.abs() < 30.0, "double reed in tune at {f0} Hz (got {cents:+.0} cents)");
+        }
+    }
+
+    #[test]
+    fn coupled_double_reed_overblows_the_octave() {
+        // Lifting the register vent overblows the OCTAVE (×2) — the conical bore's
+        // full harmonic series, like the sax and unlike the clarinet's twelfth.
+        let sr = 48_000.0;
+        let c = 343.0f32;
+        for &f0 in &[233.08f32, 311.13, 392.00] {
+            let l = c / (2.0 * f0);
+            let mut closed = CoupledDoubleReed::new(1.0, 1.0, l, 1.2, 0.0, 2.0, true, sr);
+            let yc: Vec<f32> = (0..40_000).map(|_| closed.tick(&[])).collect();
+            let tc = &yc[28_000..];
+            let mc: f32 = tc.iter().sum::<f32>() / tc.len() as f32;
+            let acc = (tc.iter().map(|v| (v - mc) * (v - mc)).sum::<f32>() / tc.len() as f32).sqrt();
+            assert!(acc > 0.1, "closed register sounds with AC (ac {acc}) at {f0}");
+            let fc = acf_freq(tc, sr, f0);
+
+            let mut open = CoupledDoubleReed::new(1.0, 1.0, l, 1.2, 0.3, 2.0, true, sr);
+            let yo: Vec<f32> = (0..40_000).map(|_| open.tick(&[])).collect();
+            let to = &yo[28_000..];
+            let fo = acf_freq(to, sr, f0 * 2.0);
+            assert!((fo / fc / 2.0 - 1.0).abs() < 0.1, "double reed overblows an octave: {fc} → {fo}");
         }
     }
 }
