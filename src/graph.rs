@@ -1559,6 +1559,8 @@ pub struct StringCore {
     lp_state: f32,       // highs are damped relative to each string's fundamental
     out_integ: f32,      // leaky integrator: velocity → displacement (warm output)
     out_gain: f32,       // output scale ∝ f, to cancel the integrator's 1/f tilt
+    pend_br: f32,        // reflections held between read_junction() and commit()
+    pend_nr: f32,
     disp_a: f32,             // dispersion allpass coeff (0 = none)
     disp_x: [f32; DISP_STAGES], // cascade states (stiffness → inharmonic partials)
     disp_y: [f32; DISP_STAGES],
@@ -1570,6 +1572,7 @@ pub struct StringCore {
 /// pitch (∝ f²). TRUE-LENGTH: each note is its own full-length string at the
 /// given tension/gauge (a harp/piano), so a thin high string can stay clear.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub enum StringGeometry {
     Fretted { open_hz: f32 },
     TrueLength,
@@ -1682,28 +1685,12 @@ impl StringCore {
             lp_state: 0.0,
             out_integ: 0.0,
             out_gain: (0.0006 * f).clamp(0.03, 0.45),
+            pend_br: 0.0,
+            pend_nr: 0.0,
             disp_a,
             disp_x: [0.0; DISP_STAGES],
             disp_y: [0.0; DISP_STAGES],
             rng: 0x2545_f491,
-        }
-    }
-
-    /// Excite by filling the delay lines with a velocity burst (Karplus-Strong):
-    /// white noise, comb-coloured by the interaction position, scaled by `vel`.
-    pub fn pluck(&mut self, vel: f32, seed: u32) {
-        self.rng = seed | 1;
-        let mut white = |s: &mut Self| -> f32 {
-            s.rng ^= s.rng << 13;
-            s.rng ^= s.rng >> 17;
-            s.rng ^= s.rng << 5;
-            (s.rng as f32 / u32::MAX as f32) * 2.0 - 1.0
-        };
-        for i in 0..self.left.len() {
-            self.left[i] = white(self) * vel * 0.4;
-        }
-        for i in 0..self.right.len() {
-            self.right[i] = white(self) * vel * 0.4;
         }
     }
 
@@ -1735,11 +1722,12 @@ impl StringCore {
         }
     }
 
-    /// One sample. `inject` is added into both outgoing directions at the
-    /// interaction point (a continuous exciter — bow/hammer; 0 for a free pluck).
-    /// Returns the string signal at the interaction point.
+    /// Read the junction VELOCITY (the waves arriving from both ends) from the
+    /// current state, WITHOUT advancing. Updates the bridge filter/dispersion
+    /// state and stores the reflections for the following `commit`. An exciter
+    /// reads this, computes its coupling force/velocity, then calls `commit`.
     #[inline]
-    pub fn tick(&mut self, inject: f32) -> f32 {
+    pub fn read_junction(&mut self) -> f32 {
         let left_out = self.left[self.left_pos];
         let nr = self.right.len();
         let ri = (self.right_pos + nr - self.right_int) % nr;
@@ -1760,22 +1748,31 @@ impl StringCore {
             self.disp_y[i] = y;
             b = y;
         }
-        let bridge_refl = -b;
-        let nut_refl = -left_out;
-        // Waves cross the interaction point; the exciter injection adds to both.
-        self.left[self.left_pos] = bridge_refl + inject;
-        self.right[self.right_pos] = nut_refl + inject;
+        self.pend_br = -b; // filtered, inverted bridge reflection
+        self.pend_nr = -left_out; // rigid inverted nut reflection
+        self.pend_br + self.pend_nr // string velocity at the interaction point
+    }
+
+    /// Scatter the exciter's `inject` into both delay lines (the wave crosses the
+    /// interaction point), advance, and return the warm displacement-like output.
+    #[inline]
+    pub fn commit(&mut self, inject: f32) -> f32 {
+        self.left[self.left_pos] = self.pend_br + inject;
+        self.right[self.right_pos] = self.pend_nr + inject;
         self.left_pos = (self.left_pos + 1) % self.left_len;
-        self.right_pos = (self.right_pos + 1) % nr;
-        // The delay lines carry VELOCITY waves; a raw velocity tap is +6 dB/oct
-        // (harsh, metallic). Leaky-integrate to a displacement-like output (warm,
-        // string-ish) and scale back up so the level is comparable.
-        // The lines carry VELOCITY waves; a raw velocity tap is +6 dB/oct (harsh,
-        // metallic). Leaky-integrate to a displacement-like output (warm) and
-        // rescale ∝ f to cancel the integrator's 1/f level tilt.
-        let vel = nut_refl + bridge_refl;
+        self.right_pos = (self.right_pos + 1) % self.right.len();
+        // Velocity waves → leaky-integrate to a displacement-like output (warm),
+        // rescaled ∝ f to cancel the integrator's 1/f tilt.
+        let vel = self.pend_nr + self.pend_br;
         self.out_integ = 0.999 * self.out_integ + vel;
         self.out_integ * self.out_gain
+    }
+
+    /// One sample with a continuous injection (0 for a free-ringing pluck).
+    #[inline]
+    pub fn tick(&mut self, inject: f32) -> f32 {
+        self.read_junction();
+        self.commit(inject)
     }
 }
 
@@ -1790,24 +1787,6 @@ pub struct WaveguidePluck {
 }
 
 impl WaveguidePluck {
-    pub fn new(
-        freq_hz: f32,
-        pos: f32,
-        decay_time: f32,
-        hf_damping: f32,
-        stiffness: f32,
-        vel: f32,
-        sr: f32,
-    ) -> Self {
-        let b_target = stiffness.clamp(0.0, 1.0) * 0.001; // provisional stiffness->B until specs ground it
-        let mut core = StringCore::new(freq_hz, pos, decay_time, hf_damping, b_target, sr);
-        // Seed the excitation from the pitch so every note gets its own noise.
-        let seed = (freq_hz * 131.0) as u32 ^ 0x9e37_79b9;
-        core.pluck_coherent(vel.clamp(0.05, 1.0), seed);
-        let rel_off = (-1.0 / (0.08 * sr)).exp();
-        WaveguidePluck { core, rel: 1.0, rel_mul: 1.0, rel_off }
-    }
-
     /// Build from real string physics (see `StringCore::from_physical`).
     #[allow(clippy::too_many_arguments)]
     pub fn from_physical(
@@ -1852,24 +1831,16 @@ impl Node for WaveguidePluck {
     }
 }
 
-/// A digital-waveguide **bowed string** — the STK bowed-string model. The string
-/// is two delay lines meeting at the bow point; the bridge end reflects through a
-/// one-pole low-pass, the nut end rigidly; the bow is a nonlinear friction table
-/// on the slip velocity (bow speed − string velocity) that closes the loop. As
-/// with the reed, the traveling wave reflecting off the ends is what lets it lock
-/// into Helmholtz stick-slip — a modal bank can't. Self-contained; pitch = total
-/// delay length, bow position = where the string is split.
+/// A digital-waveguide **bowed string**: a nonlinear friction "bow" coupled to
+/// the shared [`StringCore`]. Each sample it reads the string velocity at the
+/// bow point, applies a Stribeck-style friction (high near sticking, falling off
+/// as the string slips — the negative resistance that pumps Helmholtz stick-slip
+/// motion), and injects the result back. Self-contained; grounded via
+/// `from_physical` (real string specs → dispersion/tuning) like the plucked model.
 pub struct WaveguideBow {
-    nut: Vec<f32>,      // nut-side delay line
-    nut_pos: usize,
-    nut_len: usize,
-    bridge: Vec<f32>,   // bridge-side delay line (fractional, carries tuning)
-    bridge_pos: usize,
-    bridge_delay: f32,
-    br_lp: f32,         // bridge low-pass state
-    br_a: f32,          // bridge brightness
-    speed: f32,
-    slope: f32,         // friction-curve sharpness (bow force)
+    core: StringCore,
+    speed: f32, // bow velocity, scaled into the wave domain
+    slope: f32, // friction-curve sharpness (bow force)
     env: f32,
     env_target: f32,
     atk: f32,
@@ -1878,29 +1849,31 @@ pub struct WaveguideBow {
 }
 
 impl WaveguideBow {
-    pub fn new(freq_hz: f32, speed: f32, force: f32, sr: f32) -> Self {
-        let f = freq_hz.max(20.0);
-        // STK convention: both ends invert, so one trip through BOTH segments is a
-        // full period → total one-way delay = sr/f (minus the bridge filter's ~1
-        // sample of phase). The bow splits it into nut + bridge sections.
-        let total = (sr / f - 1.0).max(4.0);
-        let bow_pos = 0.13; // near the bridge (brighter, stable stick-slip)
-        let bridge_delay = (total * bow_pos).max(2.0);
-        let nut_len = ((total * (1.0 - bow_pos)).round() as usize).max(2);
+    /// Grounded: real string specs set the core's dispersion/tuning.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_physical(
+        freq_hz: f32,
+        length_m: f32,
+        tension_n: f32,
+        core_mm: f32,
+        youngs_gpa: f32,
+        open_hz: f32,
+        speed: f32,
+        force: f32,
+        sr: f32,
+    ) -> Self {
+        let core = StringCore::from_physical(
+            freq_hz, length_m, tension_n, core_mm, 7850.0, youngs_gpa,
+            StringGeometry::Fretted { open_hz }, 0.13, 1.2, 0.35, sr,
+        );
+        Self::wrap(core, speed, force, sr)
+    }
+
+    fn wrap(core: StringCore, speed: f32, force: f32, sr: f32) -> Self {
         WaveguideBow {
-            nut: vec![0.0; nut_len + 1],
-            nut_pos: 0,
-            nut_len,
-            bridge: vec![0.0; bridge_delay.ceil() as usize + 3],
-            bridge_pos: 0,
-            bridge_delay,
-            br_lp: 0.0,
-            // Bridge HF-loss tracks pitch: a long (low) string needs heavier
-            // high-frequency damping or the upper Helmholtz modes have as much
-            // loop gain as the fundamental and it jumps register. Bright up high.
-            br_a: (f / 1200.0).clamp(0.12, 0.5),
-            speed: speed * 0.09, // bow velocity (scaled into the wave domain)
-            slope: 3.0 + force * 3.0, // more force = sharper stick-slip
+            core,
+            speed: speed * 0.09,
+            slope: 3.0 + force * 3.0,
             env: 0.0,
             env_target: 1.0,
             atk: 1.0 - (-1.0 / (0.04 * sr)).exp(), // ~40 ms bow onset
@@ -1915,39 +1888,17 @@ impl Node for WaveguideBow {
     fn tick(&mut self, _inputs: &[f32]) -> f32 {
         let rate = if self.env < self.env_target { self.atk } else { self.rel };
         self.env += (self.env_target - self.env) * rate;
-        // The delay-line outputs arriving at the bow point from each side. Both
-        // string ends invert the travelling VELOCITY wave (rigid nut; the bridge
-        // through a one-pole loss). Inverting BOTH is what closes the Helmholtz
-        // loop — the old model inverted only the bridge, so it never locked into
-        // stick-slip and just leaked the friction injection (near-silent).
-        let neck_out = self.nut[self.nut_pos];
-        let nb = self.bridge.len();
-        let rp = self.bridge_pos as f32 + nb as f32 - self.bridge_delay;
-        let i0 = rp.floor() as usize % nb;
-        let i1 = (i0 + 1) % nb;
-        let frac = rp - rp.floor();
-        let bridge_out = self.bridge[i0] * (1.0 - frac) + self.bridge[i1] * frac;
-        self.br_lp += self.br_a * (bridge_out - self.br_lp); // bridge loss filter
-        let bridge_refl = -self.br_lp;   // inverted, filtered bridge reflection
-        let nut_refl = -neck_out;        // inverted rigid nut reflection
-        let string_vel = bridge_refl + nut_refl;
-        // Friction table on the slip velocity (bow − string): ≈1 near sticking
-        // (string travels with the hair), falling off sharply as it slips — the
-        // negative-resistance characteristic that pumps the Helmholtz motion.
+        // Read the string velocity at the bow point, apply friction, inject back.
+        let string_vel = self.core.read_junction();
         let mut dv = self.speed * self.env - string_vel;
         self.rng ^= self.rng << 13;
         self.rng ^= self.rng >> 17;
         self.rng ^= self.rng << 5;
         dv += (self.rng as f32 / u32::MAX as f32 - 0.5) * 0.005 * self.env; // bow noise
         let fr = ((dv.abs() * self.slope + 0.75).powi(4)).max(1.0);
-        let newv = (dv / fr) * self.env; // velocity the bow injects into both sides
-        // Scatter the injected velocity into the two delay lines, each fed by the
-        // OTHER end's reflection (the wave crosses the bow point).
-        self.nut[self.nut_pos] = bridge_refl + newv;
-        self.bridge[self.bridge_pos] = nut_refl + newv;
-        self.nut_pos = (self.nut_pos + 1) % self.nut_len;
-        self.bridge_pos = (self.bridge_pos + 1) % nb;
-        string_vel
+        let newv = (dv / fr) * self.env;
+        self.core.commit(newv);
+        string_vel // the bright bowed-string velocity at the bridge
     }
     fn control(&mut self, c: Control) {
         if let Control::Gate(on) = c {

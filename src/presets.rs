@@ -21,7 +21,7 @@ use crate::models::pure_plate::PurePlate;
 use crate::models::pure_string::PureString;
 use crate::models::snare::Snare;
 use crate::models::webster_horn::{Boundary, PlayMode as HornPlay, Wavefront, WebsterHorn};
-use crate::models::{model_from_id, Excitation, FtmModel};
+use crate::models::{model_from_id, FtmModel};
 use crate::instrument::EngineParams;
 use crate::project::ZoneData;
 
@@ -134,7 +134,6 @@ pub fn factory() -> Vec<Preset> {
     const NICKEL: (f32, f32) = (8900.0, 200.0);
     const BRONZE: (f32, f32) = (8740.0, 105.0);
     const NYLON: (f32, f32) = (1150.0, 4.0);
-    const GUT: (f32, f32) = (1300.0, 6.0);
     // A physical string from real specs: speaking length (m), tension (N),
     // gauge (mm), material, −60 dB decay (s), HF damping, pluck position.
     fn string(
@@ -157,21 +156,6 @@ pub fn factory() -> Vec<Preset> {
             pluck_pos,
             num_modes: 40,
             ..PureString::default()
-        }
-    }
-    // Same string, but bowed (driven → sustains while played).
-    fn bowed(
-        length_m: f32,
-        tension_n: f32,
-        diameter_mm: f32,
-        mat: (f32, f32),
-        decay_time: f32,
-        hf_damping: f32,
-        pluck_pos: f32,
-    ) -> PureString {
-        PureString {
-            excitation: Excitation::Bowed,
-            ..string(length_m, tension_n, diameter_mm, mat, decay_time, hf_damping, pluck_pos)
         }
     }
     fn eng(gain: f32, attack_ms: f32, release_ms: f32) -> EngineParams {
@@ -1005,7 +989,7 @@ pub fn factory() -> Vec<Preset> {
             "Violin",
             InstrumentGraph {
                 components: vec![
-                    Comp::BowedString { speed: 0.6, force: 0.4 },
+                    Comp::BowedString { length_m: 0.328, tension_n: 70.0, core_mm: 0.28, youngs_gpa: 200.0, open_hz: 196.0, speed: 0.6, force: 0.4 },
                     Comp::Body { cavity_litres: 2.2, soundhole_cm: 3.2, top_hz: 280.0, decay_s: 0.35 },
                     Comp::Mix,
                 ],
@@ -1023,7 +1007,7 @@ pub fn factory() -> Vec<Preset> {
             "Viola",
             InstrumentGraph {
                 components: vec![
-                    Comp::BowedString { speed: 0.6, force: 0.45 },
+                    Comp::BowedString { length_m: 0.380, tension_n: 55.0, core_mm: 0.35, youngs_gpa: 200.0, open_hz: 130.8, speed: 0.6, force: 0.45 },
                     Comp::Body { cavity_litres: 4.5, soundhole_cm: 3.8, top_hz: 210.0, decay_s: 0.38 },
                     Comp::Mix,
                 ],
@@ -1041,7 +1025,7 @@ pub fn factory() -> Vec<Preset> {
             "Cello",
             InstrumentGraph {
                 components: vec![
-                    Comp::BowedString { speed: 0.6, force: 0.45 },
+                    Comp::BowedString { length_m: 0.690, tension_n: 150.0, core_mm: 0.55, youngs_gpa: 200.0, open_hz: 65.4, speed: 0.6, force: 0.45 },
                     Comp::Body { cavity_litres: 28.0, soundhole_cm: 6.5, top_hz: 105.0, decay_s: 0.5 },
                     Comp::Mix,
                 ],
@@ -1059,7 +1043,7 @@ pub fn factory() -> Vec<Preset> {
             "Double Bass",
             InstrumentGraph {
                 components: vec![
-                    Comp::BowedString { speed: 0.6, force: 0.5 },
+                    Comp::BowedString { length_m: 1.060, tension_n: 250.0, core_mm: 0.90, youngs_gpa: 200.0, open_hz: 41.2, speed: 0.6, force: 0.5 },
                     Comp::Body { cavity_litres: 120.0, soundhole_cm: 11.5, top_hz: 60.0, decay_s: 0.6 },
                     Comp::Mix,
                 ],
@@ -1077,7 +1061,7 @@ pub fn factory() -> Vec<Preset> {
             "Hurdy-Gurdy",
             InstrumentGraph {
                 components: vec![
-                    Comp::BowedString { speed: 0.6, force: 0.45 },
+                    Comp::BowedString { length_m: 0.350, tension_n: 70.0, core_mm: 0.40, youngs_gpa: 200.0, open_hz: 196.0, speed: 0.6, force: 0.45 },
                     Comp::Body { cavity_litres: 12.0, soundhole_cm: 0.0, top_hz: 160.0, decay_s: 0.4 },
                     Comp::Mix,
                 ],
