@@ -212,9 +212,9 @@ pub fn factory() -> Vec<Preset> {
             depth: 16,
             resolution: 220,
             damping: 20.0,
-            freq_dep_damping: -0.08,
+            freq_dep_damping: 0.0,
             visco_loss: 4.0,
-            radiation: 3.0,
+            radiation: 1.0,
             key_tracks_pitch: false, // the changing bore LENGTH sets the pitch
             ..WebsterHorn::default()
         }
