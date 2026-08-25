@@ -711,8 +711,12 @@ impl Comp {
             // The reed's fixed pitch — so a key can drive embouchure/pitch on a
             // self-contained mouthpiece (`freq_hz > 0`).
             Comp::Reed { .. } => &["freq"],
+            // The felt hammer's hardness/nonlinearity — key-mapped so the treble
+            // gets harder, brighter hammers and the bass softer ones, as a real
+            // piano's hammers are graded across the keyboard.
+            Comp::Hammer { .. } => &["hardness", "felt"],
             Comp::MusicalString(_) | Comp::Bell(_) | Comp::Cymbal(_) | Comp::Strike | Comp::Mix
-            | Comp::Wires { .. } | Comp::Breath { .. } | Comp::Hammer { .. }
+            | Comp::Wires { .. } | Comp::Breath { .. }
             | Comp::Bow { .. } | Comp::Voice { .. } | Comp::ReedPipe { .. } | Comp::BowedString { .. }
             | Comp::Sine { .. } => &[],
         }
@@ -743,6 +747,8 @@ impl Comp {
             (Comp::Lips { tension, .. }, "tension") => Some(*tension),
             (Comp::AirJet { length, .. }, "length") => Some(*length),
             (Comp::Reed { freq_hz, .. }, "freq") => Some(*freq_hz),
+            (Comp::Hammer { hardness, .. }, "hardness") => Some(*hardness),
+            (Comp::Hammer { felt, .. }, "felt") => Some(*felt),
             _ => None,
         }
     }
@@ -772,6 +778,8 @@ impl Comp {
             (Comp::Lips { tension, .. }, "tension") => *tension = v,
             (Comp::AirJet { length, .. }, "length") => *length = v,
             (Comp::Reed { freq_hz, .. }, "freq") => *freq_hz = v,
+            (Comp::Hammer { hardness, .. }, "hardness") => *hardness = v.clamp(0.0, 1.0),
+            (Comp::Hammer { felt, .. }, "felt") => *felt = v,
             _ => {}
         }
     }

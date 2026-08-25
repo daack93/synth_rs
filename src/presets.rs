@@ -815,7 +815,11 @@ pub fn factory() -> Vec<Preset> {
                     Edge { from: 2, to: 3, gain: 0.2 },
                 ],
                 output: 3,
-                key_map: Vec::new(),
+                key_map: vec![
+                    // Grade the hammer harder/brighter toward the treble, softer
+                    // in the bass — as a piano's hammers are voiced across the keyboard.
+                    KeyBinding { component: 0, map: KeyMapKind::Power { param: "hardness".into(), amount: 0.4 } },
+                ],
             },
             eng(0.6, 2.0, 250.0),
         ),
@@ -857,7 +861,11 @@ pub fn factory() -> Vec<Preset> {
                     Edge { from: 2, to: 3, gain: 0.2 },
                 ],
                 output: 3,
-                key_map: Vec::new(),
+                key_map: vec![
+                    // Grade the hammer harder/brighter toward the treble, softer
+                    // in the bass — as a piano's hammers are voiced across the keyboard.
+                    KeyBinding { component: 0, map: KeyMapKind::Power { param: "hardness".into(), amount: 0.4 } },
+                ],
             },
             eng(0.55, 2.0, 120.0),
         ),
@@ -878,7 +886,11 @@ pub fn factory() -> Vec<Preset> {
                     Edge { from: 2, to: 3, gain: 0.2 },
                 ],
                 output: 3,
-                key_map: Vec::new(),
+                key_map: vec![
+                    // Grade the hammer harder/brighter toward the treble, softer
+                    // in the bass — as a piano's hammers are voiced across the keyboard.
+                    KeyBinding { component: 0, map: KeyMapKind::Power { param: "hardness".into(), amount: 0.4 } },
+                ],
             },
             eng(0.6, 1.0, 200.0),
         ),
@@ -909,7 +921,11 @@ pub fn factory() -> Vec<Preset> {
                     Edge { from: 4, to: 5, gain: 0.2 },
                 ],
                 output: 5,
-                key_map: Vec::new(),
+                key_map: vec![
+                    // Grade the hammer harder/brighter toward the treble, softer
+                    // in the bass — as a piano's hammers are voiced across the keyboard.
+                    KeyBinding { component: 0, map: KeyMapKind::Power { param: "hardness".into(), amount: 0.4 } },
+                ],
             },
             eng(0.55, 2.0, 300.0),
         ),
