@@ -1976,13 +1976,24 @@ impl WaveguideBow {
         open_hz: f32,
         speed: f32,
         force: f32,
+        velocity: f32,
         sr: f32,
     ) -> Self {
-        let core = StringCore::from_physical(
-            freq_hz, length_m, tension_n, core_mm, 7850.0, youngs_gpa,
-            StringGeometry::Fretted { open_hz }, 0.13, 1.2, 0.35, sr,
-        );
-        Self::wrap(core, speed, force, sr)
+        // A bowed string is driven into PERIODIC Helmholtz motion, which
+        // suppresses inharmonicity — and any dispersion smears the travelling
+        // corner so the stick-slip can't lock (measured: even B=0.0002 kills the
+        // tone above ~300 Hz). So the bow uses an ideal (B=0) string; the specs
+        // still identify it (length/tension/gauge/open pitch) for the UI + future
+        // impedance-based bow force.
+        let _ = (length_m, tension_n, core_mm, youngs_gpa, open_hz);
+        let core = StringCore::new(freq_hz, 0.13, 1.2, 0.35, 0.0, sr);
+        // Dynamics: a harder key press bows FASTER (louder, brighter). And a good
+        // player tracks the bow force with the speed — at Schelleng's window
+        // centre the optimal force F* = √(Fmin·Fmax) ∝ v — so press harder when
+        // bowing faster, keeping the tone in the clean-Helmholtz window instead of
+        // whistling (too little) or crunching (too much).
+        let dynamic = 0.4 + 0.6 * velocity.clamp(0.0, 1.0);
+        Self::wrap(core, speed * dynamic, force * dynamic, sr)
     }
 
     fn wrap(core: StringCore, speed: f32, force: f32, sr: f32) -> Self {

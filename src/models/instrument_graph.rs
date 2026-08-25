@@ -436,7 +436,7 @@ impl Comp {
             }
             Comp::BowedString { length_m, tension_n, core_mm, youngs_gpa, open_hz, speed, force } => {
                 Box::new(WaveguideBow::from_physical(
-                    freq_hz, *length_m, *tension_n, *core_mm, *youngs_gpa, *open_hz, *speed, *force, sr,
+                    freq_hz, *length_m, *tension_n, *core_mm, *youngs_gpa, *open_hz, *speed, *force, vel, sr,
                 ))
             }
             Comp::PluckedString { length_m, tension_n, core_mm, youngs_gpa, open_hz, pos, decay, damping } => {
