@@ -736,10 +736,12 @@ impl Comp {
             // gets harder, brighter hammers and the bass softer ones, as a real
             // piano's hammers are graded across the keyboard.
             Comp::Hammer { .. } => &["hardness", "felt"],
+            // The plucked string's decay is key-mapped so treble notes ring
+            // shorter than the bass, as real strings do.
+            Comp::PluckedString { .. } => &["decay"],
             Comp::MusicalString(_) | Comp::Bell(_) | Comp::Cymbal(_) | Comp::Strike | Comp::Mix
             | Comp::Wires { .. } | Comp::Breath { .. }
             | Comp::Bow { .. } | Comp::Voice { .. } | Comp::ReedPipe { .. } | Comp::BowedString { .. }
-            | Comp::PluckedString { .. }
             | Comp::Sine { .. } => &[],
         }
     }
@@ -771,6 +773,7 @@ impl Comp {
             (Comp::Reed { freq_hz, .. }, "freq") => Some(*freq_hz),
             (Comp::Hammer { hardness, .. }, "hardness") => Some(*hardness),
             (Comp::Hammer { felt, .. }, "felt") => Some(*felt),
+            (Comp::PluckedString { decay, .. }, "decay") => Some(*decay),
             _ => None,
         }
     }
@@ -802,6 +805,7 @@ impl Comp {
             (Comp::Reed { freq_hz, .. }, "freq") => *freq_hz = v,
             (Comp::Hammer { hardness, .. }, "hardness") => *hardness = v.clamp(0.0, 1.0),
             (Comp::Hammer { felt, .. }, "felt") => *felt = v,
+            (Comp::PluckedString { decay, .. }, "decay") => *decay = v.max(0.05),
             _ => {}
         }
     }

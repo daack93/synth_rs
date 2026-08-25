@@ -1516,8 +1516,10 @@ pub struct StringCore {
     tune_x1: f32,
     tune_y1: f32,
     loss_g: f32,         // per-round-trip loop gain (<1) → overall decay
-    lp_a: f32,           // bridge low-pass coefficient (HF damping); 1 = bright
-    lp_state: f32,
+    lp_a: f32,           // bridge low-pass coeff; cutoff scales with the NOTE so
+    lp_state: f32,       // highs are damped relative to each string's fundamental
+    out_integ: f32,      // leaky integrator: velocity → displacement (warm output)
+    out_gain: f32,       // output scale ∝ f, to cancel the integrator's 1/f tilt
     disp_a: f32,         // dispersion allpass coeff (0 = none)
     disp_x1: f32,
     disp_y1: f32,
@@ -1534,7 +1536,16 @@ impl StringCore {
         // into the target so the pitch lands right. Split the delay so the nut
         // (integer) line takes the whole part and the fractional bridge line
         // carries the remainder exactly (left_len + right_delay == total).
-        let total = (sr / f - 0.05).max(4.0);
+        // Bridge low-pass whose cutoff tracks the NOTE (≈ a fixed number of
+        // harmonics), so a bass string damps its 2 kHz buzz the same way a treble
+        // one does — HF damping relative to the fundamental, not to Nyquist.
+        let harmonics = (25.0 - hf_damping.clamp(0.0, 1.0) * 20.0).max(4.0);
+        let cutoff = (f * harmonics).min(sr * 0.45);
+        let tau = 2.0 * std::f32::consts::PI;
+        let lp_a = 1.0 - (-tau * cutoff / sr).exp();
+        // A one-pole adds ≈(1-a)/a samples of phase at DC; fold it into the delay.
+        let lp_phase = (1.0 - lp_a) / lp_a;
+        let total = (sr / f - lp_phase - 0.05).max(4.0);
         let pos = pos.clamp(0.05, 0.95);
         let left_len = ((total * (1.0 - pos)).floor() as usize).max(1);
         let right_delay = (total - left_len as f32).max(1.0);
@@ -1561,8 +1572,10 @@ impl StringCore {
             tune_x1: 0.0,
             tune_y1: 0.0,
             loss_g,
-            lp_a: (1.0 - hf_damping.clamp(0.0, 0.9) * 0.3).clamp(0.05, 1.0),
+            lp_a,
             lp_state: 0.0,
+            out_integ: 0.0,
+            out_gain: (0.0006 * f).clamp(0.03, 0.45),
             disp_a: disp.clamp(-0.9, 0.9),
             disp_x1: 0.0,
             disp_y1: 0.0,
@@ -1588,6 +1601,34 @@ impl StringCore {
         }
     }
 
+    /// A coherent, band-limited pluck: one low-passed noise sequence laid along
+    /// the whole string (both delay lines share it), so the excitation is
+    /// correlated across the junction instead of two independent white streams
+    /// (which read as a metallic buzz). The low-pass rounds the initial shape,
+    /// killing the harsh top.
+    pub fn pluck_coherent(&mut self, vel: f32, seed: u32) {
+        self.rng = seed | 1;
+        let total = self.left.len() + self.right.len();
+        let mut buf = vec![0.0f32; total];
+        let mut lp = 0.0f32;
+        for slot in buf.iter_mut() {
+            self.rng ^= self.rng << 13;
+            self.rng ^= self.rng >> 17;
+            self.rng ^= self.rng << 5;
+            let w = (self.rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+            lp += 0.30 * (w - lp); // band-limit the pluck
+            *slot = lp;
+        }
+        let mean = buf.iter().sum::<f32>() / total as f32; // remove DC (no click/offset)
+        let ll = self.left.len();
+        for i in 0..ll {
+            self.left[i] = (buf[i] - mean) * vel * 0.5;
+        }
+        for i in 0..self.right.len() {
+            self.right[i] = (buf[ll + i] - mean) * vel * 0.5;
+        }
+    }
+
     /// One sample. `inject` is added into both outgoing directions at the
     /// interaction point (a continuous exciter — bow/hammer; 0 for a free pluck).
     /// Returns the string signal at the interaction point.
@@ -1601,7 +1642,7 @@ impl StringCore {
         let right_out = self.tune_c * raw + self.tune_x1 - self.tune_c * self.tune_y1;
         self.tune_x1 = raw;
         self.tune_y1 = right_out;
-        // Bridge termination: low-pass (HF damping) → loop gain → dispersion.
+        // Bridge termination: note-tracking low-pass (HF damping) → loop gain.
         self.lp_state += self.lp_a * (right_out - self.lp_state);
         let mut b = self.loss_g * self.lp_state;
         if self.disp_a != 0.0 {
@@ -1618,7 +1659,15 @@ impl StringCore {
         self.right[self.right_pos] = nut_refl + inject;
         self.left_pos = (self.left_pos + 1) % self.left_len;
         self.right_pos = (self.right_pos + 1) % nr;
-        nut_refl + bridge_refl
+        // The delay lines carry VELOCITY waves; a raw velocity tap is +6 dB/oct
+        // (harsh, metallic). Leaky-integrate to a displacement-like output (warm,
+        // string-ish) and scale back up so the level is comparable.
+        // The lines carry VELOCITY waves; a raw velocity tap is +6 dB/oct (harsh,
+        // metallic). Leaky-integrate to a displacement-like output (warm) and
+        // rescale ∝ f to cancel the integrator's 1/f level tilt.
+        let vel = nut_refl + bridge_refl;
+        self.out_integ = 0.999 * self.out_integ + vel;
+        self.out_integ * self.out_gain
     }
 }
 
@@ -1645,7 +1694,7 @@ impl WaveguidePluck {
         let mut core = StringCore::new(freq_hz, pos, decay_time, hf_damping, stiffness, sr);
         // Seed the excitation from the pitch so every note gets its own noise.
         let seed = (freq_hz * 131.0) as u32 ^ 0x9e37_79b9;
-        core.pluck(vel.clamp(0.05, 1.0), seed);
+        core.pluck_coherent(vel.clamp(0.05, 1.0), seed);
         let rel_off = (-1.0 / (0.08 * sr)).exp();
         WaveguidePluck { core, rel: 1.0, rel_mul: 1.0, rel_off }
     }

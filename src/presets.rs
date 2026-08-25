@@ -401,7 +401,11 @@ pub fn factory() -> Vec<Preset> {
                 Edge { from: 1, to: 2, gain: body_gain }, // body colour → out
             ],
             output: 2,
-            key_map: Vec::new(),
+            // Treble strings ring shorter than the bass: decay ∝ (f/C4)^-0.7.
+            key_map: vec![KeyBinding {
+                component: 0,
+                map: KeyMapKind::Power { param: "decay".into(), amount: -0.7 },
+            }],
         }
     }
 
