@@ -1773,17 +1773,18 @@ impl LipReed {
         let l = length_m.max(0.02);
         let f0 = c / (2.0 * l); // bore fundamental (the played pitch)
         // The outward-striking lip's reactance pulls the played pitch sharp of the
-        // bore by a near-constant ratio (~+135 cents at ζ ≈ 0.05, swept). We cancel
-        // it by targeting a proportionally lower *internal* frequency for both the
-        // bore delay and the lip resonance, so the pulled-sharp result lands on f0.
-        // (Calibrated: 58 Hz–520 Hz plays within ~±20 cents.)
-        const PULL: f32 = 1.08;
+        // bore by a near-constant RATIO (~+125 cents at ζ ≈ 0.05, swept). Cancel it
+        // by targeting a proportionally lower *internal* frequency for both the bore
+        // delay and the lip resonance, so the pulled-sharp result lands on f0.
+        const PULL: f32 = 1.075;
         let f_eff = f0 / PULL;
         // One-way delay per line; the two lines give a round-trip of 2·D ≈ the
-        // internal period (a same-sign loop resonates at f_eff). The small `comp`
-        // recentres for the bell filter + valve phase in the loop.
-        let comp = 2.2_f32;
-        let d = (sr / (2.0 * f_eff) - comp).max(2.0);
+        // internal period (a same-sign loop resonates at f_eff). The small fixed
+        // `-0.9` recentres the bell-filter + valve loop phase. Keeping this offset
+        // small (it was 2.2) is what stops the tuning drifting sharp up high — a
+        // fixed sample offset is a growing fraction of a short high-note delay.
+        // Result: within +2…+8 cents across 165 Hz–1 kHz.
+        let d = (sr / (2.0 * f_eff) - 0.9).max(2.0);
         // The lips resonate near the partial the player is selecting. A sharp
         // resonance (ζ ≈ 0.05) locks a *single* bore partial cleanly and lets the
         // outward-striking positive feedback build a strong limit cycle; `tension`
