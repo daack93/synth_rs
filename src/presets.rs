@@ -240,7 +240,7 @@ pub fn factory() -> Vec<Preset> {
             output: 2,
             key_map: vec![KeyBinding {
                 component: 0,
-                map: KeyMapKind::OverblowTuned { anchor_hz: anchor, table },
+                map: KeyMapKind::OverblowTuned { anchor_hz: anchor, steps: 0.0, table },
             }],
         };
         make(name, g, eng(0.5, 25.0, 90.0))

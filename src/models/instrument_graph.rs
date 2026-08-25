@@ -598,6 +598,36 @@ impl Comp {
             _ => {}
         }
     }
+
+    /// Set a coupled reed+bore's register + bore length for a played note, given
+    /// the tune `anchor_hz` and the register span `steps` in semitones (0 = the
+    /// bore's natural overblow interval — a twelfth for a cylinder, an octave for
+    /// a cone). Register `r = floor(semitones-above-anchor / steps)` extends both
+    /// ways from the anchor: below the anchor and within the first `steps`
+    /// semitones it plays the fundamental; higher, it lifts the register vent and
+    /// overblows to the bore's natural harmonic, the bore length shortening to
+    /// reach any note. (The reed reliably reaches only its first overblow, so the
+    /// upper registers reuse it with a shorter bore rather than climbing to the
+    /// altissimo harmonics — which need a voiced vocal-tract resonance the model
+    /// doesn't yet carry.) No-op for non-reed components.
+    fn set_reed_register(&mut self, freq: f32, anchor_hz: f32, steps: f32) {
+        if let Comp::ReedBore { length, register, overblow, conical, .. } = self {
+            let f = freq.max(1.0);
+            let anchor = anchor_hz.max(1.0);
+            let nat_h = if *conical { 2.0 } else { 3.0 }; // natural overblow harmonic
+            let interval = if steps > 0.5 { steps } else { 12.0 * (nat_h as f32).log2() };
+            let n = 12.0 * (f / anchor).log2(); // semitones above the anchor
+            let r = (n / interval.max(1.0)).floor();
+            *overblow = nat_h; // vent position (1/nat_h); only active when open
+            if r < 1.0 {
+                *register = 0.0; // fundamental
+                *length = C_AIR / (2.0 * f);
+            } else {
+                *register = 0.3; // overblow: bore fundamental = f / nat_h
+                *length = C_AIR / (2.0 * (f / nat_h));
+            }
+        }
+    }
 }
 
 /// How the played key drives one component — a per-component *strategy*, so
@@ -613,11 +643,19 @@ pub enum KeyMapKind {
     /// the key — a brass player picking a fingering and register. Drives a
     /// Webster horn's overblow-tracked rendering. `steps` = tube-length steps.
     Overblow { anchor_hz: f32, steps: u32, microtune: bool },
-    /// Like `Overblow`, but instead of a linear pressure micro-tune it carries a
-    /// **calibrated** per-MIDI-note bore-length table (solved once so every note
-    /// lands exactly in tune). `table[note]` is the bore-length multiplier —
-    /// length has direct pitch authority for cones and cylinders alike.
-    OverblowTuned { anchor_hz: f32, table: Vec<f32> },
+    /// Like `Overblow`, but for a coupled reed+bore: `anchor_hz` sets the tune and
+    /// `steps` the register span in semitones (0 = the bore's natural overblow
+    /// interval — a cylinder's twelfth, a cone's octave). The register is inferred
+    /// per note (fundamental below the anchor + first span, overblown above), and
+    /// a **calibrated** per-MIDI-note bore-length `table` (solved once) lands every
+    /// note exactly in tune. `table[note]` is the bore-length multiplier — length
+    /// has direct pitch authority for cones and cylinders alike.
+    OverblowTuned {
+        anchor_hz: f32,
+        #[serde(default)]
+        steps: f32,
+        table: Vec<f32>,
+    },
 }
 
 impl KeyMapKind {
@@ -677,7 +715,7 @@ impl InstrumentGraph {
     /// for both cylinders and cones (a cone's pitch barely responds to mouth
     /// pressure, so pressure calibration can't tune saxes). Run once (edit-time);
     /// the result is looked up per note-on at no cost.
-    pub fn calibrate_tuning(&self, comp: usize, anchor_hz: f32, sr: f32) -> Vec<f32> {
+    pub fn calibrate_tuning(&self, comp: usize, anchor_hz: f32, steps: f32, sr: f32) -> Vec<f32> {
         // Autocorrelation pitch with parabolic interpolation of the peak lag, so
         // the pitch is resolved to a fraction of a cent (integer lags alone are
         // only ~±16 cents — too coarse to null the tuning we're solving for).
@@ -710,7 +748,7 @@ impl InstrumentGraph {
                 Some(c) => c.clone(),
                 None => return 0.0,
             };
-            c.set_overblow(f, anchor_hz, 0, false); // register + length only
+            c.set_reed_register(f, anchor_hz, steps); // register + length only
             if let Comp::ReedBore { length, .. } = &mut c {
                 *length *= mult;
             }
@@ -959,10 +997,10 @@ impl FtmModel for InstrumentGraph {
                         KeyMapKind::Overblow { anchor_hz, steps, microtune } => {
                             c.set_overblow(freq_hz, *anchor_hz, *steps, *microtune);
                         }
-                        KeyMapKind::OverblowTuned { anchor_hz, table } => {
-                            // Register + nominal length from the overblow, then the
-                            // exact calibrated length correction for this note.
-                            c.set_overblow(freq_hz, *anchor_hz, 0, false);
+                        KeyMapKind::OverblowTuned { anchor_hz, steps, table } => {
+                            // Register + nominal length from the anchor/steps, then
+                            // the exact calibrated length correction for this note.
+                            c.set_reed_register(freq_hz, *anchor_hz, *steps);
                             let note = super::freq_to_midi(freq_hz).clamp(0, 127) as usize;
                             if let Some(&mult) = table.get(note) {
                                 if let Comp::ReedBore { length, .. } = c {
@@ -1185,7 +1223,7 @@ impl FtmModel for InstrumentGraph {
         let mut remove: Option<usize> = None;
         // (binding index, component, anchor_hz) if the user clicked Calibrate —
         // run after the loop, since calibration borrows the whole graph.
-        let mut calibrate_req: Option<(usize, usize, f32)> = None;
+        let mut calibrate_req: Option<(usize, usize, f32, f32)> = None;
         for (t, kb) in self.key_map.iter_mut().enumerate() {
             ui.push_id(("kb", t), |ui| {
             ui.horizontal(|ui| {
@@ -1220,7 +1258,7 @@ impl FtmModel for InstrumentGraph {
                         if ui.selectable_label(matches!(kb.map, KeyMapKind::OverblowTuned { .. }), "Overblow + calibrated tuning").clicked()
                             && !matches!(kb.map, KeyMapKind::OverblowTuned { .. })
                         {
-                            kb.map = KeyMapKind::OverblowTuned { anchor_hz: 146.83, table: Vec::new() };
+                            kb.map = KeyMapKind::OverblowTuned { anchor_hz: 146.83, steps: 0.0, table: Vec::new() };
                             ch = true;
                         }
                         ch
@@ -1251,8 +1289,12 @@ impl FtmModel for InstrumentGraph {
                         }
                         changed |= ui.checkbox(microtune, "in-tune").changed();
                     }
-                    KeyMapKind::OverblowTuned { anchor_hz, table } => {
+                    KeyMapKind::OverblowTuned { anchor_hz, steps, table } => {
                         changed |= ui.add(unbounded_slider(anchor_hz, 30.0..=440.0, "anchor Hz")).changed();
+                        changed |= ui
+                            .add(unbounded_slider(steps, 0.0..=24.0, "register steps"))
+                            .on_hover_text("Semitones per register before overblowing. 0 = the bore's natural interval (a cylinder's twelfth, a cone's octave). Recalibrate after changing.")
+                            .changed();
                         let n = table.iter().filter(|&&v| (v - 1.0).abs() > 1e-4).count();
                         ui.label(
                             egui::RichText::new(if table.is_empty() {
@@ -1264,7 +1306,7 @@ impl FtmModel for InstrumentGraph {
                             .small(),
                         );
                         if ui.button("Calibrate").clicked() {
-                            calibrate_req = Some((t, kb.component, *anchor_hz));
+                            calibrate_req = Some((t, kb.component, *anchor_hz, *steps));
                         }
                     }
                 }
@@ -1278,9 +1320,9 @@ impl FtmModel for InstrumentGraph {
             self.key_map.remove(t);
             changed = true;
         }
-        if let Some((t, comp, anchor)) = calibrate_req {
+        if let Some((t, comp, anchor, steps)) = calibrate_req {
             // Solve the per-note length-tuning table (a one-off; a moment of compute).
-            let tbl = self.calibrate_tuning(comp, anchor, 48_000.0);
+            let tbl = self.calibrate_tuning(comp, anchor, steps, 48_000.0);
             if let Some(kb) = self.key_map.get_mut(t) {
                 if let KeyMapKind::OverblowTuned { table, .. } = &mut kb.map {
                     *table = tbl;
