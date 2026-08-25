@@ -57,15 +57,6 @@ fn reed_wind_table(i: usize) -> Vec<f32> {
     reed_tables::TABLES.get(i).map(|t| t.to_vec()).unwrap_or_default()
 }
 
-/// Oboe: a conical double reed anchored at concert Bb3 (its lowest note).
-const OBOE_ANCHOR_HZ: f32 = 233.08;
-/// Pre-solved per-note bore-length calibration for the `Base: Oboe` double reed
-/// (128 MIDI slots, 1.0 = no correction). Regenerate with the `dump_oboe_table`
-/// test and paste the printed array here whenever the double-reed model changes.
-#[rustfmt::skip]
-const OBOE_LEN_TABLE: [f32; 128] = [
-    1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0004,1.0004,1.0004,1.0011,1.0011,1.0011,1.0011,1.0011,1.0011,1.0011,1.0011,1.0011,1.0011,1.0011,1.0011,1.0018,1.0018,1.0018,1.0018,1.0018,1.0018,1.0025,1.0025,1.0025,1.0025,1.0025,1.0025,1.0025,1.0032,1.0032,1.0032,1.0039,1.0039,1.0039,1.0039,1.0046,1.0046,1.0053,1.0053,1.0053,1.0053,1.0067,1.0060,1.0067,1.0074,1.0074,0.9982,0.9982,0.9982,0.9982,0.9975,0.9975,0.9975,0.9968,0.9968,0.9968,0.9961,0.9968,0.9961,0.9954,0.9947,0.9954,0.9933,0.9933,0.9912,0.9898,0.9863,1.0000,0.9771,0.9743,0.9546,0.9589,0.9659,0.9729,0.9870,1.0000,1.0116,1.0221,1.0376,1.0510,1.0650,1.0840,1.0826,1.0812,1.0904,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,1.0000,
-];
 
 /// A saved instrument: everything needed to reconstruct a playable sound.
 ///
@@ -199,6 +190,86 @@ pub fn factory() -> Vec<Preset> {
     // clarinet, odd harmonics, overblows a 12th; a cone → saxophone, full
     // harmonics, overblows the octave) plus a fixed-formant Webster bell for
     // colour, tuned by a pre-solved per-note calibration table.
+    // --- Wind-section resonators ---------------------------------------------
+    // Every wind is built the same way: a quiet EXCITER (the reed buzz / lip /
+    // air jet — just the energy source) drives a Webster horn AIR COLUMN that
+    // carries most of the sound. The horn tracks the played note: a woodwind horn
+    // resonates the note's harmonic series (`key_tracks_pitch`, chromatic), a brass
+    // horn overblows a 6-valve-step tube (the real brass mechanism).
+
+    /// A chromatic-tracking woodwind air column. `all_harmonics` = an open/conical
+    /// bore (all harmonics — sax, oboe, flute); otherwise a closed cylinder (odd
+    /// harmonics — the clarinet's hollow tone). The geometry sets the harmonic
+    /// ratios; `key_tracks_pitch` scales them onto the played note.
+    fn wood_horn(all_harmonics: bool) -> WebsterHorn {
+        WebsterHorn {
+            boundary: if all_harmonics { Boundary::Open } else { Boundary::Brass },
+            r1: 0.0073,
+            r2: if all_harmonics { 0.015 } else { 0.0 },
+            r3: 0.002,
+            length: 0.5,
+            blow_pos: 0.0,
+            depth: 16,
+            resolution: 220,
+            damping: 14.0,
+            freq_dep_damping: -0.08,
+            visco_loss: 3.0,
+            radiation: 3.0,
+            key_tracks_pitch: true,
+            ..WebsterHorn::default()
+        }
+    }
+
+    /// An overblow-tracked brass air column: a flaring, 6-valve-step bore that
+    /// overblows the harmonic series, anchored at its longest tube (lowest open
+    /// note, e.g. concert E2 for a trumpet).
+    fn brass_horn(anchor: f32) -> WebsterHorn {
+        WebsterHorn {
+            boundary: Boundary::Brass,
+            r1: 0.0060,
+            r2: 0.0150,
+            r3: 0.0700,
+            length: 0.6,
+            blow_pos: 0.0,
+            depth: 24,
+            resolution: 400,
+            damping: 40.0,
+            freq_dep_damping: -0.08,
+            visco_loss: 6.0,
+            radiation: 4.0,
+            wavefront: Wavefront::Spherical,
+            key_tracks_pitch: true,
+            play_mode: HornPlay::OverblowTracked,
+            overblow_anchor_hz: anchor,
+            valve_steps: 6,
+            overblow_microtune: true,
+            ..WebsterHorn::default()
+        }
+    }
+
+    /// Wire an exciter (component 0) + a horn air column (component 1) into the
+    /// standard wind graph: quiet dry exciter + loud resonating air column.
+    fn wind_graph(
+        exciter: Comp,
+        horn: WebsterHorn,
+        exciter_map: KeyMapKind,
+        drive: f32,
+        res_gain: f32,
+    ) -> InstrumentGraph {
+        InstrumentGraph {
+            components: vec![exciter, Comp::Horn(horn), Comp::Mix],
+            edges: vec![
+                Edge { from: 0, to: 2, gain: 0.15 },      // dry exciter buzz → out (quiet)
+                Edge { from: 0, to: 1, gain: drive },     // exciter → air column
+                Edge { from: 1, to: 2, gain: res_gain },  // resonating air column → out
+            ],
+            output: 2,
+            key_map: vec![KeyBinding { component: 0, map: exciter_map }],
+        }
+    }
+
+    /// A single-reed woodwind (clarinet/sax): the calibrated coupled reed+bore as
+    /// the buzz source + its chromatic air column.
     fn reed_wind(
         name: &str,
         anchor: f32,
@@ -207,108 +278,82 @@ pub fn factory() -> Vec<Preset> {
         pressure: f32,
         stiffness: f32,
         tone: f32,
-        bell_mix: f32,
         table: Vec<f32>,
     ) -> Preset {
-        // Bell formant scales with the instrument (bigger horn → lower, darker).
-        let bell_len = (0.06 * 146.83 / anchor).clamp(0.03, 0.22);
-        let r2 = if conical { 0.02 } else { 0.0 }; // cones flare
-        let g = InstrumentGraph {
-            components: vec![
-                Comp::ReedBore {
-                    pressure,
-                    stiffness,
-                    length: 343.0 / (2.0 * anchor),
-                    tone,
-                    register: 0.0,
-                    overblow,
-                    conical,
-                    tract_gain: 0.0, // altissimo voicing off by default (user-tunable)
-                    tract_q: 0.0,
-                },
-                Comp::Horn(WebsterHorn {
-                    boundary: Boundary::Brass,
-                    r1: 0.0073,
-                    r2,
-                    r3: 0.002,
-                    length: bell_len,
-                    blow_pos: 0.0,
-                    depth: 18,
-                    resolution: 300,
-                    damping: 4.0,
-                    freq_dep_damping: -0.08,
-                    visco_loss: 0.8,
-                    radiation: 50.0,
-                    key_tracks_pitch: false, // fixed-formant bell (no own pitch)
-                    ..WebsterHorn::default()
-                }),
-                Comp::Mix,
-            ],
-            edges: vec![
-                Edge { from: 0, to: 2, gain: 1.3 },      // coupled voice (dry) → out
-                Edge { from: 0, to: 1, gain: 1.0 },      // voice → bell
-                Edge { from: 1, to: 2, gain: bell_mix }, // bell colour → out
-            ],
-            output: 2,
-            key_map: vec![KeyBinding {
-                component: 0,
-                map: KeyMapKind::OverblowTuned { anchor_hz: anchor, steps: 0.0, table },
-            }],
+        let reed = Comp::ReedBore {
+            pressure,
+            stiffness,
+            length: 343.0 / (2.0 * anchor),
+            tone,
+            register: 0.0,
+            overblow,
+            conical,
+            tract_gain: 0.0,
+            tract_q: 0.0,
         };
-        make(name, g, eng(0.5, 25.0, 90.0))
+        let g = wind_graph(
+            reed,
+            wood_horn(conical),
+            KeyMapKind::OverblowTuned { anchor_hz: anchor, steps: 0.0, table },
+            0.4,
+            0.5,
+        );
+        make(name, g, eng(1.2, 25.0, 90.0))
     }
 
-    // The oboe: a conical double-reed voice (bright, nasal, octave overblow) into a
-    // small fixed-formant Webster bell, tuned by the pre-solved length table. The
-    // same OverblowTuned machinery as the single-reed family.
-    fn oboe_graph() -> InstrumentGraph {
-        InstrumentGraph {
-            components: vec![
-                Comp::DoubleReed {
-                    pressure: 1.0,
-                    stiffness: 1.2,
-                    length: 343.0 / (2.0 * OBOE_ANCHOR_HZ),
-                    tone: 1.2,
-                    register: 0.0,
-                    overblow: 2.0,
-                    conical: true,
-                    tract_gain: 0.0,
-                    tract_q: 0.0,
-                },
-                Comp::Horn(WebsterHorn {
-                    boundary: Boundary::Brass,
-                    r1: 0.0060,
-                    r2: 0.02,
-                    r3: 0.002,
-                    length: 0.038, // small bright oboe bell
-                    blow_pos: 0.0,
-                    depth: 18,
-                    resolution: 300,
-                    damping: 4.0,
-                    freq_dep_damping: -0.08,
-                    visco_loss: 0.8,
-                    radiation: 50.0,
-                    key_tracks_pitch: false,
-                    ..WebsterHorn::default()
-                }),
-                Comp::Mix,
-            ],
-            edges: vec![
-                Edge { from: 0, to: 2, gain: 1.3 }, // coupled voice (dry) → out
-                Edge { from: 0, to: 1, gain: 1.0 }, // voice → bell
-                Edge { from: 1, to: 2, gain: 0.9 }, // bell colour → out
-            ],
-            output: 2,
-            key_map: vec![KeyBinding {
-                component: 0,
-                map: KeyMapKind::OverblowTuned {
-                    anchor_hz: OBOE_ANCHOR_HZ,
-                    steps: 0.0,
-                    table: OBOE_LEN_TABLE.to_vec(),
-                },
-            }],
-        }
+    /// A double-reed woodwind (oboe/bassoon): the double reed as buzz source +
+    /// its chromatic (conical, all-harmonic) air column. Chromatic-tuned — the
+    /// air column carries the pitch, so no per-note calibration is needed.
+    fn double_reed_wind(name: &str, anchor: f32, pressure: f32, stiffness: f32, tone: f32) -> Preset {
+        let reed = Comp::DoubleReed {
+            pressure,
+            stiffness,
+            length: 0.6555, // c/2·C4 — the Power(length) map scales from C4
+            tone,
+            register: 0.0,
+            overblow: 2.0,
+            conical: true,
+            tract_gain: 0.0,
+            tract_q: 0.0,
+        };
+        let g = wind_graph(
+            reed,
+            wood_horn(true),
+            KeyMapKind::Power { param: "length".into(), amount: -1.0 },
+            0.4,
+            0.5,
+        );
+        make(name, g, eng(1.2, 25.0, 90.0))
     }
+
+    /// A brass instrument: the outward-striking lips as buzz source + an overblow-
+    /// tracked brass air column.
+    fn brass_wind(name: &str, horn_anchor: f32, pressure: f32, tension: f32, tone: f32) -> Preset {
+        let lips = Comp::Lips { pressure, tension, length: 0.6555, tone };
+        let g = wind_graph(
+            lips,
+            brass_horn(horn_anchor),
+            KeyMapKind::Power { param: "length".into(), amount: -1.0 },
+            0.1,
+            0.4,
+        );
+        make(name, g, eng(0.5, 30.0, 90.0))
+    }
+
+    /// A flute / flue instrument: the air jet as breath source + its chromatic,
+    /// open (all-harmonic) air column.
+    fn flue_wind(name: &str, pressure: f32, jet_ratio: f32, tone: f32) -> Preset {
+        let jet = Comp::AirJet { pressure, jet_ratio, tone, length: 0.6555 };
+        let g = wind_graph(
+            jet,
+            wood_horn(true),
+            KeyMapKind::Power { param: "length".into(), amount: -1.0 },
+            0.4,
+            0.5,
+        );
+        make(name, g, eng(1.4, 20.0, 80.0))
+    }
+
 
     let mut base = vec![
         // ---- Pure String (feedback: pluck toward saw, stronger HF damping) ----
@@ -369,70 +414,7 @@ pub fn factory() -> Vec<Preset> {
             eng(0.7, 1.0, 200.0),
         ),
         // ---- Sustained/driven wind: breath into an air column (graph) ----
-        make(
-            "Wind (graph)",
-            InstrumentGraph {
-                components: vec![
-                    Comp::Breath { level: 0.15, tone: 1.0 },
-                    Comp::Horn(WebsterHorn {
-                        boundary: Boundary::Open,
-                        r1: 0.0095,
-                        r2: 0.0,
-                        r3: 0.001,
-                        length: 0.6,
-                        blow_pos: 0.15,
-                        depth: 12,
-                        resolution: 300,
-                        damping: 3.0,
-                        freq_dep_damping: -0.10,
-                        visco_loss: 0.3,
-                        radiation: 0.5,
-                        ..WebsterHorn::default()
-                    }),
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 }, // breath drives the air column
-                    Edge { from: 1, to: 2, gain: 1.0 }, // air column → out
-                ],
-                output: 2,
-                key_map: Vec::new(),
-            },
-            eng(0.5, 20.0, 200.0),
-        ),
         // ---- Self-oscillating reed into a bore (feedback graph) ----
-        make(
-            "Reed (graph)",
-            InstrumentGraph {
-                components: vec![
-                    Comp::Reed { pressure: 0.6, stiffness: 1.5, freq_hz: 0.0 },
-                    Comp::Horn(WebsterHorn {
-                        boundary: Boundary::Brass,
-                        r1: 0.0073,
-                        r2: 0.0,
-                        r3: 0.002,
-                        length: 0.66,
-                        blow_pos: 0.0,
-                        depth: 18,
-                        resolution: 300,
-                        damping: 4.0,
-                        freq_dep_damping: -0.08,
-                        visco_loss: 0.8,
-                        radiation: 0.6,
-                        ..WebsterHorn::default()
-                    }),
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.3 }, // reed drives the bore
-                    Edge { from: 1, to: 0, gain: 0.55 },  // bore pressure feeds back to the reed
-                    Edge { from: 1, to: 2, gain: 1.0 },  // bore → out
-                ],
-                output: 2,
-                key_map: Vec::new(),
-            },
-            eng(0.5, 20.0, 200.0),
-        ),
         // ============================================================
         //  InstrumentGraph showcase — instruments built purely as a graph
         //  of exciter + resonator components, with secondary resonators
@@ -579,82 +561,9 @@ pub fn factory() -> Vec<Preset> {
             eng(0.5, 1.0, 300.0),
         ),
         // -- Winds: breath jet into an air column --
-        make(
-            "Flute (graph)",
-            InstrumentGraph {
-                components: vec![
-                    Comp::Breath { level: 0.12, tone: 1.2 },
-                    Comp::Horn(WebsterHorn { boundary: Boundary::Open, r1: 0.0095, r2: 0.0, r3: 0.001, length: 0.6, blow_pos: 0.15, depth: 12, resolution: 300, damping: 3.0, freq_dep_damping: -0.10, visco_loss: 0.3, radiation: 0.5, ..WebsterHorn::default() }),
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 2, gain: 1.0 },
-                ],
-                output: 2,
-                key_map: Vec::new(),
-            },
-            eng(0.55, 40.0, 80.0),
-        ),
         // Didgeridoo: breath drone into a long bore, coloured by a vocal-tract body.
-        make(
-            "Didgeridoo (graph)",
-            InstrumentGraph {
-                components: vec![
-                    Comp::Breath { level: 0.2, tone: 0.6 },
-                    Comp::Horn(WebsterHorn { boundary: Boundary::Open, blow_pos: 0.10, r2: 0.5, r3: 0.5, length: 3.0, damping: 0.6, freq_dep_damping: -0.03, visco_loss: 0.6, radiation: 0.15, depth: 20, ..WebsterHorn::default() }),
-                    Comp::Body { cavity_litres: 0.15, soundhole_cm: 2.5, top_hz: 1200.0, decay_s: 0.05 }, // mouth/tract formants
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 2, gain: 1.0 },  // bore → tract
-                    Edge { from: 1, to: 3, gain: 1.0 },  // dry bore
-                    Edge { from: 2, to: 3, gain: 0.15 }, // tract colour
-                ],
-                output: 3,
-                key_map: Vec::new(),
-            },
-            eng(0.6, 20.0, 400.0),
-        ),
         // -- Reeds: single-reed woodwinds are the coupled reed+bore family below --
         // -- Brass: buzzing lips (a reed) driving a flaring bore (feedback loop) --
-        make(
-            "Trumpet (graph)",
-            InstrumentGraph {
-                components: vec![
-                    Comp::Reed { pressure: 0.8, stiffness: 1.1, freq_hz: 0.0 }, // buzzing lips
-                    Comp::Horn(WebsterHorn { boundary: Boundary::Brass, r1: 0.0058, r2: 0.0150, r3: 0.1550, length: 0.6, blow_pos: 0.0, depth: 32, resolution: 512, damping: 10.0, freq_dep_damping: -0.08, visco_loss: 1.5, radiation: 1.6, wavefront: Wavefront::Spherical, ..WebsterHorn::default() }),
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.15 },
-                    Edge { from: 1, to: 0, gain: 0.55 },
-                    Edge { from: 1, to: 2, gain: 1.0 },
-                ],
-                output: 2,
-                key_map: Vec::new(),
-            },
-            eng(0.6, 30.0, 45.0),
-        ),
-        make(
-            "Trombone (graph)",
-            InstrumentGraph {
-                components: vec![
-                    Comp::Reed { pressure: 0.8, stiffness: 1.1, freq_hz: 0.0 },
-                    Comp::Horn(WebsterHorn { boundary: Boundary::Brass, r1: 0.0067, r2: 0.0220, r3: 0.1450, length: 0.8, blow_pos: 0.0, depth: 30, resolution: 400, damping: 8.0, freq_dep_damping: -0.08, visco_loss: 1.8, radiation: 1.4, wavefront: Wavefront::Spherical, ..WebsterHorn::default() }),
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 1, gain: 0.5 },
-                    Edge { from: 1, to: 0, gain: 0.55 },
-                    Edge { from: 1, to: 2, gain: 1.0 },
-                ],
-                output: 2,
-                key_map: Vec::new(),
-            },
-            eng(0.6, 25.0, 60.0),
-        ),
         // ---- Bowed strings (driven → sustain; bow near the bridge = bright/saw) ----
         make("Violin", bowed(0.330, 44.0, 1.60, GUT, 1.8, 0.6, 0.12), eng(0.55, 60.0, 150.0)),
         make("Viola", bowed(0.380, 55.0, 2.40, GUT, 2.0, 0.5, 0.14), eng(0.55, 65.0, 160.0)),
@@ -690,140 +599,15 @@ pub fn factory() -> Vec<Preset> {
         // ---- Webster Horn ----
         // Trumpet: physical bore (contracting throat + flare) from Dave's config.
         // Their freq_dependent_damping = +0.08 maps to our −0.08 sign convention.
-        make(
-            "Trumpet",
-            WebsterHorn {
-                boundary: Boundary::Brass,
-                // Bell-flare quadratic over its final 0.6 m (Bb trumpet). Base
-                // resonance 116.5 Hz = open bore → longest bore anchored at E2.
-                r1: 0.0058,
-                r2: 0.0150,
-                r3: 0.1550,
-                length: 0.6,
-                wave_speed: 343.0,
-                blow_pos: 0.0,
-                depth: 32,
-                resolution: 512,
-                damping: 10.0,
-                freq_dep_damping: -0.08,
-                visco_loss: 1.5,             // narrow leadpipe = warm boundary-layer loss
-                radiation: 1.6,              // bright, open bell
-                wavefront: Wavefront::Spherical, // real bore: curved wavefronts at the bell
-                // Proof of concept: play like a real Bb trumpet — overblow onto
-                // one of the 7 valve bore lengths (0..6 semitones) and land it on
-                // the key. Longest bore's fundamental = concert E2 (open bore =
-                // pedal Bb2 a tritone above).
-                play_mode: HornPlay::OverblowTracked,
-                valve_steps: 6,
-                overblow_anchor_hz: 82.41,
-                ..WebsterHorn::default()
-            },
-            eng(0.6, 30.0, 45.0),
-        ),
         // French Horn: same bore idea, longer + darker (more HF damping).
-        make(
-            "French Horn (F)",
-            WebsterHorn {
-                boundary: Boundary::Brass,
-                r1: 0.0090,
-                r2: 0.0350,
-                r3: 0.1110,
-                length: 1.0,
-                blow_pos: 0.0,
-                depth: 30,
-                resolution: 400,
-                damping: 8.0,
-                freq_dep_damping: -0.10,
-                visco_loss: 2.5,             // long narrow tubing = mellow, stuffed
-                radiation: 0.5,              // dark, backward-facing bell
-                wavefront: Wavefront::Spherical,
-                // Key-tracked: 3 valves (0..6 semitones). Horn "in F" → the open
-                // bore's fundamental is concert F1 (43.65 Hz), so the LONGEST bore
-                // (−6 semitones) is anchored at B0 = 30.87 Hz. Mid-range notes fall
-                // on high harmonics (8th–16th) — the mellow, "living high" horn
-                // character.
-                play_mode: HornPlay::OverblowTracked,
-                valve_steps: 6,
-                overblow_anchor_hz: 30.87,
-                ..WebsterHorn::default()
-            },
-            eng(0.55, 30.0, 150.0),
-        ),
-        make(
-            "French Horn (Bb)",
-            WebsterHorn {
-                boundary: Boundary::Brass,
-                r1: 0.0090,
-                r2: 0.0350,
-                r3: 0.1110,
-                length: 1.0,
-                blow_pos: 0.0,
-                depth: 30,
-                resolution: 400,
-                damping: 8.0,
-                freq_dep_damping: -0.10,
-                visco_loss: 2.5,
-                radiation: 0.5,
-                wavefront: Wavefront::Spherical,
-                // The Bb side of a double horn: shorter, so a given note sits on a
-                // lower harmonic — more secure/brighter. Open fundamental concert
-                // Bb1 (58.27 Hz) → longest bore anchored at E1 = 41.20 Hz.
-                play_mode: HornPlay::OverblowTracked,
-                valve_steps: 6,
-                overblow_anchor_hz: 41.20,
-                ..WebsterHorn::default()
-            },
-            eng(0.55, 30.0, 150.0),
-        ),
         // Didgeridoo: near-lossless drone — barely damps, rings on and on. A
         // touch of wall loss for wooden warmth; almost no bell radiation.
-        make(
-            "Didgeridoo",
-            WebsterHorn { boundary: Boundary::Open, blow_pos: 0.10, r2: 0.5, r3: 0.5, length: 3.0, damping: 0.25, freq_dep_damping: -0.03, visco_loss: 0.6, radiation: 0.15, depth: 20, ..WebsterHorn::default() },
-            eng(0.6, 20.0, 400.0),
-        ),
         // Trombone: long cylindrical brass with a bell flare.
-        make(
-            "Trombone",
-            WebsterHorn {
-                boundary: Boundary::Brass,
-                // Bell-flare quadratic over its final 0.8 m (tenor Bb trombone).
-                // Base resonance 58.3 Hz = open bore → longest position anchored
-                // at E1. The slide's 7 positions map to the 0..6 semitone steps.
-                r1: 0.0067,
-                r2: 0.0220,
-                r3: 0.1450,
-                length: 0.8,
-                blow_pos: 0.0,
-                depth: 30,
-                resolution: 400,
-                damping: 8.0,
-                freq_dep_damping: -0.08,
-                visco_loss: 1.8,
-                radiation: 1.4,
-                wavefront: Wavefront::Spherical,
-                play_mode: HornPlay::OverblowTracked,
-                valve_steps: 6,
-                overblow_anchor_hz: 41.20,
-                ..WebsterHorn::default()
-            },
-            eng(0.6, 25.0, 60.0),
-        ),
         // ---- Woodwinds (bore shape + end condition set the character) ----
         // Flute: open cylinder (all harmonics), pure and airy — few modes.
-        make(
-            "Flute",
-            WebsterHorn { boundary: Boundary::Open, r1: 0.0095, r2: 0.0, r3: 0.001, length: 0.6, blow_pos: 0.15, depth: 12, resolution: 300, damping: 3.0, freq_dep_damping: -0.10, visco_loss: 0.3, radiation: 0.5, ..WebsterHorn::default() },
-            eng(0.55, 40.0, 80.0),
-        ),
         // (Single-reed woodwinds — clarinets + saxophones — live in their own
         // coupled reed+bore family below, not as bare Webster horns.)
         // Bassoon: long narrow closed cone → full harmonics, dark and reedy.
-        make(
-            "Bassoon",
-            WebsterHorn { boundary: Boundary::Brass, r1: 0.004, r2: 0.008, r3: 0.001, length: 2.5, blow_pos: 0.0, depth: 28, resolution: 400, damping: 6.0, freq_dep_damping: -0.10, visco_loss: 2.0, radiation: 0.5, ..WebsterHorn::default() },
-            eng(0.6, 30.0, 100.0),
-        ),
         // ---- Idiophones ----
         make(
             "Cowbell",
@@ -1206,49 +990,6 @@ pub fn factory() -> Vec<Preset> {
         // (all harmonics, f ≈ c/2L). The coupled jet↔bore voice is self-oscillating
         // and pitched by its bore length (key-mapped chromatically), coloured by a
         // short open Webster bell for the airy edge tone. Anchored at C4.
-        make(
-            "Base: Flute",
-            InstrumentGraph {
-                components: vec![
-                    Comp::AirJet { pressure: 0.55, jet_ratio: 0.5, tone: 1.1, length: 0.6555 },
-                    Comp::Horn(WebsterHorn { length: 0.12, wave_speed: 343.0, r1: 0.0095, r2: 0.0, r3: 0.0, blow_pos: 0.0, depth: 12, resolution: 200, damping: 3.0, freq_dep_damping: -0.1, visco_loss: 0.3, radiation: 0.5, boundary: Boundary::Open, key_tracks_pitch: false, ..WebsterHorn::default() }),
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 2, gain: 1.0 },  // dry jet voice → out
-                    Edge { from: 0, to: 1, gain: 1.0 },  // jet voice → bell
-                    Edge { from: 1, to: 2, gain: 0.2 },  // bell edge colour → out
-                ],
-                output: 2,
-                key_map: vec![KeyBinding {
-                    component: 0,
-                    map: KeyMapKind::Power { param: "length".to_string(), amount: -1.0 },
-                }],
-            },
-            eng(0.5, 40.0, 90.0),
-        ),
-        make(
-            "Base: Bassoon",
-            InstrumentGraph {
-                components: vec![
-                    Comp::Reed { pressure: 0.85, stiffness: 1.2, freq_hz: 0.0 },
-                    Comp::Bore { tone: 0.5, length: 0.0 },
-                    Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 500.0, decay_s: 0.08 },
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 }, // reed → bore
-                    Edge { from: 1, to: 0, gain: 1.0 }, // bore → reed (feedback)
-                    Edge { from: 1, to: 3, gain: 0.7 }, // bore → out (dry)
-                    Edge { from: 1, to: 2, gain: 1.0 }, // bore → bell
-                    Edge { from: 2, to: 3, gain: 0.3 }, // bell colour → out
-                ],
-                output: 3,
-                key_map: vec![KeyBinding { component: 2, map: KeyMapKind::Power { param: "top_hz".into(), amount: 1.0 } }],
-            },
-            eng(0.5, 25.0, 110.0),
-        ),
-        make("Base: Oboe", oboe_graph(), eng(0.5, 20.0, 90.0)),
         // Brass done right: an OUTWARD-striking lip valve (the `Lips` component)
         // implicitly coupled to its own flaring bore — blowing harder opens the
         // lips (the opposite of a woodwind reed), so it overblows up the harmonic
@@ -1256,108 +997,6 @@ pub fn factory() -> Vec<Preset> {
         // Power(length,-1) key map; `tension` picks the partial (≈1 fundamental).
         // A fixed-formant Webster brass bell colours the buzz. Base length
         // 0.6555 m = c/2·C4, so C4 plays at the reference length.
-        make(
-            "Base: Trumpet",
-            InstrumentGraph {
-                components: vec![
-                    Comp::Lips { pressure: 1.0, tension: 1.0, length: 0.6555, tone: 1.2 },
-                    Comp::Horn(WebsterHorn {
-                        boundary: Boundary::Brass,
-                        r1: 0.0058,
-                        r2: 0.0150,
-                        r3: 0.1550,
-                        length: 0.6,
-                        blow_pos: 0.0,
-                        depth: 24,
-                        resolution: 400,
-                        damping: 10.0,
-                        freq_dep_damping: -0.08,
-                        visco_loss: 1.5,
-                        radiation: 1.6,
-                        wavefront: Wavefront::Spherical,
-                        key_tracks_pitch: false, // fixed-formant bell (colour only)
-                        ..WebsterHorn::default()
-                    }),
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 2, gain: 0.9 }, // lips (dry brass tone) → out
-                    Edge { from: 0, to: 1, gain: 1.0 }, // lips → bell
-                    Edge { from: 1, to: 2, gain: 0.25 }, // bell colour → out
-                ],
-                output: 2,
-                key_map: vec![KeyBinding {
-                    component: 0,
-                    map: KeyMapKind::Power { param: "length".into(), amount: -1.0 },
-                }],
-            },
-            eng(0.55, 25.0, 90.0),
-        ),
-        make(
-            "Base: Trombone",
-            InstrumentGraph {
-                components: vec![
-                    Comp::Reed { pressure: 1.0, stiffness: 0.8, freq_hz: 0.0 },
-                    Comp::Bore { tone: 1.2, length: 0.0 },
-                    Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 1200.0, decay_s: 0.05 },
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 }, // reed → bore
-                    Edge { from: 1, to: 0, gain: 1.0 }, // bore → reed (feedback)
-                    Edge { from: 1, to: 3, gain: 0.7 }, // bore → out (dry)
-                    Edge { from: 1, to: 2, gain: 1.0 }, // bore → bell
-                    Edge { from: 2, to: 3, gain: 0.3 }, // bell colour → out
-                ],
-                output: 3,
-                key_map: vec![KeyBinding { component: 2, map: KeyMapKind::Power { param: "top_hz".into(), amount: 1.0 } }],
-            },
-            eng(0.55, 25.0, 90.0),
-        ),
-        make(
-            "Base: French Horn",
-            InstrumentGraph {
-                components: vec![
-                    Comp::Reed { pressure: 0.9, stiffness: 1.0, freq_hz: 0.0 },
-                    Comp::Bore { tone: 0.7, length: 0.0 },
-                    Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 900.0, decay_s: 0.06 },
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 }, // reed → bore
-                    Edge { from: 1, to: 0, gain: 1.0 }, // bore → reed (feedback)
-                    Edge { from: 1, to: 3, gain: 0.7 }, // bore → out (dry)
-                    Edge { from: 1, to: 2, gain: 1.0 }, // bore → bell
-                    Edge { from: 2, to: 3, gain: 0.3 }, // bell colour → out
-                ],
-                output: 3,
-                key_map: vec![KeyBinding { component: 2, map: KeyMapKind::Power { param: "top_hz".into(), amount: 1.0 } }],
-            },
-            eng(0.5, 30.0, 150.0),
-        ),
-        make(
-            "Base: Didgeridoo",
-            InstrumentGraph {
-                components: vec![
-                    Comp::Reed { pressure: 0.9, stiffness: 0.6, freq_hz: 0.0 },
-                    Comp::Bore { tone: 0.5, length: 0.0 },
-                    Comp::Voice { open_quotient: 0.5, level: 0.15 },
-                    Comp::Body { cavity_litres: 0.15, soundhole_cm: 2.5, top_hz: 1200.0, decay_s: 0.05 },
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 }, // reed → bore
-                    Edge { from: 1, to: 0, gain: 1.0 }, // bore → reed (feedback)
-                    Edge { from: 2, to: 1, gain: 0.5 }, // voice → bore (vocalisation)
-                    Edge { from: 1, to: 4, gain: 0.7 }, // bore → out
-                    Edge { from: 1, to: 3, gain: 1.0 }, // bore → tract
-                    Edge { from: 3, to: 4, gain: 0.3 }, // tract colour → out
-                ],
-                output: 4,
-                key_map: vec![KeyBinding { component: 3, map: KeyMapKind::Power { param: "top_hz".into(), amount: 1.0 } }],
-            },
-            eng(0.5, 30.0, 400.0),
-        ),
         make(
             "Base: Vocal Synth",
             InstrumentGraph {
@@ -1534,8 +1173,37 @@ pub fn factory() -> Vec<Preset> {
     ];
 
     // ---- Single-reed woodwind family (coupled reed + bore, calibrated) ----
-    for (i, &(name, anchor, conical, over, p, st, tone, mix)) in REED_WINDS.iter().enumerate() {
-        base.push(reed_wind(name, anchor, conical, over, p, st, tone, mix, reed_wind_table(i)));
+    // Single-reed woodwinds (clarinets + saxes) — calibrated coupled reed+bore.
+    for (i, &(name, anchor, conical, over, p, st, tone, _mix)) in REED_WINDS.iter().enumerate() {
+        base.push(reed_wind(&format!("Wind: {name}"), anchor, conical, over, p, st, tone, reed_wind_table(i)));
+    }
+    // Double-reed woodwinds (name, anchor_hz, pressure, stiffness, tone).
+    for &(name, anchor, p, st, tone) in &[
+        ("Oboe", 233.08f32, 1.0f32, 1.1f32, 1.2f32),
+        ("Cor Anglais", 164.81, 1.0, 1.05, 1.1),
+        ("Bassoon", 58.27, 0.95, 1.0, 1.0),
+        ("Contrabassoon", 29.14, 0.95, 0.9, 0.9),
+    ] {
+        base.push(double_reed_wind(&format!("Wind: {name}"), anchor, p, st, tone));
+    }
+    // Brass (name, horn_anchor_hz = longest tube, pressure, tension, tone).
+    for &(name, anchor, p, ten, tone) in &[
+        ("Trumpet", 82.41f32, 1.0f32, 1.0f32, 1.2f32),
+        ("Flugelhorn", 82.41, 0.95, 1.0, 0.9),
+        ("Trombone", 58.27, 1.0, 1.0, 1.1),
+        ("French Horn", 65.41, 0.9, 1.0, 1.0),
+        ("Tuba", 36.71, 1.0, 1.0, 0.9),
+    ] {
+        base.push(brass_wind(&format!("Wind: {name}"), anchor, p, ten, tone));
+    }
+    // Flutes / flues (name, pressure, jet_ratio, tone).
+    for &(name, p, jr, tone) in &[
+        ("Piccolo", 0.5f32, 0.5f32, 1.2f32),
+        ("Flute", 0.55, 0.5, 1.1),
+        ("Alto Flute", 0.55, 0.5, 1.0),
+        ("Bass Flute", 0.6, 0.5, 0.9),
+    ] {
+        base.push(flue_wind(&format!("Wind: {name}"), p, jr, tone));
     }
 
     // For every struck string / membrane / plate preset, add a "(graph)" twin
@@ -1782,61 +1450,7 @@ mod tests {
     use crate::models::basic_wave::BasicWave;
     use crate::models::instrument_graph::InstrumentGraph;
 
-    #[test]
-    #[ignore] // run manually to regenerate OBOE_LEN_TABLE: cargo test dump_oboe_table --release -- --ignored --nocapture
-    fn dump_oboe_table() {
-        let sr = 48_000.0;
-        let p = factory().into_iter().find(|p| p.name == "Base: Oboe").unwrap();
-        let g: InstrumentGraph = serde_json::from_value(p.params.clone()).unwrap();
-        let table = g.calibrate_tuning(0, OBOE_ANCHOR_HZ, 0.0, sr);
-        print!("const OBOE_LEN_TABLE: [f32; 128] = [\n    ");
-        for v in &table {
-            print!("{v:.4},");
-        }
-        println!("\n];");
-    }
 
-    #[test]
-    fn oboe_double_reed_sounds_in_tune_with_ac_across_its_range() {
-        // The Base: Oboe voice must (a) sound with genuine AC — mean-subtracted rms,
-        // NOT plain rms, which would hide a silent-DC blow-up — across its low AND
-        // overblown registers, (b) play ~c/2L in tune, and (c) overblow the octave.
-        let sr = 48_000.0;
-        let p = factory().into_iter().find(|p| p.name == "Base: Oboe").unwrap();
-        let g: InstrumentGraph = serde_json::from_value(p.params.clone()).unwrap();
-        let acf = |y: &[f32], f0: f32| -> f32 {
-            let m: f32 = y.iter().sum::<f32>() / y.len() as f32;
-            let s: Vec<f32> = y.iter().map(|v| v - m).collect();
-            let corr = |l: usize| -> f32 { (0..s.len() - l).map(|i| s[i] * s[i + l]).sum() };
-            let lo = ((sr / (f0 * 1.5)) as usize).max(2);
-            let hi = ((sr / (f0 * 0.66)) as usize).min(s.len() / 2 - 2);
-            let (mut b, mut bc) = (lo, f32::MIN);
-            for l in lo..hi {
-                let c = corr(l);
-                if c > bc {
-                    bc = c;
-                    b = l;
-                }
-            }
-            sr / b as f32
-        };
-        // Semitones above the Bb3 anchor: 0 (low), 5, 11 (top of the low register),
-        // 13 & 19 (overblown octave register).
-        for st in [0, 5, 11, 13, 19] {
-            let f0 = OBOE_ANCHOR_HZ * 2f32.powf(st as f32 / 12.0);
-            let mut n = g.build_graph(f0, 1.0, sr).unwrap();
-            let warm = (0.35 * sr) as usize;
-            let tail = ((30.0 * sr / f0) as usize).clamp(8_000, 40_000);
-            let y: Vec<f32> = (0..warm + tail).map(|_| n.tick(&[])).collect();
-            assert!(y.iter().all(|v| v.is_finite() && v.abs() < 30.0), "oboe stable at {f0:.0} Hz");
-            let t = &y[warm..];
-            let mean: f32 = t.iter().sum::<f32>() / t.len() as f32;
-            let ac = (t.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / t.len() as f32).sqrt();
-            assert!(ac > 1e-2, "oboe sounds with real AC at {f0:.0} Hz (ac {ac}) — not silent DC");
-            let cents = 1200.0 * (acf(t, f0) / f0).log2();
-            assert!(cents.abs() < 35.0, "oboe in tune at {f0:.0} Hz (off {cents:+.0}c)");
-        }
-    }
 
     #[test]
     fn reed_wind_family_is_calibrated_in_tune() {
@@ -1861,7 +1475,8 @@ mod tests {
             sr / b as f32
         };
         for &(name, anchor, ..) in REED_WINDS {
-            let p = f.iter().find(|p| p.name == name).unwrap();
+            let full = format!("Wind: {name}");
+            let p = f.iter().find(|p| p.name == full).unwrap();
             let g: InstrumentGraph = serde_json::from_value(p.params.clone()).unwrap();
             for st in [0, 5, 10, 14, 19] {
                 let f0 = anchor * 2f32.powf(st as f32 / 12.0);
@@ -1983,6 +1598,12 @@ mod tests {
         // registry, so it stays correct as plugins are added).
         let ids: std::collections::HashSet<_> = kit.iter().map(|p| p.model_id.clone()).collect();
         for m in crate::models::registry() {
+            // `webster_horn` is now a resonator COMPONENT inside the wind graphs
+            // (the `Wind:` section), not a standalone playable instrument, so it has
+            // no direct preset by design.
+            if m.id() == "webster_horn" {
+                continue;
+            }
             assert!(ids.contains(m.id()), "kit should include a {} preset", m.id());
         }
         // Every factory preset must rebuild into a working model that produces sound.
