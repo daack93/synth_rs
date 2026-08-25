@@ -703,7 +703,7 @@ impl Comp {
             // The waveguide bore's length — the coupled reed↔bore pitch control.
             Comp::Bore { .. } => &["length"],
             // The coupled reed+bore's length sets its (in-tune) pitch.
-            Comp::ReedBore { .. } | Comp::DoubleReed { .. } => &["length", "register"],
+            Comp::ReedBore { .. } | Comp::DoubleReed { .. } => &["length", "register", "pressure"],
             // The lip-brass bore length sets the pitch; tension selects the partial.
             Comp::Lips { .. } => &["length", "tension"],
             // The air-jet flue pipe's length sets its (in-tune) pitch, f ≈ c/2L.
@@ -734,6 +734,8 @@ impl Comp {
             (Comp::WaveguideHorn { length, .. }, "length") => Some(*length),
             (Comp::Bore { length, .. }, "length") => Some(*length),
             (Comp::ReedBore { length, .. }, "length") => Some(*length),
+            (Comp::ReedBore { pressure, .. }, "pressure") => Some(*pressure),
+            (Comp::DoubleReed { pressure, .. }, "pressure") => Some(*pressure),
             (Comp::ReedBore { register, .. }, "register") => Some(*register),
             (Comp::DoubleReed { length, .. }, "length") => Some(*length),
             (Comp::DoubleReed { register, .. }, "register") => Some(*register),
@@ -761,6 +763,8 @@ impl Comp {
             (Comp::WaveguideHorn { length, .. }, "length") => *length = v,
             (Comp::Bore { length, .. }, "length") => *length = v,
             (Comp::ReedBore { length, .. }, "length") => *length = v,
+            (Comp::ReedBore { pressure, .. }, "pressure") => *pressure = v,
+            (Comp::DoubleReed { pressure, .. }, "pressure") => *pressure = v,
             (Comp::ReedBore { register, .. }, "register") => *register = v,
             (Comp::DoubleReed { length, .. }, "length") => *length = v,
             (Comp::DoubleReed { register, .. }, "register") => *register = v,
