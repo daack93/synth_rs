@@ -258,20 +258,29 @@ pub fn factory() -> Vec<Preset> {
         res_gain: f32,
     ) -> InstrumentGraph {
         InstrumentGraph {
-            components: vec![exciter, Comp::Horn(horn), Comp::Mix],
-            edges: vec![
-                Edge { from: 0, to: 2, gain: 0.15 },      // dry exciter buzz → out (quiet)
-                Edge { from: 0, to: 1, gain: drive },     // exciter → air column
-                Edge { from: 1, to: 2, gain: res_gain },  // resonating air column → out
+            components: vec![
+                exciter,                                                                // 0
+                Comp::Horn(horn),                                                       // 1 air column
+                Comp::Body { cavity_litres: 0.1, soundhole_cm: 3.0, top_hz: 261.63, decay_s: 0.03 }, // 2 oral cavity
+                Comp::Mix,                                                              // 3
             ],
-            output: 2,
+            edges: vec![
+                Edge { from: 0, to: 3, gain: 0.15 },      // dry exciter buzz → out (quiet)
+                Edge { from: 0, to: 1, gain: drive },     // exciter → air column
+                Edge { from: 1, to: 3, gain: res_gain },  // resonating air column → out
+                Edge { from: 0, to: 2, gain: 0.6 },       // exciter → oral cavity
+                Edge { from: 2, to: 3, gain: 0.45 },      // voiced oral cavity → out
+            ],
+            output: 3,
             key_map: vec![
-                // The exciter sets its pitch; the air column's LENGTH is adjusted to
-                // match — chromatically (tone holes) for a woodwind, in valve steps
-                // (overblowing) for brass — so the resonating chamber tracks the note
-                // the way a real instrument's does.
+                // The exciter sets its (calibrated) pitch; the air column's LENGTH is
+                // adjusted to match — chromatically (tone holes) for a woodwind, in
+                // valve steps (overblowing) for brass — and an ORAL-CAVITY formant
+                // that tracks the note voices the reed into the mix (a colour filter,
+                // so it shapes without changing the pitch).
                 KeyBinding { component: 0, map: exciter_map },
                 KeyBinding { component: 1, map: horn_map },
+                KeyBinding { component: 2, map: KeyMapKind::Power { param: "top_hz".into(), amount: 1.0 } },
             ],
         }
     }
@@ -1218,54 +1227,6 @@ pub fn factory() -> Vec<Preset> {
         base.push(flue_wind(&format!("Wind: {name}"), p, jr, tone));
     }
 
-    // Experimental A/B variant: instead of the calibrated per-note bore length,
-    // the pitch comes from a CHROMATIC bore length + a player micro-tune (blow
-    // harder up high = embouchure), and an ORAL-CAVITY resonator (a formant that
-    // tracks the note, matching a voicing) colours the reed into the mix alongside
-    // the air column. See how this "played by a human" model A/Bs vs Wind: Alto Sax.
-    base.push(make(
-        "Wind: Alto Sax (voiced)",
-        InstrumentGraph {
-            components: vec![
-                Comp::ReedBore {
-                    pressure: 1.0,
-                    stiffness: 0.85,
-                    length: 0.6555, // c/2·C4 — Power(length) scales it per note
-                    tone: 1.2,
-                    register: 0.0,
-                    overblow: 2.0,
-                    conical: true,
-                    tract_gain: 0.0,
-                    tract_q: 0.0,
-                },
-                // Oral cavity: a small vowel-formant resonator whose peak tracks the
-                // played note (the voicing), colouring the reed. A constant-peak-gain
-                // filter, so it shapes without ringing up.
-                Comp::Body { cavity_litres: 0.1, soundhole_cm: 3.0, top_hz: 261.63, decay_s: 0.03 },
-                Comp::Horn(wood_horn(true)), // the sax air column
-                Comp::Mix,
-            ],
-            edges: vec![
-                Edge { from: 0, to: 3, gain: 0.15 }, // dry reed buzz → out
-                Edge { from: 0, to: 1, gain: 1.0 },  // reed → oral cavity
-                Edge { from: 1, to: 3, gain: 0.6 },  // voiced oral cavity → out
-                Edge { from: 0, to: 2, gain: 0.4 },  // reed → air column
-                Edge { from: 2, to: 3, gain: 0.5 },  // air column → out
-            ],
-            output: 3,
-            key_map: vec![
-                // Chromatic bore length sets the pitch (the fingering).
-                KeyBinding { component: 0, map: KeyMapKind::Power { param: "length".into(), amount: -1.0 } },
-                // Embouchure: blow a little harder up high (a player's micro-tune).
-                KeyBinding { component: 0, map: KeyMapKind::Power { param: "pressure".into(), amount: 0.12 } },
-                // The oral-cavity formant tracks the note (matching the voicing).
-                KeyBinding { component: 1, map: KeyMapKind::Power { param: "top_hz".into(), amount: 1.0 } },
-                // The air column length tracks the note too.
-                KeyBinding { component: 2, map: KeyMapKind::Power { param: "length".into(), amount: -1.0 } },
-            ],
-        },
-        eng(1.0, 25.0, 90.0),
-    ));
 
     // For every struck string / membrane / plate preset, add a "(graph)" twin
     // that plays the SAME parameters through the per-sample voice graph, so each
