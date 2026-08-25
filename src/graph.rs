@@ -1526,7 +1526,10 @@ pub struct WaveguideBow {
 impl WaveguideBow {
     pub fn new(freq_hz: f32, speed: f32, force: f32, sr: f32) -> Self {
         let f = freq_hz.max(20.0);
-        let total = (sr / (2.0 * f) - 1.0).max(4.0); // both ends reflect → sr/(2·total)
+        // STK convention: both ends invert, so one trip through BOTH segments is a
+        // full period → total one-way delay = sr/f (minus the bridge filter's ~1
+        // sample of phase). The bow splits it into nut + bridge sections.
+        let total = (sr / f - 1.0).max(4.0);
         let bow_pos = 0.13; // near the bridge (brighter, stable stick-slip)
         let bridge_delay = (total * bow_pos).max(2.0);
         let nut_len = ((total * (1.0 - bow_pos)).round() as usize).max(2);
@@ -1538,8 +1541,11 @@ impl WaveguideBow {
             bridge_pos: 0,
             bridge_delay,
             br_lp: 0.0,
-            br_a: 0.5,
-            speed: speed * 0.12, // bow velocity (scaled into the wave domain)
+            // Bridge HF-loss tracks pitch: a long (low) string needs heavier
+            // high-frequency damping or the upper Helmholtz modes have as much
+            // loop gain as the fundamental and it jumps register. Bright up high.
+            br_a: (f / 1200.0).clamp(0.12, 0.5),
+            speed: speed * 0.09, // bow velocity (scaled into the wave domain)
             slope: 3.0 + force * 3.0, // more force = sharper stick-slip
             env: 0.0,
             env_target: 1.0,
@@ -1555,28 +1561,36 @@ impl Node for WaveguideBow {
     fn tick(&mut self, _inputs: &[f32]) -> f32 {
         let rate = if self.env < self.env_target { self.atk } else { self.rel };
         self.env += (self.env_target - self.env) * rate;
-        // Waves arriving at the bow point from each side.
-        let neck = self.nut[self.nut_pos];
+        // The delay-line outputs arriving at the bow point from each side. Both
+        // string ends invert the travelling VELOCITY wave (rigid nut; the bridge
+        // through a one-pole loss). Inverting BOTH is what closes the Helmholtz
+        // loop — the old model inverted only the bridge, so it never locked into
+        // stick-slip and just leaked the friction injection (near-silent).
+        let neck_out = self.nut[self.nut_pos];
         let nb = self.bridge.len();
         let rp = self.bridge_pos as f32 + nb as f32 - self.bridge_delay;
         let i0 = rp.floor() as usize % nb;
         let i1 = (i0 + 1) % nb;
         let frac = rp - rp.floor();
-        let bridge_in = self.bridge[i0] * (1.0 - frac) + self.bridge[i1] * frac;
-        let string_vel = neck + bridge_in;
-        // Friction table on the slip velocity: high near sticking, falling off as
-        // the string slips (the negative-resistance stick-slip characteristic).
+        let bridge_out = self.bridge[i0] * (1.0 - frac) + self.bridge[i1] * frac;
+        self.br_lp += self.br_a * (bridge_out - self.br_lp); // bridge loss filter
+        let bridge_refl = -self.br_lp;   // inverted, filtered bridge reflection
+        let nut_refl = -neck_out;        // inverted rigid nut reflection
+        let string_vel = bridge_refl + nut_refl;
+        // Friction table on the slip velocity (bow − string): ≈1 near sticking
+        // (string travels with the hair), falling off sharply as it slips — the
+        // negative-resistance characteristic that pumps the Helmholtz motion.
         let mut dv = self.speed * self.env - string_vel;
         self.rng ^= self.rng << 13;
         self.rng ^= self.rng >> 17;
         self.rng ^= self.rng << 5;
         dv += (self.rng as f32 / u32::MAX as f32 - 0.5) * 0.005 * self.env; // bow noise
         let fr = ((dv.abs() * self.slope + 0.75).powi(4)).max(1.0);
-        let bow = (dv / fr) * self.env; // velocity the bow injects
-        // Scatter into the two delay lines; the bridge reflects through a low-pass.
-        self.br_lp += self.br_a * (neck - self.br_lp);
-        self.nut[self.nut_pos] = bridge_in + bow;
-        self.bridge[self.bridge_pos] = -self.br_lp + bow;
+        let newv = (dv / fr) * self.env; // velocity the bow injects into both sides
+        // Scatter the injected velocity into the two delay lines, each fed by the
+        // OTHER end's reflection (the wave crosses the bow point).
+        self.nut[self.nut_pos] = bridge_refl + newv;
+        self.bridge[self.bridge_pos] = nut_refl + newv;
         self.nut_pos = (self.nut_pos + 1) % self.nut_len;
         self.bridge_pos = (self.bridge_pos + 1) % nb;
         string_vel

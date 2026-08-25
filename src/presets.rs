@@ -585,11 +585,7 @@ pub fn factory() -> Vec<Preset> {
         // Didgeridoo: breath drone into a long bore, coloured by a vocal-tract body.
         // -- Reeds: single-reed woodwinds are the coupled reed+bore family below --
         // -- Brass: buzzing lips (a reed) driving a flaring bore (feedback loop) --
-        // ---- Bowed strings (driven → sustain; bow near the bridge = bright/saw) ----
-        make("Violin", bowed(0.330, 44.0, 1.60, GUT, 1.8, 0.6, 0.12), eng(0.55, 60.0, 150.0)),
-        make("Viola", bowed(0.380, 55.0, 2.40, GUT, 2.0, 0.5, 0.14), eng(0.55, 65.0, 160.0)),
-        make("Cello", bowed(0.690, 90.0, 3.60, GUT, 2.2, 0.5, 0.13), eng(0.6, 70.0, 180.0)),
-        make("Bowed Bass", bowed(1.060, 250.0, 5.50, GUT, 2.5, 0.5, 0.12), eng(0.65, 80.0, 200.0)),
+        // ---- Bowed strings: waveguide stick-slip bow (see the graph section) ----
         // ---- Musical String (music-friendly controls) ----
         make(
             "Soft Nylon",
@@ -918,10 +914,10 @@ pub fn factory() -> Vec<Preset> {
             eng(0.55, 2.0, 300.0),
         ),
         make(
-            "Base: Violin",
+            "Violin",
             InstrumentGraph {
                 components: vec![
-                    Comp::BowedString { speed: 1.3, force: 0.6 },
+                    Comp::BowedString { speed: 0.6, force: 0.4 },
                     Comp::Body { cavity_litres: 2.2, soundhole_cm: 3.2, top_hz: 280.0, decay_s: 0.35 },
                     Comp::Mix,
                 ],
@@ -936,10 +932,10 @@ pub fn factory() -> Vec<Preset> {
             eng(0.5, 45.0, 200.0),
         ),
         make(
-            "Base: Viola",
+            "Viola",
             InstrumentGraph {
                 components: vec![
-                    Comp::BowedString { speed: 1.2, force: 0.7 },
+                    Comp::BowedString { speed: 0.6, force: 0.45 },
                     Comp::Body { cavity_litres: 4.5, soundhole_cm: 3.8, top_hz: 210.0, decay_s: 0.38 },
                     Comp::Mix,
                 ],
@@ -954,10 +950,10 @@ pub fn factory() -> Vec<Preset> {
             eng(0.5, 45.0, 200.0),
         ),
         make(
-            "Base: Cello",
+            "Cello",
             InstrumentGraph {
                 components: vec![
-                    Comp::BowedString { speed: 1.1, force: 0.8 },
+                    Comp::BowedString { speed: 0.6, force: 0.45 },
                     Comp::Body { cavity_litres: 28.0, soundhole_cm: 6.5, top_hz: 105.0, decay_s: 0.5 },
                     Comp::Mix,
                 ],
@@ -972,10 +968,10 @@ pub fn factory() -> Vec<Preset> {
             eng(0.5, 50.0, 220.0),
         ),
         make(
-            "Base: Double Bass",
+            "Double Bass",
             InstrumentGraph {
                 components: vec![
-                    Comp::BowedString { speed: 1.0, force: 0.9 },
+                    Comp::BowedString { speed: 0.6, force: 0.5 },
                     Comp::Body { cavity_litres: 120.0, soundhole_cm: 11.5, top_hz: 60.0, decay_s: 0.6 },
                     Comp::Mix,
                 ],
@@ -990,10 +986,10 @@ pub fn factory() -> Vec<Preset> {
             eng(0.5, 50.0, 250.0),
         ),
         make(
-            "Base: Hurdy-Gurdy",
+            "Hurdy-Gurdy",
             InstrumentGraph {
                 components: vec![
-                    Comp::BowedString { speed: 1.2, force: 0.7 },
+                    Comp::BowedString { speed: 0.6, force: 0.45 },
                     Comp::Body { cavity_litres: 12.0, soundhole_cm: 0.0, top_hz: 160.0, decay_s: 0.4 },
                     Comp::Mix,
                 ],
