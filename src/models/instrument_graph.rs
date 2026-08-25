@@ -856,6 +856,19 @@ impl Comp {
             }
         }
     }
+
+    /// Set a pitched exciter's bore length for a played note. A coupled reed uses
+    /// its register-break geometry (`set_reed_register`); every other length-tuned
+    /// exciter (the lip reed, the air jet) just plays the chromatic fundamental
+    /// f ≈ c/2L. This is what lets the calibrated `OverblowTuned` key-map — and the
+    /// calibrator — work on the brass/flue exciters, not only the reeds.
+    fn set_pitch_geometry(&mut self, freq: f32, anchor_hz: f32, steps: f32) {
+        if matches!(self, Comp::ReedBore { .. } | Comp::DoubleReed { .. }) {
+            self.set_reed_register(freq, anchor_hz, steps);
+        } else if self.get_param("length").is_some() {
+            self.set_param("length", C_AIR / (2.0 * freq.max(1.0)));
+        }
+    }
 }
 
 /// How the played key drives one component — a per-component *strategy*, so
@@ -978,9 +991,9 @@ impl InstrumentGraph {
                 Some(c) => c.clone(),
                 None => return (0.0, 0.0),
             };
-            c.set_reed_register(f, anchor_hz, steps); // register + length only
-            if let Comp::ReedBore { length, .. } | Comp::DoubleReed { length, .. } = &mut c {
-                *length *= mult;
+            c.set_pitch_geometry(f, anchor_hz, steps); // register/chromatic length
+            if let Some(l) = c.get_param("length") {
+                c.set_param("length", l * mult);
             }
             let g = InstrumentGraph {
                 components: vec![c],
@@ -1238,25 +1251,27 @@ impl FtmModel for InstrumentGraph {
                             c.set_overblow(freq_hz, *anchor_hz, *steps, *microtune);
                         }
                         KeyMapKind::OverblowTuned { anchor_hz, steps, table } => {
-                            // Range floor: a single reed can't sound below its
-                            // longest tube (the anchor is its lowest note). Notes
-                            // more than ~a half-semitone below go silent.
-                            if freq_hz < anchor_hz * REED_FLOOR {
+                            // Range floor (reeds only): a single reed can't sound
+                            // below its longest tube (the anchor is its lowest note).
+                            let is_reed = matches!(
+                                c,
+                                Comp::ReedBore { .. } | Comp::DoubleReed { .. }
+                            );
+                            if is_reed && freq_hz < anchor_hz * REED_FLOOR {
                                 if let Comp::ReedBore { pressure, .. }
                                 | Comp::DoubleReed { pressure, .. } = c
                                 {
                                     *pressure = 0.0;
                                 }
                             } else {
-                                // Register + nominal length from the anchor/steps,
-                                // then the exact calibrated length correction.
-                                c.set_reed_register(freq_hz, *anchor_hz, *steps);
+                                // Register/chromatic length from the anchor/steps,
+                                // then the exact calibrated length correction — works
+                                // for the reeds and the lip/jet exciters alike.
+                                c.set_pitch_geometry(freq_hz, *anchor_hz, *steps);
                                 let note = super::freq_to_midi(freq_hz).clamp(0, 127) as usize;
                                 if let Some(&mult) = table.get(note) {
-                                    if let Comp::ReedBore { length, .. }
-                                    | Comp::DoubleReed { length, .. } = c
-                                    {
-                                        *length *= mult;
+                                    if let Some(l) = c.get_param("length") {
+                                        c.set_param("length", l * mult);
                                     }
                                 }
                             }
