@@ -792,6 +792,16 @@ pub struct CoupledReed {
     cone: f32,     // conical throat integrator state (spherical-wave spreading)
     cone_a: f32,   // conical throat low-pass coefficient (even-harmonic shaping)
     register: f32, // register key: 0 = closed (fundamental), open = overblow
+    // Vocal-tract resonance (the player's airway) on the mouth side of the reed:
+    // a 2-pole resonator tuned to the played note. Tuned onto a high bore harmonic
+    // it biases the reed to lock there — how a player voices the altissimo. It sits
+    // INSIDE the reed feedback loop (unlike a downstream body/bell resonator, which
+    // only colours the already-chosen tone). gain 0 = off.
+    tract_b1: f32,   // 2R·cos(w) of the pole pair
+    tract_r2: f32,   // R² (pole radius²)
+    tract_gain: f32, // how hard the tract pressure loads the reed (0 = off)
+    tract_y1: f32,
+    tract_y2: f32,
     // drive
     pressure: f32,
     env: f32,
@@ -867,6 +877,11 @@ impl CoupledReed {
             cone: 0.0,
             cone_a,
             register: register.clamp(0.0, 0.9),
+            tract_b1: 0.0,
+            tract_r2: 0.0,
+            tract_gain: 0.0,
+            tract_y1: 0.0,
+            tract_y2: 0.0,
             pressure,
             env: 0.0,
             env_target: 1.0,
@@ -875,6 +890,22 @@ impl CoupledReed {
             rng: 0x1234_5678,
         }
     }
+
+    /// Tune the vocal-tract resonance (mouth-side load). `freq` = resonance (Hz,
+    /// normally the played note), `q` its sharpness, `gain` how hard it loads the
+    /// reed (0 disables it). Tuned onto a high bore harmonic it lets the reed lock
+    /// there — the voiced altissimo registers.
+    pub fn set_tract(&mut self, freq: f32, q: f32, gain: f32, sr: f32) {
+        if gain <= 0.0 {
+            self.tract_gain = 0.0;
+            return;
+        }
+        let w = std::f32::consts::TAU * freq.clamp(20.0, sr * 0.45) / sr;
+        let r = (-w / (2.0 * q.max(0.5))).exp().clamp(0.0, 0.9995);
+        self.tract_b1 = 2.0 * r * w.cos();
+        self.tract_r2 = r * r;
+        self.tract_gain = gain;
+    }
 }
 
 impl Node for CoupledReed {
@@ -882,7 +913,10 @@ impl Node for CoupledReed {
     fn tick(&mut self, _inputs: &[f32]) -> f32 {
         let rate = if self.env < self.env_target { self.atk } else { self.rel };
         self.env += (self.env_target - self.env) * rate;
-        let pm = self.pressure * self.press_mult * self.env;
+        // Vocal-tract resonant pressure (from last sample's flow) adds to the
+        // steady mouth pressure, biasing the reed toward the tract's tuned harmonic.
+        let p_tract = self.tract_gain * self.tract_y1;
+        let pm = self.pressure * self.press_mult * self.env + p_tract;
 
         // 1. Read the two bore segments. `bo1` is the wave arriving back at the
         //    throat (already carrying the bell reflection through the segments),
@@ -916,6 +950,14 @@ impl Node for CoupledReed {
         let dp = pm - 2.0 * p_plus - self.zc * u;
         self.dp_prev = dp;
         self.u_prev = u;
+
+        // Advance the vocal-tract resonator, driven by the reed flow.
+        if self.tract_gain != 0.0 {
+            let ty = self.tract_b1 * self.tract_y1 - self.tract_r2 * self.tract_y2
+                + (1.0 - self.tract_r2) * 0.5 * u;
+            self.tract_y2 = self.tract_y1;
+            self.tract_y1 = ty;
+        }
 
         // Reed/air inertia low-pass + a little breath turbulence; breath-gate so
         // the note stops on note-off instead of self-oscillating on the wave.

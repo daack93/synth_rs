@@ -213,6 +213,8 @@ pub fn factory() -> Vec<Preset> {
                     register: 0.0,
                     overblow,
                     conical,
+                    tract_gain: 0.0, // altissimo voicing off by default (user-tunable)
+                    tract_q: 0.0,
                 },
                 Comp::Horn(WebsterHorn {
                     boundary: Boundary::Brass,

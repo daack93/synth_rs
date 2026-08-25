@@ -98,6 +98,14 @@ pub enum Comp {
         overblow: f32,
         #[serde(default)]
         conical: bool,
+        /// Vocal-tract voicing: how strongly the airway resonance (tuned to the
+        /// played note) loads the reed. 0 = off; raise it to voice the altissimo
+        /// registers (biases the reed onto higher bore harmonics).
+        #[serde(default)]
+        tract_gain: f32,
+        /// Sharpness (Q) of that tract resonance. 0 = a sensible default.
+        #[serde(default)]
+        tract_q: f32,
     },
     /// A digital-waveguide reed pipe — a self-contained wind voice (bore delay +
     /// bell + reed) that self-oscillates into a clean reed tone. `pressure` =
@@ -253,10 +261,22 @@ impl Comp {
             Comp::Reed { pressure, stiffness, freq_hz } => {
                 Box::new(ReedExciter::new(*pressure, *stiffness, *freq_hz, sr))
             }
-            Comp::ReedBore { pressure, stiffness, length, tone, register, overblow, conical } => {
-                Box::new(CoupledReed::new(
+            Comp::ReedBore {
+                pressure, stiffness, length, tone, register, overblow, conical, tract_gain, tract_q,
+            } => {
+                let mut reed = CoupledReed::new(
                     *pressure, *stiffness, *length, *tone, *register, *overblow, *conical, sr,
-                ))
+                );
+                // The vocal tract tunes to the played note, inside the reed loop.
+                // Engage it ONLY in the altissimo registers (harmonic above the
+                // first overblow) — there it enables the lock; on the normal two
+                // registers it would just detune the calibrated tone. (`overblow`
+                // now carries the played note's harmonic, set by the key-map.)
+                let nat_h = if *conical { 2.0 } else { 3.0 };
+                let voiced = *tract_gain > 0.0 && *overblow > nat_h + 0.5;
+                let q = if *tract_q > 0.0 { *tract_q } else { 12.0 };
+                reed.set_tract(freq_hz, q, if voiced { *tract_gain } else { 0.0 }, sr);
+                Box::new(reed)
             }
             Comp::ReedPipe { pressure, stiffness, tone } => {
                 Box::new(WaveguideReed::new(freq_hz, *pressure, *stiffness, *tone, sr))
@@ -373,7 +393,9 @@ impl Comp {
                     .changed();
                 c
             }
-            Comp::ReedBore { pressure, stiffness, length, tone, register, overblow, conical } => {
+            Comp::ReedBore {
+                pressure, stiffness, length, tone, register, overblow, conical, tract_gain, tract_q,
+            } => {
                 let mut c = false;
                 c |= ui.add(unbounded_slider(pressure, 0.1..=2.0, "Mouth pressure")).changed();
                 c |= ui.add(unbounded_slider(stiffness, 0.0..=3.0, "Reed stiffness")).changed();
@@ -394,6 +416,14 @@ impl Comp {
                     .on_hover_text("Cone: full harmonic series, octave overblow (sax/oboe). Off = cylinder: odd harmonics, twelfth (clarinet).")
                     .changed();
                 c |= ui.add(unbounded_slider(tone, 0.0..=1.5, "Bell brightness")).changed();
+                c |= ui
+                    .add(unbounded_slider(tract_gain, 0.0..=8.0, "Vocal-tract voicing"))
+                    .on_hover_text("Airway resonance tuned to the played note, inside the reed loop. 0 = off; raise it to voice the altissimo (upper) registers — biases the reed onto higher bore harmonics. Finicky: a narrow sweet spot.")
+                    .changed();
+                c |= ui
+                    .add(unbounded_slider(tract_q, 0.0..=40.0, "Tract Q"))
+                    .on_hover_text("Sharpness of the tract resonance. 0 = default (~12). Higher = a tighter, more selective altissimo lock.")
+                    .changed();
                 c
             }
             Comp::ReedPipe { pressure, stiffness, tone } => {
@@ -610,26 +640,34 @@ impl Comp {
     /// a cone). Register `r = floor(semitones-above-anchor / steps)` extends both
     /// ways from the anchor: below the anchor and within the first `steps`
     /// semitones it plays the fundamental; higher, it lifts the register vent and
-    /// overblows to the bore's natural harmonic, the bore length shortening to
-    /// reach any note. (The reed reliably reaches only its first overblow, so the
-    /// upper registers reuse it with a shorter bore rather than climbing to the
-    /// altissimo harmonics — which need a voiced vocal-tract resonance the model
-    /// doesn't yet carry.) No-op for non-reed components.
+    /// overblows to the register's harmonic, the bore length shortening to reach
+    /// any note. Register `r`'s harmonic climbs the bore's series — a cylinder's
+    /// odd harmonics 1, 3, 5, 7…, a cone's full series 1, 2, 3, 4… — but the reed
+    /// reliably locks only to its FIRST overblow on its own, so without a voiced
+    /// vocal tract (`tract_gain` 0) the harmonic is capped at that first overblow
+    /// and the upper registers just reuse it with a shorter bore. With the tract
+    /// engaged, the harmonic climbs freely, reaching the altissimo registers.
+    /// No-op for non-reed components.
     fn set_reed_register(&mut self, freq: f32, anchor_hz: f32, steps: f32) {
-        if let Comp::ReedBore { length, register, overblow, conical, .. } = self {
+        if let Comp::ReedBore { length, register, overblow, conical, tract_gain, .. } = self {
             let f = freq.max(1.0);
             let anchor = anchor_hz.max(1.0);
-            let nat_h = if *conical { 2.0 } else { 3.0 }; // natural overblow harmonic
+            let nat_h = if *conical { 2.0 } else { 3.0 }; // first overblow harmonic
             let interval = if steps > 0.5 { steps } else { 12.0 * (nat_h as f32).log2() };
             let n = 12.0 * (f / anchor).log2(); // semitones above the anchor
-            let r = (n / interval.max(1.0)).floor();
-            *overblow = nat_h; // vent position (1/nat_h); only active when open
+            let r = (n / interval.max(1.0)).floor().max(0.0);
             if r < 1.0 {
+                *overblow = 1.0;
                 *register = 0.0; // fundamental
                 *length = C_AIR / (2.0 * f);
             } else {
-                *register = 0.3; // overblow: bore fundamental = f / nat_h
-                *length = C_AIR / (2.0 * (f / nat_h));
+                // Register r's harmonic: cone 2,3,4,… ; cylinder 3,5,7,…
+                let voiced = *tract_gain > 0.0;
+                let h = if *conical { r + 1.0 } else { 2.0 * r + 1.0 };
+                let h = if voiced { h } else { nat_h }; // capped without the tract
+                *overblow = h; // vent at 1/h
+                *register = 0.3;
+                *length = C_AIR / (2.0 * (f / h)); // bore fundamental = f / h
             }
         }
     }
