@@ -207,7 +207,7 @@ pub fn factory() -> Vec<Preset> {
             r1: 0.0073,
             r2: if all_harmonics { 0.015 } else { 0.0 },
             r3: 0.002,
-            length: 0.5,
+            length: if all_harmonics { 0.6555 } else { 0.328 }, // c/2·C4 (open) vs c/4·C4 (closed clarinet); Power scales per note
             blow_pos: 0.0,
             depth: 16,
             resolution: 220,
@@ -215,7 +215,7 @@ pub fn factory() -> Vec<Preset> {
             freq_dep_damping: -0.08,
             visco_loss: 4.0,
             radiation: 3.0,
-            key_tracks_pitch: true,
+            key_tracks_pitch: false, // the changing bore LENGTH sets the pitch
             ..WebsterHorn::default()
         }
     }
@@ -253,6 +253,7 @@ pub fn factory() -> Vec<Preset> {
         exciter: Comp,
         horn: WebsterHorn,
         exciter_map: KeyMapKind,
+        horn_map: KeyMapKind,
         drive: f32,
         res_gain: f32,
     ) -> InstrumentGraph {
@@ -264,7 +265,14 @@ pub fn factory() -> Vec<Preset> {
                 Edge { from: 1, to: 2, gain: res_gain },  // resonating air column → out
             ],
             output: 2,
-            key_map: vec![KeyBinding { component: 0, map: exciter_map }],
+            key_map: vec![
+                // The exciter sets its pitch; the air column's LENGTH is adjusted to
+                // match — chromatically (tone holes) for a woodwind, in valve steps
+                // (overblowing) for brass — so the resonating chamber tracks the note
+                // the way a real instrument's does.
+                KeyBinding { component: 0, map: exciter_map },
+                KeyBinding { component: 1, map: horn_map },
+            ],
         }
     }
 
@@ -295,6 +303,7 @@ pub fn factory() -> Vec<Preset> {
             reed,
             wood_horn(conical),
             KeyMapKind::OverblowTuned { anchor_hz: anchor, steps: 0.0, table },
+            KeyMapKind::Power { param: "length".into(), amount: -1.0 },
             0.4,
             if conical { 0.9 } else { 0.2 }, // the clarinet's closed horn resonates harder
         );
@@ -320,6 +329,7 @@ pub fn factory() -> Vec<Preset> {
             reed,
             wood_horn(true),
             KeyMapKind::Power { param: "length".into(), amount: -1.0 },
+            KeyMapKind::Power { param: "length".into(), amount: -1.0 },
             0.4,
             0.35,
         );
@@ -334,6 +344,7 @@ pub fn factory() -> Vec<Preset> {
             lips,
             brass_horn(horn_anchor),
             KeyMapKind::Power { param: "length".into(), amount: -1.0 },
+            KeyMapKind::Overblow { anchor_hz: horn_anchor, steps: 6, microtune: true },
             0.1,
             0.4,
         );
@@ -347,6 +358,7 @@ pub fn factory() -> Vec<Preset> {
         let g = wind_graph(
             jet,
             wood_horn(true),
+            KeyMapKind::Power { param: "length".into(), amount: -1.0 },
             KeyMapKind::Power { param: "length".into(), amount: -1.0 },
             0.4,
             0.4,
@@ -1256,13 +1268,24 @@ pub fn factory() -> Vec<Preset> {
 pub fn load_library() -> Vec<Preset> {
     let dir = presets_dir();
     let existing = list_in(&dir);
-    for p in factory() {
+    let fresh = factory();
+    let factory_names: std::collections::HashSet<&str> =
+        fresh.iter().map(|p| p.name.as_str()).collect();
+    for p in &fresh {
         let refresh = match existing.iter().find(|e| e.name == p.name) {
             None => true,                        // new factory preset → seed it
             Some(e) => e.builtin != Some(false), // built-in or legacy → refresh
         };
         if refresh {
-            let _ = save_in(&dir, &p);
+            let _ = save_in(&dir, p);
+        }
+    }
+    // Reconcile removals: a built-in (or legacy) preset on disk that is no longer
+    // in the factory was renamed or retired — delete its stale file so it doesn't
+    // linger in the library. User-saved presets (`builtin == Some(false)`) are kept.
+    for e in &existing {
+        if e.builtin != Some(false) && !factory_names.contains(e.name.as_str()) {
+            let _ = delete_in(&dir, &e.name);
         }
     }
     list_in(&dir)
