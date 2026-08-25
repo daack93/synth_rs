@@ -22,7 +22,7 @@ use super::webster_horn::{PlayMode, WebsterHorn};
 use super::{freq_to_midi, midi_name, unbounded_slider, FtmModel, ModeBuffer};
 use crate::graph::{
     BowExciter, CoupledDoubleReed, CoupledReed, DriveExciter, FormantResonator, Graph, HammerExciter, ImpulseExciter,
-    ModalResonator, Node, ReedExciter, SineExciter, SnareWires, Sum, VoiceExciter, WaveguideBore, WaveguideBow, WaveguideHorn, WaveguideReed,
+    JetPipe, LipReed, ModalResonator, Node, ReedExciter, SineExciter, SnareWires, Sum, VoiceExciter, WaveguideBore, WaveguideBow, WaveguideHorn, WaveguideReed,
 };
 
 const PI: f32 = std::f32::consts::PI;
@@ -44,6 +44,12 @@ fn default_double_overblow() -> f32 {
 }
 fn default_true() -> bool {
     true
+}
+
+/// Default air-jet convection-delay ratio (τ / acoustic period) for the flue
+/// pipe — ~0.5 favours the fundamental register.
+fn default_jet_ratio() -> f32 {
+    0.5
 }
 
 /// Reed range floor: a single reed's lowest note is its full-length tube (the
@@ -142,10 +148,41 @@ pub enum Comp {
         #[serde(default)]
         tract_q: f32,
     },
+    /// A **lip reed (brass) valve** implicitly coupled to a flaring bore — the
+    /// trumpet / trombone / horn voice. The mirror of `ReedBore`: an
+    /// *outward-striking* lip (higher mouth pressure blows the lips OPEN, not shut)
+    /// solved against a waveguide bore each sample, so the pitch locks to `length`
+    /// (`f ≈ c/2L`) and the lips overblow *up the harmonic series*. `pressure` =
+    /// breath, `tension` = lip resonance as a multiple of the bore fundamental
+    /// (≈ n biases the n-th partial; ~1 plays the fundamental), `tone` = bell
+    /// brightness. Self-contained; key-map `length` for pitch. Drive a downstream
+    /// Webster bell for colour.
+    Lips {
+        pressure: f32,
+        tension: f32,
+        length: f32,
+        #[serde(default)]
+        tone: f32,
+    },
     /// A digital-waveguide reed pipe — a self-contained wind voice (bore delay +
     /// bell + reed) that self-oscillates into a clean reed tone. `pressure` =
     /// breath, `stiffness` = reed hardness, `tone` = bell brightness.
     ReedPipe { pressure: f32, stiffness: f32, tone: f32 },
+    /// A **flue / air-jet pipe** — the flute / recorder voice. A blown air jet
+    /// crosses the mouth edge (no reed) and drives an OPEN cylinder (both ends
+    /// pressure-release → all harmonics, `f ≈ c/2L`) via a delayed, saturating jet
+    /// deflection. `pressure` = blowing pressure / jet velocity (blow harder to
+    /// overblow the octave), `jet_ratio` = the jet convection delay as a fraction
+    /// of the acoustic period (register/timbre bias, ~0.5), `tone` = radiation
+    /// brightness. Self-contained; drive a downstream Webster bell for air colour.
+    /// Key-map `length` (`f ≈ c/2L`).
+    AirJet {
+        pressure: f32,
+        #[serde(default = "default_jet_ratio")]
+        jet_ratio: f32,
+        tone: f32,
+        length: f32,
+    },
     /// A piano/dulcimer hammer: a nonlinear felt mass (needs a feedback edge from
     /// the string). `hardness` 0..1 sets the felt stiffness (dark→bright, long→
     /// short contact), `felt` is the compression nonlinearity.
@@ -197,9 +234,11 @@ impl Comp {
             Comp::Wires { .. } => "Snare wires",
             Comp::Breath { .. } => "Breath (exciter)",
             Comp::Reed { .. } => "Reed / lip (exciter)",
+            Comp::Lips { .. } => "Lips / brass (coupled)",
             Comp::ReedBore { .. } => "Reed + bore (coupled)",
             Comp::DoubleReed { .. } => "Double reed + bore (coupled)",
             Comp::ReedPipe { .. } => "Reed pipe (waveguide)",
+            Comp::AirJet { .. } => "Air jet / flute (flue)",
             Comp::BowedString { .. } => "Bowed string (waveguide)",
             Comp::Hammer { .. } => "Hammer (exciter)",
             Comp::Bow { .. } => "Bow (exciter)",
@@ -224,10 +263,12 @@ impl Comp {
                 | Comp::Breath { .. }
                 | Comp::Reed { .. }
                 | Comp::ReedBore { .. }
+                | Comp::Lips { .. }
                 | Comp::DoubleReed { .. }
                 | Comp::Bow { .. }
                 | Comp::Voice { .. }
                 | Comp::ReedPipe { .. }
+                | Comp::AirJet { .. }
                 | Comp::BowedString { .. }
                 | Comp::Sine { .. }
         )
@@ -330,8 +371,17 @@ impl Comp {
                 reed.set_tract(freq_hz, q, if voiced { *tract_gain } else { 0.0 }, sr);
                 Box::new(reed)
             }
+            Comp::Lips { pressure, tension, length, tone } => {
+                Box::new(LipReed::new(*pressure, *tension, *length, *tone, sr))
+            }
             Comp::ReedPipe { pressure, stiffness, tone } => {
                 Box::new(WaveguideReed::new(freq_hz, *pressure, *stiffness, *tone, sr))
+            }
+            Comp::AirJet { pressure, jet_ratio, tone, length } => {
+                // Pitch is set by the (key-mapped) bore length, f ≈ c/2L; falls
+                // back to the played note if the length isn't set.
+                let l = if *length > 0.0 { *length } else { C_AIR / (2.0 * freq_hz.max(1.0)) };
+                Box::new(JetPipe::new(l, *pressure, *jet_ratio, *tone, sr))
             }
             Comp::BowedString { speed, force } => {
                 Box::new(WaveguideBow::new(freq_hz, *speed, *force, sr))
@@ -514,11 +564,42 @@ impl Comp {
                     .changed();
                 c
             }
+            Comp::Lips { pressure, tension, length, tone } => {
+                let mut c = false;
+                c |= ui.add(unbounded_slider(pressure, 0.3..=2.0, "Mouth pressure")).changed();
+                c |= ui
+                    .add(unbounded_slider(tension, 0.5..=6.0, "Lip tension (partial)"))
+                    .on_hover_text("Embouchure: the lip resonance as a multiple of the bore fundamental. ≈1 plays the fundamental, ≈2 the octave, ≈3 the twelfth — brass overblow up the harmonic series on one tube.")
+                    .changed();
+                c |= ui
+                    .add(unbounded_slider(length, 0.05..=2.0, "Bore length (m)"))
+                    .on_hover_text("Sets the pitch (usually key-mapped): f ≈ c/2L.")
+                    .changed();
+                c |= ui.add(unbounded_slider(tone, 0.0..=1.5, "Bell brightness")).changed();
+                c
+            }
             Comp::ReedPipe { pressure, stiffness, tone } => {
                 let mut c = false;
                 c |= ui.add(unbounded_slider(pressure, 0.1..=1.5, "Breath pressure")).changed();
                 c |= ui.add(unbounded_slider(stiffness, 0.2..=3.0, "Reed stiffness")).changed();
                 c |= ui.add(unbounded_slider(tone, 0.0..=1.5, "Bell brightness")).changed();
+                c
+            }
+            Comp::AirJet { pressure, jet_ratio, tone, length } => {
+                let mut c = false;
+                c |= ui
+                    .add(unbounded_slider(pressure, 0.2..=1.5, "Blowing pressure"))
+                    .on_hover_text("Jet velocity. Blow harder to overblow the octave (a faster jet).")
+                    .changed();
+                c |= ui
+                    .add(unbounded_slider(jet_ratio, 0.2..=0.8, "Jet ratio"))
+                    .on_hover_text("Jet convection delay ÷ acoustic period. ~0.5 = fundamental; smaller biases higher registers.")
+                    .changed();
+                c |= ui.add(unbounded_slider(tone, 0.0..=1.5, "Edge brightness")).changed();
+                c |= ui
+                    .add(unbounded_slider(length, 0.05..=2.0, "Bore length (m)"))
+                    .on_hover_text("Sets the pitch (usually key-mapped): f ≈ c/2L.")
+                    .changed();
                 c
             }
             Comp::BowedString { speed, force } => {
@@ -623,6 +704,10 @@ impl Comp {
             Comp::Bore { .. } => &["length"],
             // The coupled reed+bore's length sets its (in-tune) pitch.
             Comp::ReedBore { .. } | Comp::DoubleReed { .. } => &["length", "register"],
+            // The lip-brass bore length sets the pitch; tension selects the partial.
+            Comp::Lips { .. } => &["length", "tension"],
+            // The air-jet flue pipe's length sets its (in-tune) pitch, f ≈ c/2L.
+            Comp::AirJet { .. } => &["length"],
             // The reed's fixed pitch — so a key can drive embouchure/pitch on a
             // self-contained mouthpiece (`freq_hz > 0`).
             Comp::Reed { .. } => &["freq"],
@@ -652,6 +737,9 @@ impl Comp {
             (Comp::ReedBore { register, .. }, "register") => Some(*register),
             (Comp::DoubleReed { length, .. }, "length") => Some(*length),
             (Comp::DoubleReed { register, .. }, "register") => Some(*register),
+            (Comp::Lips { length, .. }, "length") => Some(*length),
+            (Comp::Lips { tension, .. }, "tension") => Some(*tension),
+            (Comp::AirJet { length, .. }, "length") => Some(*length),
             (Comp::Reed { freq_hz, .. }, "freq") => Some(*freq_hz),
             _ => None,
         }
@@ -676,6 +764,9 @@ impl Comp {
             (Comp::ReedBore { register, .. }, "register") => *register = v,
             (Comp::DoubleReed { length, .. }, "length") => *length = v,
             (Comp::DoubleReed { register, .. }, "register") => *register = v,
+            (Comp::Lips { length, .. }, "length") => *length = v,
+            (Comp::Lips { tension, .. }, "tension") => *tension = v,
+            (Comp::AirJet { length, .. }, "length") => *length = v,
             (Comp::Reed { freq_hz, .. }, "freq") => *freq_hz = v,
             _ => {}
         }
@@ -1288,6 +1379,14 @@ impl FtmModel for InstrumentGraph {
                 self.components.push(Comp::ReedPipe { pressure: 0.9, stiffness: 1.0, tone: 1.0 });
                 changed = true;
             }
+            if ui.small_button("Lips / brass").clicked() {
+                self.components.push(Comp::Lips { pressure: 1.0, tension: 1.0, length: 0.6555, tone: 1.0 });
+                changed = true;
+            }
+            if ui.small_button("Air jet / flute").clicked() {
+                self.components.push(Comp::AirJet { pressure: 0.55, jet_ratio: 0.5, tone: 1.0, length: 0.66 });
+                changed = true;
+            }
             if ui.small_button("Bowed string").clicked() {
                 self.components.push(Comp::BowedString { speed: 1.2, force: 0.6 });
                 changed = true;
@@ -1788,5 +1887,81 @@ mod tests {
         }
         // Forward flow is preserved: the reed sits left of its bore.
         assert!(layout[0][0] < layout[1][0], "reed is left of the bore");
+    }
+
+    /// Autocorrelation pitch (integer-lag) — robust to the flute's harmonic tone.
+    fn acf_freq(y: &[f32], sr: f32, f0: f32) -> f32 {
+        let mean: f32 = y.iter().sum::<f32>() / y.len() as f32;
+        let s: Vec<f32> = y.iter().map(|v| v - mean).collect();
+        let lo = (sr / (f0 * 3.0)) as usize;
+        let hi = ((sr / (f0 * 0.4)) as usize).min(s.len() / 2);
+        let (mut best, mut bc) = (lo.max(2), f32::MIN);
+        for lag in lo.max(2)..hi {
+            let c: f32 = (0..s.len() - lag).map(|i| s[i] * s[i + lag]).sum();
+            if c > bc {
+                bc = c;
+                best = lag;
+            }
+        }
+        // Parabolic interpolation of the peak lag → sub-sample (sub-cent) pitch.
+        let corr = |lag: usize| -> f32 { (0..s.len() - lag).map(|i| s[i] * s[i + lag]).sum() };
+        let (a, b, c) = (corr(best - 1), corr(best), corr(best + 1));
+        let denom = a - 2.0 * b + c;
+        let frac = if denom.abs() > 1e-12 { 0.5 * (a - c) / denom } else { 0.0 };
+        sr / (best as f32 + frac.clamp(-1.0, 1.0))
+    }
+    /// AC RMS — RMS after removing the mean, so DC (which a mis-built open bore
+    /// accumulates) doesn't masquerade as sound.
+    fn ac_rms(y: &[f32]) -> f32 {
+        let m: f32 = y.iter().sum::<f32>() / y.len() as f32;
+        (y.iter().map(|v| (v - m) * (v - m)).sum::<f32>() / y.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn air_jet_flute_sounds_in_tune_and_overblows_the_octave() {
+        // The air-jet flue pipe: a delayed, saturating jet driving an OPEN bore.
+        // It must (a) make real AC sound (not DC), (b) lock to f ≈ c/2L in tune
+        // across octaves, and (c) overblow the octave when the jet velocity rises.
+        let sr = 48_000.0;
+        let c = C_AIR;
+        // One AirJet → Mix voice at bore length L, blowing pressure `pr`.
+        let render = |length: f32, pr: f32| -> Vec<f32> {
+            let g = InstrumentGraph {
+                components: vec![
+                    Comp::AirJet { pressure: pr, jet_ratio: 0.5, tone: 1.0, length },
+                    Comp::Mix,
+                ],
+                edges: vec![Edge { from: 0, to: 1, gain: 1.0 }],
+                output: 1,
+                key_map: Vec::new(),
+            };
+            let mut n = g.build_graph(c / (2.0 * length), 1.0, sr).unwrap();
+            (0..44_000).map(|_| n.tick(&[])).collect()
+        };
+
+        // (a)+(b): in tune at f ≈ c/2L across three octaves, on real AC amplitude.
+        for &f0 in &[262.0f32, 392.0, 523.0, 784.0, 1047.0] {
+            let l = c / (2.0 * f0);
+            let y = render(l, 0.55);
+            assert!(y.iter().all(|v| v.is_finite() && v.abs() < 20.0), "jet pipe stable at {f0} Hz");
+            let tail = &y[32_000..];
+            let ac = ac_rms(tail);
+            let mean: f32 = tail.iter().sum::<f32>() / tail.len() as f32;
+            // The sound is genuine oscillation, not a DC pedestal.
+            assert!(ac > 0.05, "flute makes real AC sound at {f0} Hz (ac_rms {ac})");
+            assert!(mean.abs() < ac, "output is AC, not DC-dominated ({f0} Hz: mean {mean}, ac {ac})");
+            let f = acf_freq(tail, sr, f0);
+            let cents = 1200.0 * (f / f0).log2();
+            assert!(cents.abs() < 30.0, "plays c/2L in tune at {f0} Hz (got {cents:+.0} cents)");
+        }
+
+        // (c): on a fixed bore, a faster jet (higher blowing pressure) overblows —
+        // the pitch jumps roughly an octave up (the flute's octave register break).
+        let f0 = 392.0;
+        let l = c / (2.0 * f0);
+        let low = acf_freq(&render(l, 0.55)[32_000..], sr, f0);
+        let over = acf_freq(&render(l, 1.0)[32_000..], sr, f0 * 2.0);
+        assert!((low / f0 - 1.0).abs() < 0.05, "low register is the fundamental (got {low})");
+        assert!((over / low / 2.0 - 1.0).abs() < 0.08, "blowing harder overblows the octave: {low} → {over}");
     }
 }

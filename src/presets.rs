@@ -1202,20 +1202,28 @@ pub fn factory() -> Vec<Preset> {
             },
             eng(0.5, 40.0, 250.0),
         ),
+        // Flute: an air JET blown across the mouth edge drives an open cylinder
+        // (all harmonics, f ≈ c/2L). The coupled jet↔bore voice is self-oscillating
+        // and pitched by its bore length (key-mapped chromatically), coloured by a
+        // short open Webster bell for the airy edge tone. Anchored at C4.
         make(
             "Base: Flute",
             InstrumentGraph {
                 components: vec![
-                    Comp::Breath { level: 0.12, tone: 1.2 },
-                    Comp::Horn(WebsterHorn { length: 0.66, wave_speed: 343.0, r1: 0.0095, r2: 0.0, r3: 0.0, blow_pos: 0.0, depth: 14, resolution: 220, damping: 3.0, freq_dep_damping: -0.1, visco_loss: 0.3, radiation: 0.5, boundary: Boundary::Open, ..WebsterHorn::default() }),
+                    Comp::AirJet { pressure: 0.55, jet_ratio: 0.5, tone: 1.1, length: 0.6555 },
+                    Comp::Horn(WebsterHorn { length: 0.12, wave_speed: 343.0, r1: 0.0095, r2: 0.0, r3: 0.0, blow_pos: 0.0, depth: 12, resolution: 200, damping: 3.0, freq_dep_damping: -0.1, visco_loss: 0.3, radiation: 0.5, boundary: Boundary::Open, key_tracks_pitch: false, ..WebsterHorn::default() }),
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 },
-                    Edge { from: 1, to: 2, gain: 1.0 },
+                    Edge { from: 0, to: 2, gain: 1.0 },  // dry jet voice → out
+                    Edge { from: 0, to: 1, gain: 1.0 },  // jet voice → bell
+                    Edge { from: 1, to: 2, gain: 0.2 },  // bell edge colour → out
                 ],
                 output: 2,
-                key_map: Vec::new(),
+                key_map: vec![KeyBinding {
+                    component: 0,
+                    map: KeyMapKind::Power { param: "length".to_string(), amount: -1.0 },
+                }],
             },
             eng(0.5, 40.0, 90.0),
         ),
@@ -1241,24 +1249,47 @@ pub fn factory() -> Vec<Preset> {
             eng(0.5, 25.0, 110.0),
         ),
         make("Base: Oboe", oboe_graph(), eng(0.5, 20.0, 90.0)),
+        // Brass done right: an OUTWARD-striking lip valve (the `Lips` component)
+        // implicitly coupled to its own flaring bore — blowing harder opens the
+        // lips (the opposite of a woodwind reed), so it overblows up the harmonic
+        // series. Pitch locks to the bore length (f ≈ c/2L), chromatic via a
+        // Power(length,-1) key map; `tension` picks the partial (≈1 fundamental).
+        // A fixed-formant Webster brass bell colours the buzz. Base length
+        // 0.6555 m = c/2·C4, so C4 plays at the reference length.
         make(
             "Base: Trumpet",
             InstrumentGraph {
                 components: vec![
-                    Comp::Reed { pressure: 1.0, stiffness: 0.7, freq_hz: 0.0 },
-                    Comp::Bore { tone: 1.4, length: 0.0 },
-                    Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: 2500.0, decay_s: 0.04 },
+                    Comp::Lips { pressure: 1.0, tension: 1.0, length: 0.6555, tone: 1.2 },
+                    Comp::Horn(WebsterHorn {
+                        boundary: Boundary::Brass,
+                        r1: 0.0058,
+                        r2: 0.0150,
+                        r3: 0.1550,
+                        length: 0.6,
+                        blow_pos: 0.0,
+                        depth: 24,
+                        resolution: 400,
+                        damping: 10.0,
+                        freq_dep_damping: -0.08,
+                        visco_loss: 1.5,
+                        radiation: 1.6,
+                        wavefront: Wavefront::Spherical,
+                        key_tracks_pitch: false, // fixed-formant bell (colour only)
+                        ..WebsterHorn::default()
+                    }),
                     Comp::Mix,
                 ],
                 edges: vec![
-                    Edge { from: 0, to: 1, gain: 1.0 }, // reed → bore
-                    Edge { from: 1, to: 0, gain: 1.0 }, // bore → reed (feedback)
-                    Edge { from: 1, to: 3, gain: 0.7 }, // bore → out (dry)
-                    Edge { from: 1, to: 2, gain: 1.0 }, // bore → bell
-                    Edge { from: 2, to: 3, gain: 0.3 }, // bell colour → out
+                    Edge { from: 0, to: 2, gain: 0.9 }, // lips (dry brass tone) → out
+                    Edge { from: 0, to: 1, gain: 1.0 }, // lips → bell
+                    Edge { from: 1, to: 2, gain: 0.25 }, // bell colour → out
                 ],
-                output: 3,
-                key_map: vec![KeyBinding { component: 2, map: KeyMapKind::Power { param: "top_hz".into(), amount: 1.0 } }],
+                output: 2,
+                key_map: vec![KeyBinding {
+                    component: 0,
+                    map: KeyMapKind::Power { param: "length".into(), amount: -1.0 },
+                }],
             },
             eng(0.55, 25.0, 90.0),
         ),

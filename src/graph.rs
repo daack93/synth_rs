@@ -1700,6 +1700,322 @@ impl Node for StruckVoice {
     }
 }
 
+
+/// A **lip reed (brass) valve** implicitly coupled to a flaring bore — the
+/// trumpet / trombone / horn voice. It is the [`CoupledReed`]'s mirror image: a
+/// mass-spring-damper valve solved against a waveguide bore each sample with no
+/// loop delay (so the pitch locks to the bore), but the lip is **outward-striking**
+/// where the woodwind reed is inward-striking.
+///
+/// * **Outward-striking mechanics.** A woodwind reed *closes* as you blow harder
+///   (its equilibrium is `x = −β·ΔP`, the `−wn2·β·ΔP` term): more mouth pressure
+///   squeezes the tip shut. A brass lip is the opposite — higher pressure blows
+///   the lips further *open* (`x = +β·ΔP`, the sign flipped to `+wn2·β·ΔP`). That
+///   positive coupling to the mouth pressure is the whole difference, and it is
+///   what makes brass overblow *up the harmonic series* rather than a woodwind's
+///   register jump.
+/// * **Tension selects the partial.** The lips are a resonator whose natural
+///   frequency the player sets by embouchure (lip tension). The coupled system
+///   self-oscillates on whichever *bore* resonance sits nearest the lip
+///   resonance, so raising `tension` walks the lock up the bore's harmonics
+///   (2nd, 3rd, 4th…) — how a bugle plays a melody on one length of tube.
+///   `tension` here is a multiplier on the bore fundamental, so `tension ≈ n`
+///   biases the n-th partial.
+/// * **Full-harmonic bore.** A brass bore radiates the *complete* harmonic series
+///   (n·c/2L), so the lip can pick any partial. That needs a **same-sign**
+///   round-trip reflection (a cylinder's inverting open end would leave only odd
+///   harmonics). A same-sign loop, though, has a DC eigenmode that a naïve
+///   non-inverting reflection lets accumulate until the bore back-pressures the
+///   lip silent (the cone-bore pitfall). We kill it by high-passing the reflected
+///   wave (tracking and subtracting its running DC), leaving a clean AC standing
+///   wave at the fundamental and every harmonic.
+///
+/// Self-contained (no graph feedback edge); pitch = `length` (`f ≈ c/2L`).
+pub struct LipReed {
+    // lip valve (a damped mass-spring, outward-striking)
+    x: f32,
+    v: f32,
+    wn2: f32,
+    damp: f32,
+    beta: f32,
+    zc: f32,
+    dp_prev: f32,
+    u_prev: f32,
+    flow_lp: f32,
+    flow_a: f32,
+    press_mult: f32, // live mouth-pressure modulation (breath / pitch-wheel bend)
+    // bore: a single flaring segment as a forward + backward delay pair. Both the
+    // lip end (a high-impedance, ~closed valve) and the bell reflect with the same
+    // sign, so the loop resonates on the FULL harmonic series (n·c/2L).
+    fwd: FracDelay,
+    bwd: FracDelay,
+    bell: f32,
+    bell_a: f32,
+    refl: f32, // NON-inverting bell reflection (same-sign loop → all harmonics)
+    dc: f32,   // running DC of the reflected wave …
+    dc_a: f32, // … tracked and removed so the same-sign loop can't latch to DC
+    // drive
+    pressure: f32,
+    env: f32,
+    env_target: f32,
+    atk: f32,
+    rel: f32,
+    rng: u32,
+}
+
+impl LipReed {
+    /// `pressure` = blowing pressure, `tension` = lip resonance as a multiple of
+    /// the bore fundamental (`≈ n` biases the n-th partial; ~1 plays the bore
+    /// fundamental), `length_m` = bore length (metres; pitch `f ≈ c/2L`), `tone`
+    /// = bell brightness.
+    pub fn new(pressure: f32, tension: f32, length_m: f32, tone: f32, sr: f32) -> Self {
+        let c = 343.0_f32;
+        let l = length_m.max(0.02);
+        let f0 = c / (2.0 * l); // bore fundamental (the played pitch)
+        // The outward-striking lip's reactance pulls the played pitch sharp of the
+        // bore by a near-constant ratio (~+135 cents at ζ ≈ 0.05, swept). We cancel
+        // it by targeting a proportionally lower *internal* frequency for both the
+        // bore delay and the lip resonance, so the pulled-sharp result lands on f0.
+        // (Calibrated: 58 Hz–520 Hz plays within ~±20 cents.)
+        const PULL: f32 = 1.08;
+        let f_eff = f0 / PULL;
+        // One-way delay per line; the two lines give a round-trip of 2·D ≈ the
+        // internal period (a same-sign loop resonates at f_eff). The small `comp`
+        // recentres for the bell filter + valve phase in the loop.
+        let comp = 2.2_f32;
+        let d = (sr / (2.0 * f_eff) - comp).max(2.0);
+        // The lips resonate near the partial the player is selecting. A sharp
+        // resonance (ζ ≈ 0.05) locks a *single* bore partial cleanly and lets the
+        // outward-striking positive feedback build a strong limit cycle; `tension`
+        // scales it so ≈ n biases the n-th partial (≈ 1 plays the fundamental).
+        let f_lip = (tension.clamp(0.4, 12.0) * f_eff).clamp(20.0, sr * 0.45);
+        let wn = TAU * f_lip / sr;
+        let zeta = 0.05_f32;
+        LipReed {
+            x: 0.0,
+            v: 0.0,
+            wn2: wn * wn,
+            damp: 2.0 * zeta * wn,
+            beta: 2.5,
+            zc: 0.6,
+            dp_prev: 0.0,
+            u_prev: 0.0,
+            flow_lp: 0.0,
+            flow_a: 0.28,
+            press_mult: 1.0,
+            fwd: FracDelay::new(d),
+            bwd: FracDelay::new(d),
+            bell: 0.0,
+            bell_a: (0.15 + 0.55 * tone.clamp(0.0, 1.5) / 1.5).clamp(0.05, 0.9),
+            refl: 0.985,
+            dc: 0.0,
+            dc_a: 1.0 - (-TAU * 12.0 / sr).exp(), // ~12 Hz DC tracker
+            pressure,
+            env: 0.0,
+            env_target: 1.0,
+            atk: 1.0 - (-1.0 / (0.02 * sr)).exp(),
+            rel: 1.0 - (-1.0 / (0.03 * sr)).exp(),
+            rng: 0x2c9e_6d1b,
+        }
+    }
+}
+
+impl Node for LipReed {
+    #[inline]
+    fn tick(&mut self, _inputs: &[f32]) -> f32 {
+        let rate = if self.env < self.env_target { self.atk } else { self.rel };
+        self.env += (self.env_target - self.env) * rate;
+        let pm = self.pressure * self.press_mult * self.env;
+
+        // 1. The wave arriving back at the lip (already carrying the bell
+        //    reflection) is the pressure the lip feels.
+        let p_plus = self.bwd.read();
+        let fo = self.fwd.read();
+
+        // 2. Advance the lip's mechanical state (explicit — the lip resonance is
+        //    slow next to a sample). OUTWARD-striking: positive ΔP pushes the lip
+        //    OPEN, so its equilibrium is x = +β·ΔP (the `+`, mirror of the woodwind
+        //    reed's `−`). This positive pressure feedback lets the lips overblow up
+        //    the harmonic series.
+        let acc = -self.damp * self.v - self.wn2 * (self.x - self.beta * self.dp_prev);
+        self.v += acc;
+        self.x += self.v;
+        let h = (1.0 + self.x).clamp(0.0, 3.0); // lip opening (beats shut at 0)
+
+        // 3. Resolve the flow ↔ pressure loop this sample (Newton, no delay), as in
+        //    the coupled reed: P = 2·p₊ + Zc·U, ΔP = Pm − P, U = h·sign(ΔP)·√|ΔP|.
+        let mut u = self.u_prev;
+        for _ in 0..4 {
+            let dp = pm - 2.0 * p_plus - self.zc * u;
+            let sq = dp.abs().max(1e-9).sqrt();
+            let resid = u - h * dp.signum() * sq;
+            let deriv = 1.0 + h * self.zc * (0.5 / sq);
+            u -= resid / deriv;
+        }
+        let dp = pm - 2.0 * p_plus - self.zc * u;
+        self.dp_prev = dp;
+        self.u_prev = u;
+
+        // Lip/air inertia low-pass + a little breath turbulence, breath-gated so
+        // the note stops on note-off instead of ringing on the standing wave.
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        let white = (self.rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+        let g = (self.env * 4.0).min(1.0);
+        let breath = (pm.abs() * 3.0).min(1.0);
+        self.flow_lp += self.flow_a * (g * (u + h * 0.015 * white * breath) - self.flow_lp);
+        let ur = self.flow_lp;
+
+        // 4. Launch the outgoing wave (p₋ = p₊ + Zc·U). A gentle saturation stands
+        //    in for the bore's flow/radiation losses and bounds the (positive-
+        //    feedback) limit cycle so the outward-striking lip can't run away.
+        let p_minus = (p_plus + self.zc * ur).tanh();
+
+        // Bell: low-pass, then reflect NON-invertingly (same-sign loop → the full
+        // harmonic series) with the DC of the reflected wave removed, so the loop's
+        // DC eigenmode can't accumulate and choke the lip (the same-sign pitfall).
+        self.bell += self.bell_a * (fo - self.bell);
+        let refl_wave = self.refl * self.bell;
+        self.dc += self.dc_a * (refl_wave - self.dc);
+        let b_in = refl_wave - self.dc;
+
+        self.fwd.write(p_minus);
+        self.bwd.write(b_in);
+        p_plus
+    }
+    fn control(&mut self, c: Control) {
+        match c {
+            Control::Gate(on) => self.env_target = if on { 1.0 } else { 0.0 },
+            Control::Breath(m) => self.press_mult = m.clamp(0.2, 2.5),
+            // The pitch wheel lips the note the physical way — via mouth pressure.
+            Control::Bend(r) => self.press_mult = (1.0 + 5.0 * (r - 1.0)).clamp(0.3, 2.0),
+        }
+    }
+}
+
+
+/// A **flue / air-jet pipe** — the flute / recorder voice. A flute has no reed:
+/// a thin air JET is blown across the sharp edge (the labium) of the mouth. The
+/// jet flips from one side of the edge to the other, driven by the acoustic
+/// velocity at the mouth, **delayed** by the jet's travel time across the mouth
+/// (jet convection, τ = jet length / jet velocity); its deflection injects flow
+/// into the air column. So, unlike the pressure-controlled reed, the exciter is a
+/// *velocity-controlled, delayed-feedback* nonlinear oscillator (McIntyre–
+/// Schumacher–Woodhouse / Verge–Fabre jet drive).
+///
+/// The bore is an **open cylinder** — both ends are pressure-release, so both
+/// reflect *inverting*; the round trip is therefore non-inverting → the full
+/// harmonic series and pitch `f ≈ c/2L` (unlike the clarinet's odd-only twelfth).
+/// Using an inverting reflection at *each* end (rather than a single non-inverting
+/// one) is what keeps it DC-safe: a non-inverting reflection accumulates the DC
+/// mode and chokes the bore silent, whereas each pressure-release end here is
+/// DC-safe and the two inversions still compose into the open-pipe standing wave.
+/// The jet's own convection delay breaks the flow↔pressure loop, so — unlike the
+/// coupled reed — no per-sample implicit solve is needed. Flutes overblow the
+/// **octave** by blowing harder (a faster jet, a shorter convection delay), not
+/// with a vent: raise `pressure` and the jet drive shifts to reinforce the 2nd
+/// mode. Self-contained (no feedback edge); pitch = `length` (metres).
+pub struct JetPipe {
+    // Open bore as two travelling-wave delay lines: `a` mouth→foot, `b` foot→mouth.
+    a: FracDelay,
+    b: FracDelay,
+    jet: FracDelay, // the jet convection delay (τ) — the delayed-feedback exciter
+    lp: f32,        // foot-end radiation low-pass state
+    lp_a: f32,      // radiation brightness (from `tone`)
+    refl: f32,      // pressure-release reflection gain (< 1: radiation + wall loss)
+    sens: f32,      // jet sensitivity (how sharply the jet saturates)
+    drive: f32,     // jet-drive gain into the bore
+    noise: f32,     // jet turbulence (the breathy hiss)
+    pressure: f32,  // blowing pressure ~ jet velocity (also sets the register)
+    press_mult: f32,
+    env: f32,
+    env_target: f32,
+    atk: f32,
+    rel: f32,
+    rng: u32,
+}
+
+impl JetPipe {
+    /// `length_m` = bore length (metres); pitch ≈ c/2L. `pressure` = blowing
+    /// pressure / jet velocity (higher overblows the octave). `jet_ratio` = the
+    /// jet convection delay as a fraction of the acoustic period (~0.5 favours the
+    /// fundamental; the velocity scaling shortens it to overblow). `tone` = bell /
+    /// radiation brightness.
+    pub fn new(length_m: f32, pressure: f32, jet_ratio: f32, tone: f32, sr: f32) -> Self {
+        let c = 343.0_f32;
+        let f = c / (2.0 * length_m.max(0.02));
+        let period = sr / f; // samples per acoustic period (round trip)
+        // One-way delay = half the round trip, less a small loop-phase compensation
+        // (the two reflections + the radiation low-pass add ~¾ sample) so the
+        // sounding pitch sits on c/2L across the whole range.
+        let d_one = (period * 0.5 - 0.75).max(2.0);
+        // Jet velocity ∝ blowing pressure (nominal 0.5); a faster jet has a shorter
+        // convection delay, which reinforces a higher mode → the octave overblow.
+        let vel = (pressure.max(0.0) / 0.5).clamp(0.4, 4.0);
+        let d_jet = (jet_ratio.clamp(0.1, 0.9) * period / vel).max(1.0);
+        JetPipe {
+            a: FracDelay::new(d_one),
+            b: FracDelay::new(d_one),
+            jet: FracDelay::new(d_jet),
+            lp: 0.0,
+            lp_a: (0.25 + 0.15 * tone.clamp(0.0, 1.5)).clamp(0.1, 0.6),
+            refl: 0.92,
+            sens: 5.0,
+            drive: 0.2,
+            noise: 0.02,
+            pressure,
+            press_mult: 1.0,
+            env: 0.0,
+            env_target: 1.0,
+            atk: 1.0 - (-1.0 / (0.02 * sr)).exp(), // ~20 ms breath onset
+            rel: 1.0 - (-1.0 / (0.04 * sr)).exp(), // ~40 ms release (bore rings down)
+            rng: 0x1234_5678,
+        }
+    }
+}
+
+impl Node for JetPipe {
+    #[inline]
+    fn tick(&mut self, _inputs: &[f32]) -> f32 {
+        let rate = if self.env < self.env_target { self.atk } else { self.rel };
+        self.env += (self.env_target - self.env) * rate;
+        let breath = self.pressure * self.press_mult * self.env;
+        // Foot (far, open) end: radiation low-pass, then invert (pressure release).
+        let a_foot = self.a.read();
+        self.lp += self.lp_a * (a_foot - self.lp);
+        let b_foot = -self.refl * self.lp;
+        // Mouth end: the wave returning from the bore is the acoustic velocity the
+        // jet rides. Feed it into the jet's convection delay (+ a little breath
+        // turbulence), and read the delayed deflection back out.
+        let b_mouth = self.b.read();
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        let white = (self.rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+        let eta = self.jet.read();
+        self.jet.write(b_mouth + self.noise * white * breath);
+        // Jet drive: an odd, saturating function of the delayed deflection, powered
+        // by the breath. Odd (no DC) so it can't back the open bore up into silence.
+        let q = self.drive * breath * (self.sens * eta).tanh();
+        // Mouth reflection (pressure release, inverting) + the jet injection.
+        let a_mouth = -self.refl * b_mouth + q;
+        self.a.write(a_mouth);
+        self.b.write(b_foot);
+        b_mouth
+    }
+    fn control(&mut self, c: Control) {
+        match c {
+            Control::Gate(on) => self.env_target = if on { 1.0 } else { 0.0 },
+            // Breath is the blowing-pressure axis (loudness / edge tone).
+            Control::Breath(m) => self.press_mult = m.clamp(0.2, 2.5),
+            // The pitch wheel lips the jet the physical way (harder = a touch sharper).
+            Control::Bend(r) => self.press_mult = (1.0 + 3.0 * (r - 1.0)).clamp(0.3, 2.0),
+        }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2230,5 +2546,62 @@ mod new_exciter_tests {
             let fo = acf_freq(to, sr, f0 * 2.0);
             assert!((fo / fc / 2.0 - 1.0).abs() < 0.1, "double reed overblows an octave: {fc} → {fo}");
         }
+    }
+
+
+    /// AC RMS = the RMS *after* subtracting the mean, so a silent-but-DC-latched
+    /// bore (the same-sign-loop pitfall) reads as ~0, not as false amplitude.
+    fn ac_rms(y: &[f32]) -> f32 {
+        let mean: f32 = y.iter().sum::<f32>() / y.len() as f32;
+        (y.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / y.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn lip_reed_self_oscillates_in_tune_across_tube_lengths() {
+        // The outward-striking lip ↔ bore loop self-oscillates into a bounded
+        // brass tone whose pitch locks to the bore length (f ≈ c/2L), in tune,
+        // across the trumpet/trombone range — with the lip tuned to the bore
+        // fundamental (tension ≈ 1).
+        let sr = 48_000.0;
+        let c = 343.0f32;
+        for &f0 in &[116.5f32, 155.0, 233.0, 349.0, 466.0] {
+            let l = c / (2.0 * f0);
+            let mut lip = LipReed::new(1.0, 1.0, l, 1.0, sr);
+            let y: Vec<f32> = (0..40_000).map(|_| lip.tick(&[])).collect();
+            assert!(y.iter().all(|v| v.is_finite() && v.abs() < 20.0), "lip loop stable at {f0} Hz");
+            let tail = &y[28_000..];
+            // Real AC amplitude (mean-subtracted) — not a DC-latched silence.
+            let ac = ac_rms(tail);
+            assert!(ac > 0.1, "lip sustains real AC at {f0} Hz (ac {ac})");
+            let f = acf_freq(tail, sr, f0);
+            let cents = 1200.0 * (f / f0).log2();
+            assert!(cents.abs() < 45.0, "lip plays c/2L at {f0} Hz (got {f}, {cents:+.0} cents)");
+        }
+    }
+
+    #[test]
+    fn lip_tension_selects_the_partial() {
+        // Brass overblow: on ONE length of tube, raising the lip tension walks the
+        // lock UP the harmonic series (a bugle's melody). At a fixed bore length,
+        // tension ≈ 1 plays the fundamental and tension ≈ 2 the octave above.
+        let sr = 48_000.0;
+        let c = 343.0f32;
+        let f0 = 116.5f32; // Bb1-ish bore fundamental (a low bugle length)
+        let l = c / (2.0 * f0);
+
+        let mut low = LipReed::new(1.0, 1.0, l, 1.0, sr);
+        let y_low: Vec<f32> = (0..40_000).map(|_| low.tick(&[])).collect();
+        let f_low = acf_freq(&y_low[28_000..], sr, f0);
+
+        let mut hi = LipReed::new(1.0, 2.0, l, 1.0, sr);
+        let y_hi: Vec<f32> = (0..40_000).map(|_| hi.tick(&[])).collect();
+        let f_hi = acf_freq(&y_hi[28_000..], sr, 2.0 * f0);
+
+        assert!(ac_rms(&y_low[28_000..]) > 0.1 && ac_rms(&y_hi[28_000..]) > 0.1, "both partials sound");
+        assert!((f_low / f0 - 1.0).abs() < 0.08, "tension 1 plays the fundamental (got {f_low})");
+        // The higher tension locks a higher partial — at least a musical fifth up,
+        // landing near the octave (2nd partial), on the SAME tube.
+        assert!(f_hi > f_low * 1.4, "raising tension overblows up the series ({f_low} → {f_hi})");
+        assert!((f_hi / f_low / 2.0 - 1.0).abs() < 0.15, "tension 2 locks ~the octave (2nd partial)");
     }
 }
