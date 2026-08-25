@@ -199,7 +199,22 @@ pub enum Comp {
     /// `pos` = pluck point (0 = nut, 1 = bridge); `decay` = the fundamental's
     /// -60 dB time (s); `damping` = HF damping 0..1 (darker tail); `stiffness` =
     /// dispersion coefficient (string stiffness → inharmonic partials).
-    PluckedString { pos: f32, decay: f32, damping: f32, stiffness: f32 },
+    /// A digital-waveguide plucked/struck string (self-contained `StringCore`),
+    /// grounded in REAL string physics: the inharmonicity is derived from the
+    /// core (stiffness) diameter, tension, length and Young's modulus, and rises
+    /// up the neck (fretted). `open_hz` is the open-string pitch; `core_mm` is the
+    /// bending-resisting core (a wound string's thin steel core, NOT its overall
+    /// gauge). `pos` = pluck point, `decay` = -60 dB time (s), `damping` = HF damp.
+    PluckedString {
+        length_m: f32,
+        tension_n: f32,
+        core_mm: f32,
+        youngs_gpa: f32,
+        open_hz: f32,
+        pos: f32,
+        decay: f32,
+        damping: f32,
+    },
     /// A vocal-fold (glottal) source, pitched at the played note. `open_quotient`
     /// = how long the folds stay open (breathy → pressed), `level` = drive.
     Voice { open_quotient: f32, level: f32 },
@@ -394,8 +409,11 @@ impl Comp {
             Comp::BowedString { speed, force } => {
                 Box::new(WaveguideBow::new(freq_hz, *speed, *force, sr))
             }
-            Comp::PluckedString { pos, decay, damping, stiffness } => {
-                Box::new(WaveguidePluck::new(freq_hz, *pos, *decay, *damping, *stiffness, vel, sr))
+            Comp::PluckedString { length_m, tension_n, core_mm, youngs_gpa, open_hz, pos, decay, damping } => {
+                Box::new(WaveguidePluck::from_physical(
+                    freq_hz, *length_m, *tension_n, *core_mm, *youngs_gpa, *open_hz,
+                    *pos, *decay, *damping, vel, sr,
+                ))
             }
             Comp::Hammer { hardness, felt } => {
                 Box::new(HammerExciter::new(vel, *hardness, *felt, sr))
@@ -619,14 +637,19 @@ impl Comp {
                 c |= ui.add(unbounded_slider(force, 0.1..=2.0, "Bow force")).changed();
                 c
             }
-            Comp::PluckedString { pos, decay, damping, stiffness } => {
+            Comp::PluckedString { length_m, tension_n, core_mm, youngs_gpa, open_hz, pos, decay, damping } => {
                 let mut c = false;
+                c |= ui.add(unbounded_slider(length_m, 0.1..=2.0, "Length (m)")).changed();
+                c |= ui.add(unbounded_slider(tension_n, 20.0..=1000.0, "Tension (N)")).changed();
+                c |= ui
+                    .add(unbounded_slider(core_mm, 0.1..=2.0, "Core / stiffness gauge (mm)"))
+                    .on_hover_text("The bending-resisting core — a wound string's thin steel core, not its overall diameter.")
+                    .changed();
+                c |= ui.add(unbounded_slider(youngs_gpa, 4.0..=220.0, "Young's modulus (GPa)")).changed();
+                c |= ui.add(unbounded_slider(open_hz, 20.0..=440.0, "Open-string pitch (Hz)")).changed();
                 c |= ui.add(unbounded_slider(pos, 0.02..=0.5, "Pluck position")).changed();
                 c |= ui.add(unbounded_slider(decay, 0.2..=12.0, "Decay time (s)")).changed();
                 c |= ui.add(unbounded_slider(damping, 0.0..=0.9, "HF damping")).changed();
-                c |= ui
-                    .add(unbounded_slider(stiffness, 0.0..=1.0, "Stiffness (inharmonicity)"))
-                    .changed();
                 c
             }
             Comp::Hammer { hardness, felt } => {
@@ -1445,7 +1468,7 @@ impl FtmModel for InstrumentGraph {
                 changed = true;
             }
             if ui.small_button("Plucked string").clicked() {
-                self.components.push(Comp::PluckedString { pos: 0.13, decay: 4.0, damping: 0.15, stiffness: 0.0 });
+                self.components.push(Comp::PluckedString { length_m: 0.648, tension_n: 90.0, core_mm: 0.4, youngs_gpa: 200.0, open_hz: 82.4, pos: 0.13, decay: 4.0, damping: 0.15 });
                 changed = true;
             }
             if ui.small_button("Hammer").clicked() {

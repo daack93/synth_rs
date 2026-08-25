@@ -1565,7 +1565,52 @@ pub struct StringCore {
     rng: u32,
 }
 
+/// How a played note maps to a physical string length — which sets its
+/// inharmonicity. FRETTED: one string shortened by stopping it, so B rises with
+/// pitch (∝ f²). TRUE-LENGTH: each note is its own full-length string at the
+/// given tension/gauge (a harp/piano), so a thin high string can stay clear.
+#[derive(Clone, Copy)]
+pub enum StringGeometry {
+    Fretted { open_hz: f32 },
+    TrueLength,
+}
+
 impl StringCore {
+    /// Build from REAL string physics. Pitch is set by the key (`played_hz`); the
+    /// specs derive the inharmonicity `B = π³·E·d⁴/(64·T·L²)` (and the effective
+    /// speaking length per the geometry), so stiffness is grounded, not a dial.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_physical(
+        played_hz: f32,
+        length_m: f32,
+        tension_n: f32,
+        diameter_mm: f32,
+        density_kgm3: f32,
+        youngs_gpa: f32,
+        geom: StringGeometry,
+        pos: f32,
+        decay_time: f32,
+        hf_damping: f32,
+        sr: f32,
+    ) -> Self {
+        let d = (diameter_mm * 1e-3).max(1e-5); // m
+        let mu = density_kgm3 * std::f32::consts::PI * (d * 0.5).powi(2); // kg/m
+        let e_pa = youngs_gpa * 1e9;
+        let l_eff = match geom {
+            // Fretting shortens the open length in proportion to the pitch rise.
+            StringGeometry::Fretted { open_hz } => {
+                (length_m * (open_hz.max(1.0) / played_hz.max(1.0))).clamp(0.02, length_m)
+            }
+            // The full length that speaks at this pitch for the given T, µ.
+            StringGeometry::TrueLength => {
+                ((1.0 / (2.0 * played_hz.max(1.0))) * (tension_n / mu).sqrt()).clamp(0.02, 5.0)
+            }
+        };
+        let b = std::f32::consts::PI.powi(3) * e_pa * d.powi(4)
+            / (64.0 * tension_n.max(1.0) * l_eff * l_eff);
+        StringCore::new(played_hz, pos, decay_time, hf_damping, b, sr)
+    }
+
     /// `pos` is the interaction point (0 = nut, 1 = bridge). `decay_time` is the
     /// fundamental's -60 dB time (s); `hf_damping` 0..1 darkens the tail; `disp`
     /// is the dispersion-allpass coefficient (0 = an ideal flexible string).
@@ -1757,6 +1802,34 @@ impl WaveguidePluck {
         let b_target = stiffness.clamp(0.0, 1.0) * 0.001; // provisional stiffness->B until specs ground it
         let mut core = StringCore::new(freq_hz, pos, decay_time, hf_damping, b_target, sr);
         // Seed the excitation from the pitch so every note gets its own noise.
+        let seed = (freq_hz * 131.0) as u32 ^ 0x9e37_79b9;
+        core.pluck_coherent(vel.clamp(0.05, 1.0), seed);
+        let rel_off = (-1.0 / (0.08 * sr)).exp();
+        WaveguidePluck { core, rel: 1.0, rel_mul: 1.0, rel_off }
+    }
+
+    /// Build from real string physics (see `StringCore::from_physical`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_physical(
+        freq_hz: f32,
+        length_m: f32,
+        tension_n: f32,
+        core_mm: f32,
+        youngs_gpa: f32,
+        open_hz: f32,
+        pos: f32,
+        decay_time: f32,
+        hf_damping: f32,
+        vel: f32,
+        sr: f32,
+    ) -> Self {
+        // A guitar/violin/bass string is fretted (shortened) to raise the pitch,
+        // so its inharmonicity grows up the neck. Density is unused in the fretted
+        // B (pitch is keyed) — pass steel's as a placeholder.
+        let mut core = StringCore::from_physical(
+            freq_hz, length_m, tension_n, core_mm, 7850.0, youngs_gpa,
+            StringGeometry::Fretted { open_hz }, pos, decay_time, hf_damping, sr,
+        );
         let seed = (freq_hz * 131.0) as u32 ^ 0x9e37_79b9;
         core.pluck_coherent(vel.clamp(0.05, 1.0), seed);
         let rel_off = (-1.0 / (0.08 * sr)).exp();

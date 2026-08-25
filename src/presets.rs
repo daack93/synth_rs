@@ -379,11 +379,19 @@ pub fn factory() -> Vec<Preset> {
     // A plucked/struck string on the shared waveguide core (StringCore), lightly
     // coloured by an instrument body. Pitch tracks the played note; these are the
     // physical tone controls (pluck position, decay, HF damping, stiffness).
+    // Grounded plucked string: the inharmonicity is DERIVED from real string
+    // physics (core/stiffness gauge, tension, length, Young's modulus of the
+    // bending-resisting CORE — steel for a wound string, nylon for a nylon one).
+    #[allow(clippy::too_many_arguments)]
     fn plucked(
+        length_m: f32,
+        tension_n: f32,
+        core_mm: f32,
+        youngs_gpa: f32,
+        open_hz: f32,
         pos: f32,
         decay: f32,
         damping: f32,
-        stiffness: f32,
         body_litres: f32,
         body_hz: f32,
         dry: f32,
@@ -391,7 +399,7 @@ pub fn factory() -> Vec<Preset> {
     ) -> InstrumentGraph {
         InstrumentGraph {
             components: vec![
-                Comp::PluckedString { pos, decay, damping, stiffness },
+                Comp::PluckedString { length_m, tension_n, core_mm, youngs_gpa, open_hz, pos, decay, damping },
                 Comp::Body { cavity_litres: body_litres, soundhole_cm: 3.0, top_hz: body_hz, decay_s: 0.2 },
                 Comp::Mix,
             ],
@@ -411,10 +419,10 @@ pub fn factory() -> Vec<Preset> {
 
     let mut base = vec![
         // ---- Plucked / struck strings on the shared waveguide (StringCore) ----
-        make("Acoustic Bass", plucked(0.15, 2.0, 0.40, 0.30, 30.0, 90.0, 0.8, 0.30), eng(0.75, 4.0, 120.0)),
-        make("Electric Bass", plucked(0.12, 2.6, 0.32, 0.30, 8.0, 100.0, 0.85, 0.20), eng(0.75, 4.0, 140.0)),
-        make("Acoustic Guitar", plucked(0.12, 2.5, 0.28, 0.40, 3.5, 200.0, 0.8, 0.35), eng(0.6, 3.0, 120.0)),
-        make("Electric Guitar", plucked(0.10, 3.0, 0.20, 0.50, 2.0, 250.0, 0.9, 0.15), eng(0.6, 3.0, 200.0)),
+        make("Acoustic Bass", plucked(0.864, 60.0, 0.60, 200.0, 41.2, 0.15, 2.0, 0.40, 30.0, 90.0, 0.8, 0.30), eng(0.75, 4.0, 120.0)),
+        make("Electric Bass", plucked(0.864, 55.0, 0.55, 200.0, 41.2, 0.12, 2.6, 0.32, 8.0, 100.0, 0.85, 0.20), eng(0.75, 4.0, 140.0)),
+        make("Acoustic Guitar", plucked(0.648, 90.0, 0.40, 200.0, 82.4, 0.12, 2.5, 0.28, 3.5, 200.0, 0.8, 0.35), eng(0.6, 3.0, 120.0)),
+        make("Electric Guitar", plucked(0.648, 78.0, 0.35, 200.0, 82.4, 0.10, 3.0, 0.20, 2.0, 250.0, 0.9, 0.15), eng(0.6, 3.0, 200.0)),
         // Less bass-heavy: brighter (more modes) with the highs allowed to sustain.
         make("Piano", string(0.600, 700.0, 1.10, STEEL, 3.5, 0.3, 0.12), eng(0.6, 2.0, 150.0)),
         make(
@@ -423,7 +431,8 @@ pub fn factory() -> Vec<Preset> {
                 components: vec![
                     // Thin steel string (bright, inharmonic) over a tensioned
                     // DRUMHEAD — a banjo's resonator is a membrane, not a wood box.
-                    Comp::PluckedString { pos: 0.08, decay: 0.8, damping: 0.12, stiffness: 0.6 },
+                    // Thin plain steel string (bright, inharmonic) — core = overall gauge.
+                    Comp::PluckedString { length_m: 0.67, tension_n: 55.0, core_mm: 0.28, youngs_gpa: 200.0, open_hz: 147.0, pos: 0.08, decay: 0.8, damping: 0.12 },
                     Comp::Membrane(DrumMembrane { radius_m: 0.14, tension_nm: 3400.0, areal_density_kgm2: 0.22, bending_nm: 0.02, decay_time: 0.1, hf_damping: 14.0, num_modes: 20, strike_pos: 0.5, ..DrumMembrane::default() }),
                     Comp::Mix,
                 ],
@@ -441,7 +450,7 @@ pub fn factory() -> Vec<Preset> {
             eng(0.6, 2.0, 80.0),
         ),
         // Rounder pluck + more HF damping to tame the "electric" low end.
-        make("Harp", plucked(0.16, 2.5, 0.25, 0.15, 20.0, 150.0, 0.8, 0.30), eng(0.6, 3.0, 180.0)),
+        make("Harp", plucked(0.900, 55.0, 0.80, 4.0, 65.4, 0.16, 2.5, 0.25, 20.0, 150.0, 0.8, 0.30), eng(0.6, 3.0, 180.0)),
         // ---- A/B twins: the ORIGINAL modal FTM string, same instruments, so the
         // waveguide plucked model above can be compared against it by ear ----
         make("Acoustic Bass (FTM)", string(0.864, 60.0, 1.30, NICKEL, 2.0, 0.5, 0.15), eng(0.75, 4.0, 120.0)),
