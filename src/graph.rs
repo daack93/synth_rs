@@ -924,7 +924,10 @@ impl Node for CoupledReed {
         self.rng ^= self.rng << 5;
         let white = (self.rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
         let g = (self.env * 4.0).min(1.0);
-        self.flow_lp += self.flow_a * (g * (u + h * 0.015 * white) - self.flow_lp);
+        // Breath turbulence scales with the actual blowing pressure, so a reed
+        // driven at pressure 0 (an out-of-range note) is truly silent, not hissy.
+        let breath = (pm.abs() * 3.0).min(1.0);
+        self.flow_lp += self.flow_a * (g * (u + h * 0.015 * white * breath) - self.flow_lp);
         let ur = self.flow_lp;
 
         // 4. Launch the outgoing wave into segment 1 (pure superposition,

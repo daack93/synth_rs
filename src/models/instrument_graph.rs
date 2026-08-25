@@ -38,6 +38,11 @@ fn default_overblow() -> f32 {
     3.0
 }
 
+/// Reed range floor: a single reed's lowest note is its full-length tube (the
+/// anchor). Notes below `anchor · REED_FLOOR` (~a half-semitone of margin for
+/// bend) don't sound — there is no longer tube. 2^(-0.5/12).
+const REED_FLOOR: f32 = 0.9715;
+
 /// One node in an instrument graph. Each variant is a physics component with
 /// its own inherent parameters (kept as their natural types).
 #[derive(Clone, Serialize, Deserialize)]
@@ -998,13 +1003,22 @@ impl FtmModel for InstrumentGraph {
                             c.set_overblow(freq_hz, *anchor_hz, *steps, *microtune);
                         }
                         KeyMapKind::OverblowTuned { anchor_hz, steps, table } => {
-                            // Register + nominal length from the anchor/steps, then
-                            // the exact calibrated length correction for this note.
-                            c.set_reed_register(freq_hz, *anchor_hz, *steps);
-                            let note = super::freq_to_midi(freq_hz).clamp(0, 127) as usize;
-                            if let Some(&mult) = table.get(note) {
-                                if let Comp::ReedBore { length, .. } = c {
-                                    *length *= mult;
+                            // Range floor: a single reed can't sound below its
+                            // longest tube (the anchor is its lowest note). Notes
+                            // more than ~a half-semitone below go silent.
+                            if freq_hz < anchor_hz * REED_FLOOR {
+                                if let Comp::ReedBore { pressure, .. } = c {
+                                    *pressure = 0.0;
+                                }
+                            } else {
+                                // Register + nominal length from the anchor/steps,
+                                // then the exact calibrated length correction.
+                                c.set_reed_register(freq_hz, *anchor_hz, *steps);
+                                let note = super::freq_to_midi(freq_hz).clamp(0, 127) as usize;
+                                if let Some(&mult) = table.get(note) {
+                                    if let Comp::ReedBore { length, .. } = c {
+                                        *length *= mult;
+                                    }
                                 }
                             }
                         }
