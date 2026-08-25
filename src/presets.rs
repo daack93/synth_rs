@@ -416,6 +416,14 @@ pub fn factory() -> Vec<Preset> {
         make("Banjo", plucked(0.08, 0.8, 0.12, 0.0, 4.0, 300.0, 0.85, 0.30), eng(0.6, 2.0, 80.0)),
         // Rounder pluck + more HF damping to tame the "electric" low end.
         make("Harp", plucked(0.16, 2.5, 0.25, 0.0, 20.0, 150.0, 0.8, 0.30), eng(0.6, 3.0, 180.0)),
+        // ---- A/B twins: the ORIGINAL modal FTM string, same instruments, so the
+        // waveguide plucked model above can be compared against it by ear ----
+        make("Acoustic Bass (FTM)", string(0.864, 60.0, 1.30, NICKEL, 2.0, 0.5, 0.15), eng(0.75, 4.0, 120.0)),
+        make("Electric Bass (FTM)", string(0.864, 55.0, 1.25, NICKEL, 2.6, 0.4, 0.12), eng(0.75, 4.0, 140.0)),
+        make("Acoustic Guitar (FTM)", string(0.648, 90.0, 1.10, BRONZE, 2.5, 0.6, 0.12), eng(0.6, 3.0, 120.0)),
+        make("Electric Guitar (FTM)", string(0.648, 78.0, 1.00, NICKEL, 3.0, 0.4, 0.10), eng(0.6, 3.0, 200.0)),
+        make("Banjo (FTM)", string(0.670, 55.0, 0.40, STEEL, 0.8, 1.2, 0.08), eng(0.6, 2.0, 80.0)),
+        make("Harp (FTM)", string(0.900, 55.0, 0.80, NYLON, 2.5, 0.5, 0.16), eng(0.6, 3.0, 180.0)),
         // ---- Multi-component graph: Strike → String → Body (A/B vs Acoustic Guitar) ----
         make(
             "Guitar + Body (graph)",
