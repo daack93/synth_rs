@@ -211,9 +211,9 @@ pub fn factory() -> Vec<Preset> {
             blow_pos: 0.0,
             depth: 16,
             resolution: 220,
-            damping: 14.0,
+            damping: 20.0,
             freq_dep_damping: -0.08,
-            visco_loss: 3.0,
+            visco_loss: 4.0,
             radiation: 3.0,
             key_tracks_pitch: true,
             ..WebsterHorn::default()
@@ -296,15 +296,15 @@ pub fn factory() -> Vec<Preset> {
             wood_horn(conical),
             KeyMapKind::OverblowTuned { anchor_hz: anchor, steps: 0.0, table },
             0.4,
-            0.5,
+            if conical { 0.9 } else { 0.2 }, // the clarinet's closed horn resonates harder
         );
-        make(name, g, eng(1.2, 25.0, 90.0))
+        make(name, g, eng(1.1, 25.0, 90.0))
     }
 
     /// A double-reed woodwind (oboe/bassoon): the double reed as buzz source +
     /// its chromatic (conical, all-harmonic) air column. Chromatic-tuned — the
     /// air column carries the pitch, so no per-note calibration is needed.
-    fn double_reed_wind(name: &str, anchor: f32, pressure: f32, stiffness: f32, tone: f32) -> Preset {
+    fn double_reed_wind(name: &str, _anchor: f32, pressure: f32, stiffness: f32, tone: f32) -> Preset {
         let reed = Comp::DoubleReed {
             pressure,
             stiffness,
@@ -321,9 +321,9 @@ pub fn factory() -> Vec<Preset> {
             wood_horn(true),
             KeyMapKind::Power { param: "length".into(), amount: -1.0 },
             0.4,
-            0.5,
+            0.35,
         );
-        make(name, g, eng(1.2, 25.0, 90.0))
+        make(name, g, eng(1.0, 25.0, 90.0))
     }
 
     /// A brass instrument: the outward-striking lips as buzz source + an overblow-
@@ -349,9 +349,9 @@ pub fn factory() -> Vec<Preset> {
             wood_horn(true),
             KeyMapKind::Power { param: "length".into(), amount: -1.0 },
             0.4,
-            0.5,
+            0.4,
         );
-        make(name, g, eng(1.4, 20.0, 80.0))
+        make(name, g, eng(1.8, 20.0, 80.0))
     }
 
 
