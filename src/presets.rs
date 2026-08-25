@@ -408,7 +408,30 @@ pub fn factory() -> Vec<Preset> {
         make("Acoustic Guitar", plucked(0.648, 90.0, 0.40, 200.0, 82.4, 0.12, 2.5, 0.28, 3.5, 200.0, 0.8, 0.35), eng(0.6, 3.0, 120.0)),
         make("Electric Guitar", plucked(0.648, 78.0, 0.35, 200.0, 82.4, 0.10, 3.0, 0.20, 2.0, 250.0, 0.9, 0.15), eng(0.6, 3.0, 200.0)),
         // Less bass-heavy: brighter (more modes) with the highs allowed to sustain.
-        make("Piano", string(0.600, 700.0, 1.10, STEEL, 3.5, 0.3, 0.12), eng(0.6, 2.0, 150.0)),
+        make(
+            "Piano",
+            InstrumentGraph {
+                components: vec![
+                    // Felt hammer on a steel string over a soundboard. Real specs:
+                    // long thick strings (audible inharmonic stretch), struck near
+                    // the end; hammer graded harder toward the treble.
+                    Comp::HammeredString { length_m: 1.2, tension_n: 700.0, core_mm: 1.0, youngs_gpa: 200.0, open_hz: 27.5, hardness: 0.5, felt: 2.6, pos: 0.12, decay: 5.0, damping: 0.12 },
+                    Comp::Body { cavity_litres: 40.0, soundhole_cm: 8.0, top_hz: 120.0, decay_s: 0.3 }, // soundboard
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 2, gain: 0.85 }, // dry string
+                    Edge { from: 0, to: 1, gain: 1.0 },  // string → soundboard
+                    Edge { from: 1, to: 2, gain: 0.25 }, // soundboard colour → out
+                ],
+                output: 2,
+                key_map: vec![
+                    KeyBinding { component: 0, map: KeyMapKind::Power { param: "hardness".into(), amount: 0.4 } },
+                    KeyBinding { component: 0, map: KeyMapKind::Power { param: "decay".into(), amount: -0.6 } },
+                ],
+            },
+            eng(0.6, 2.0, 150.0),
+        ),
         make(
             "Banjo",
             InstrumentGraph {
@@ -1303,6 +1326,9 @@ pub fn factory() -> Vec<Preset> {
     // matching graph model's `inner`.
     let mut twins: Vec<Preset> = Vec::new();
     for p in &base {
+        if p.name.contains("(FTM)") {
+            continue; // the FTM A/B references don't get their own graph twin
+        }
         let graph_id = match p.model_id.as_str() {
             "pure_string" => {
                 if p.params.get("excitation").and_then(|v| v.as_str()) == Some("Bowed") {
@@ -1471,17 +1497,18 @@ mod graph_twin_tests {
     fn struck_string_membrane_plate_presets_get_graph_twins() {
         let f = factory();
         let has = |n: &str| f.iter().any(|p| p.name == n);
-        // A remaining modal struck string (Piano) + membrane + plate → twinned.
-        // The plucked/bowed strings are now waveguide graphs natively (no twin).
-        assert!(has("Piano (graph)"), "struck string twinned");
+        // The string family is now waveguide graphs natively (no twins). Membrane,
+        // plate and musical_string still get modal→graph twins.
         assert!(has("Tom (graph)"), "membrane twinned");
         assert!(has("Pure Plate (graph)"), "plate twinned");
-        // bowed/plucked waveguide strings + musical_string handled separately
-        assert!(!has("Violin (graph)"), "bowed strings excluded");
         assert!(has("Soft Nylon (graph)"), "musical_string twinned");
+        // waveguide strings and the FTM A/B references are NOT twinned
+        assert!(!has("Violin (graph)"), "bowed strings excluded");
+        assert!(!has("Piano (graph)"), "hammered string is a waveguide graph, not twinned");
+        assert!(!has("Acoustic Guitar (FTM) (graph)"), "FTM references not twinned");
         // a twin points at the graph model, wraps the original params, and rebuilds
-        let g = f.iter().find(|p| p.name == "Piano (graph)").unwrap();
-        assert_eq!(g.model_id, "graph_string");
+        let g = f.iter().find(|p| p.name == "Tom (graph)").unwrap();
+        assert_eq!(g.model_id, "graph_drum");
         assert!(g.params.get("inner").is_some(), "params re-homed under inner");
         assert!(g.build_model().is_some(), "twin rebuilds via model_from_id");
     }
@@ -1704,6 +1731,12 @@ mod tests {
             // (the `Wind:` section), not a standalone playable instrument, so it has
             // no direct preset by design.
             if m.id() == "webster_horn" {
+                continue;
+            }
+            // `graph_string` (a modal string rendered through the graph) is
+            // superseded by the native waveguide string models (PluckedString /
+            // HammeredString / BowedString), so it no longer has a factory preset.
+            if m.id() == "graph_string" {
                 continue;
             }
             assert!(ids.contains(m.id()), "kit should include a {} preset", m.id());

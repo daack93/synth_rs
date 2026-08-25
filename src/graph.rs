@@ -1611,6 +1611,12 @@ impl StringCore {
         };
         let b = std::f32::consts::PI.powi(3) * e_pa * d.powi(4)
             / (64.0 * tension_n.max(1.0) * l_eff * l_eff);
+        // Cap B at a musically realistic ceiling. Modelling a wide-range
+        // instrument (a 7-octave piano) as ONE string fretted from its bottom
+        // makes the treble B diverge (∝ f²); a real instrument holds B down with
+        // thinner/dedicated treble strings. This cap stands in for that until
+        // per-note gauge scaling exists, and keeps the top in tune.
+        let b = b.min(0.004);
         StringCore::new(played_hz, pos, decay_time, hf_damping, b, sr)
     }
 
@@ -1828,6 +1834,103 @@ impl Node for WaveguidePluck {
             // Release: damp the string over ~80 ms (a hand muting it).
             self.rel_mul = self.rel_off;
         }
+    }
+}
+
+/// A digital-waveguide **hammered string** (piano): a felt hammer making
+/// nonlinear Hertzian contact with the shared [`StringCore`]. The hammer flies in
+/// at the key velocity; while it touches the string the felt force is
+/// K·compression^p (compression = hammer position − string displacement), which
+/// decelerates the hammer and drives the string. The string DISPLACEMENT at the
+/// strike point is the integral of the junction velocity. A one-shot: once the
+/// hammer leaves, the string rings freely. Grounded like the other strings.
+pub struct WaveguideHammer {
+    core: StringCore,
+    hpos: f32,  // hammer position (well-scaled internal units)
+    hvel: f32,  // hammer velocity (from key velocity)
+    k: f32,     // felt stiffness
+    p: f32,     // felt compression exponent
+    mass: f32,
+    inv_sr: f32,
+    spos: f32,  // integrated string displacement at the strike point
+    inject: f32, // per-note injection scale (heavier drive for the bass)
+    done: bool,
+}
+
+impl WaveguideHammer {
+    const READ: f32 = 0.02; // string displacement → hammer scale
+    const OUT: f32 = 0.003; // felt force → injected string velocity
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_physical(
+        freq_hz: f32,
+        length_m: f32,
+        tension_n: f32,
+        core_mm: f32,
+        youngs_gpa: f32,
+        open_hz: f32,
+        hardness: f32,
+        felt: f32,
+        velocity: f32,
+        pos: f32,
+        decay_time: f32,
+        hf_damping: f32,
+        sr: f32,
+    ) -> Self {
+        let core = StringCore::from_physical(
+            freq_hz, length_m, tension_n, core_mm, 7850.0, youngs_gpa,
+            StringGeometry::Fretted { open_hz }, pos, decay_time, hf_damping, sr,
+        );
+        // hardness 0..1 → felt stiffness 10^(5.5..7); mass fixed so contact lands
+        // in the real ~1–9 ms range across the sweep.
+        let k = 10f32.powf(5.5 + 1.5 * hardness.clamp(0.0, 1.0));
+        WaveguideHammer {
+            core,
+            hpos: 0.0,
+            hvel: velocity.clamp(0.02, 1.0) * 8.0,
+            k,
+            p: felt.clamp(1.0, 4.0),
+            mass: 2.0e-4,
+            inv_sr: 1.0 / sr,
+            spos: 0.0,
+            // StringCore's output gain rises ∝ f (it cancels the pluck's 1/f),
+            // which over-brightens the hammer's force injection — so drive the
+            // bass harder to flatten it (real bass hammers are heavier anyway).
+            inject: (500.0 / freq_hz.max(20.0)).clamp(0.5, 10.0) * Self::OUT,
+            done: false,
+        }
+    }
+}
+
+impl Node for WaveguideHammer {
+    #[inline]
+    fn tick(&mut self, _inputs: &[f32]) -> f32 {
+        if self.done {
+            return self.core.tick(0.0); // string rings freely
+        }
+        // Use the string displacement from the PREVIOUS sample (a 1-sample delay)
+        // for the compression — otherwise hammer force → string velocity → spos →
+        // force forms an instantaneous algebraic loop that goes unstable at high
+        // notes. The delay (as in the modal hammer) breaks the loop.
+        let x = self.spos * Self::READ;
+        let compression = self.hpos - x;
+        let force = if compression > 0.0 {
+            self.k * compression.powf(self.p)
+        } else {
+            0.0
+        };
+        // Felt reaction decelerates the hammer (semi-implicit Euler).
+        self.hvel -= force / self.mass * self.inv_sr;
+        self.hpos += self.hvel * self.inv_sr;
+        let vel = self.core.read_junction();
+        let out = self.core.commit(force * self.inject);
+        // Integrate the junction velocity → string displacement, AFTER using it.
+        self.spos = 0.9995 * self.spos + vel;
+        // The hammer has left once it's clear of the string and moving away.
+        if compression <= 0.0 && self.hvel <= 0.0 {
+            self.done = true;
+        }
+        out
     }
 }
 

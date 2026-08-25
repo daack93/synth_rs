@@ -22,7 +22,7 @@ use super::webster_horn::{PlayMode, WebsterHorn};
 use super::{freq_to_midi, midi_name, unbounded_slider, FtmModel, ModeBuffer};
 use crate::graph::{
     BowExciter, CoupledDoubleReed, CoupledReed, DriveExciter, FormantResonator, Graph, HammerExciter, ImpulseExciter,
-    JetPipe, LipReed, ModalResonator, Node, ReedExciter, SineExciter, SnareWires, Sum, VoiceExciter, WaveguideBore, WaveguideBow, WaveguidePluck, WaveguideHorn, WaveguideReed,
+    JetPipe, LipReed, ModalResonator, Node, ReedExciter, SineExciter, SnareWires, Sum, VoiceExciter, WaveguideBore, WaveguideBow, WaveguideHammer, WaveguidePluck, WaveguideHorn, WaveguideReed,
 };
 
 const PI: f32 = std::f32::consts::PI;
@@ -226,6 +226,21 @@ pub enum Comp {
         decay: f32,
         damping: f32,
     },
+    /// A digital-waveguide HAMMERED string (piano): a felt hammer on the shared
+    /// StringCore, grounded in real string physics. `hardness`/`felt` shape the
+    /// contact (key-map hardness for per-register voicing); the rest is the string.
+    HammeredString {
+        length_m: f32,
+        tension_n: f32,
+        core_mm: f32,
+        youngs_gpa: f32,
+        open_hz: f32,
+        hardness: f32,
+        felt: f32,
+        pos: f32,
+        decay: f32,
+        damping: f32,
+    },
     /// A vocal-fold (glottal) source, pitched at the played note. `open_quotient`
     /// = how long the folds stay open (breathy → pressed), `level` = drive.
     Voice { open_quotient: f32, level: f32 },
@@ -273,6 +288,7 @@ impl Comp {
             Comp::AirJet { .. } => "Air jet / flute (flue)",
             Comp::BowedString { .. } => "Bowed string (waveguide)",
             Comp::PluckedString { .. } => "Plucked string (waveguide)",
+            Comp::HammeredString { .. } => "Hammered string (piano)",
             Comp::Hammer { .. } => "Hammer (exciter)",
             Comp::Bow { .. } => "Bow (exciter)",
             Comp::Voice { .. } => "Voice / glottis (exciter)",
@@ -304,6 +320,7 @@ impl Comp {
                 | Comp::AirJet { .. }
                 | Comp::BowedString { .. }
                 | Comp::PluckedString { .. }
+                | Comp::HammeredString { .. }
                 | Comp::Sine { .. }
         )
     }
@@ -426,6 +443,12 @@ impl Comp {
                 Box::new(WaveguidePluck::from_physical(
                     freq_hz, *length_m, *tension_n, *core_mm, *youngs_gpa, *open_hz,
                     *pos, *decay, *damping, vel, sr,
+                ))
+            }
+            Comp::HammeredString { length_m, tension_n, core_mm, youngs_gpa, open_hz, hardness, felt, pos, decay, damping } => {
+                Box::new(WaveguideHammer::from_physical(
+                    freq_hz, *length_m, *tension_n, *core_mm, *youngs_gpa, *open_hz,
+                    *hardness, *felt, vel, *pos, *decay, *damping, sr,
                 ))
             }
             Comp::Hammer { hardness, felt } => {
@@ -670,6 +693,20 @@ impl Comp {
                 c |= ui.add(unbounded_slider(damping, 0.0..=0.9, "HF damping")).changed();
                 c
             }
+            Comp::HammeredString { length_m, tension_n, core_mm, youngs_gpa, open_hz, hardness, felt, pos, decay, damping } => {
+                let mut c = false;
+                c |= ui.add(unbounded_slider(length_m, 0.1..=2.0, "Length (m)")).changed();
+                c |= ui.add(unbounded_slider(tension_n, 20.0..=1200.0, "Tension (N)")).changed();
+                c |= ui.add(unbounded_slider(core_mm, 0.1..=2.0, "Core / stiffness gauge (mm)")).changed();
+                c |= ui.add(unbounded_slider(youngs_gpa, 4.0..=220.0, "Young's modulus (GPa)")).changed();
+                c |= ui.add(unbounded_slider(open_hz, 20.0..=440.0, "Open-string pitch (Hz)")).changed();
+                c |= ui.add(unbounded_slider(hardness, 0.0..=1.0, "Felt hardness")).changed();
+                c |= ui.add(unbounded_slider(felt, 1.0..=4.0, "Felt nonlinearity")).changed();
+                c |= ui.add(unbounded_slider(pos, 0.02..=0.5, "Strike position")).changed();
+                c |= ui.add(unbounded_slider(decay, 0.2..=12.0, "Decay time (s)")).changed();
+                c |= ui.add(unbounded_slider(damping, 0.0..=0.9, "HF damping")).changed();
+                c
+            }
             Comp::Hammer { hardness, felt } => {
                 let mut c = false;
                 c |= ui
@@ -780,6 +817,7 @@ impl Comp {
             // The plucked string's decay is key-mapped so treble notes ring
             // shorter than the bass, as real strings do.
             Comp::PluckedString { .. } => &["decay"],
+            Comp::HammeredString { .. } => &["hardness", "decay"],
             Comp::MusicalString(_) | Comp::Bell(_) | Comp::Cymbal(_) | Comp::Strike | Comp::Mix
             | Comp::Wires { .. } | Comp::Breath { .. }
             | Comp::Bow { .. } | Comp::Voice { .. } | Comp::ReedPipe { .. } | Comp::BowedString { .. }
@@ -815,6 +853,8 @@ impl Comp {
             (Comp::Hammer { hardness, .. }, "hardness") => Some(*hardness),
             (Comp::Hammer { felt, .. }, "felt") => Some(*felt),
             (Comp::PluckedString { decay, .. }, "decay") => Some(*decay),
+            (Comp::HammeredString { hardness, .. }, "hardness") => Some(*hardness),
+            (Comp::HammeredString { decay, .. }, "decay") => Some(*decay),
             _ => None,
         }
     }
@@ -847,6 +887,8 @@ impl Comp {
             (Comp::Hammer { hardness, .. }, "hardness") => *hardness = v.clamp(0.0, 1.0),
             (Comp::Hammer { felt, .. }, "felt") => *felt = v,
             (Comp::PluckedString { decay, .. }, "decay") => *decay = v.max(0.05),
+            (Comp::HammeredString { hardness, .. }, "hardness") => *hardness = v.clamp(0.0, 1.0),
+            (Comp::HammeredString { decay, .. }, "decay") => *decay = v.max(0.05),
             _ => {}
         }
     }
@@ -1487,6 +1529,10 @@ impl FtmModel for InstrumentGraph {
             }
             if ui.small_button("Plucked string").clicked() {
                 self.components.push(Comp::PluckedString { length_m: 0.648, tension_n: 90.0, core_mm: 0.4, youngs_gpa: 200.0, open_hz: 82.4, pos: 0.13, decay: 4.0, damping: 0.15 });
+                changed = true;
+            }
+            if ui.small_button("Hammered string").clicked() {
+                self.components.push(Comp::HammeredString { length_m: 1.0, tension_n: 700.0, core_mm: 1.0, youngs_gpa: 200.0, open_hz: 27.5, hardness: 0.5, felt: 2.6, pos: 0.13, decay: 5.0, damping: 0.12 });
                 changed = true;
             }
             if ui.small_button("Hammer").clicked() {
