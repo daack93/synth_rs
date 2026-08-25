@@ -1532,7 +1532,7 @@ impl FtmModel for InstrumentGraph {
                 changed = true;
             }
             if ui.small_button("Hammered string").clicked() {
-                self.components.push(Comp::HammeredString { length_m: 1.0, tension_n: 700.0, core_mm: 1.0, youngs_gpa: 200.0, open_hz: 27.5, hardness: 0.5, felt: 2.6, pos: 0.13, decay: 5.0, damping: 0.12 });
+                self.components.push(Comp::HammeredString { length_m: 1.0, tension_n: 700.0, core_mm: 1.0, youngs_gpa: 200.0, open_hz: 27.5, hardness: 0.5, felt: 2.0, pos: 0.13, decay: 5.0, damping: 0.12 });
                 changed = true;
             }
             if ui.small_button("Hammer").clicked() {

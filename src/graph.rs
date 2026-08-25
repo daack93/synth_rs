@@ -1854,6 +1854,8 @@ pub struct WaveguideHammer {
     inv_sr: f32,
     spos: f32,  // integrated string displacement at the strike point
     inject: f32, // per-note injection scale (heavier drive for the bass)
+    f_lp: f32,   // slow lowpass of the force (its DC/subsonic component)
+    dcblock: bool,
     done: bool,
 }
 
@@ -1897,6 +1899,8 @@ impl WaveguideHammer {
             // which over-brightens the hammer's force injection — so drive the
             // bass harder to flatten it (real bass hammers are heavier anyway).
             inject: (500.0 / freq_hz.max(20.0)).clamp(0.5, 10.0) * Self::OUT,
+            f_lp: 0.0,
+            dcblock: true,
             done: false,
         }
     }
@@ -1923,7 +1927,16 @@ impl Node for WaveguideHammer {
         self.hvel -= force / self.mass * self.inv_sr;
         self.hpos += self.hvel * self.inv_sr;
         let vel = self.core.read_junction();
-        let out = self.core.commit(force * self.inject);
+        // The felt force is unipolar (a push) → it injects DC, which the output
+        // integrator emphasises as a subsonic THUMP. Remove the force's slow
+        // component so the injection is biphasic (a string can't hold DC anyway).
+        let f_inj = if self.dcblock {
+            self.f_lp += 0.002 * (force - self.f_lp);
+            force - self.f_lp
+        } else {
+            force
+        };
+        let out = self.core.commit(f_inj * self.inject);
         // Integrate the junction velocity → string displacement, AFTER using it.
         self.spos = 0.9995 * self.spos + vel;
         // The hammer has left once it's clear of the string and moving away.
