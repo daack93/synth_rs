@@ -625,7 +625,7 @@ impl Comp {
                 c |= ui.add(unbounded_slider(decay, 0.2..=12.0, "Decay time (s)")).changed();
                 c |= ui.add(unbounded_slider(damping, 0.0..=0.9, "HF damping")).changed();
                 c |= ui
-                    .add(unbounded_slider(stiffness, 0.0..=0.5, "Stiffness (inharmonicity)"))
+                    .add(unbounded_slider(stiffness, 0.0..=1.0, "Stiffness (inharmonicity)"))
                     .changed();
                 c
             }

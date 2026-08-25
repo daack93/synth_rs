@@ -1505,6 +1505,21 @@ impl Node for WaveguideReed {
 /// first-order dispersion allpass (string stiffness → inharmonic partials). Both
 /// ends invert, so one trip through both segments is a full period → the total
 /// one-way delay is sr/f. Velocity-wave domain, like the bow.
+/// Number of first-order allpass stages in the string's dispersion cascade —
+/// enough to make stiffness/inharmonicity audible without heavy cost.
+const DISP_STAGES: usize = 16;
+
+/// Phase delay (in samples) of one first-order allpass H(z)=(a+z⁻¹)/(1+a·z⁻¹)
+/// at radian frequency ω — used to compensate the loop so the fundamental stays
+/// in tune while the upper partials disperse.
+fn allpass_phase_delay(a: f32, w: f32) -> f32 {
+    let (cw, sw) = (w.cos(), w.sin());
+    let num = (-sw).atan2(a + cw);        // phase of (a + e^-jω)
+    let den = (-a * sw).atan2(1.0 + a * cw); // phase of (1 + a·e^-jω)
+    let phase = num - den;
+    if w > 1e-6 { -phase / w } else { 0.0 }
+}
+
 pub struct StringCore {
     left: Vec<f32>,      // interaction-point → nut delay line
     left_pos: usize,
@@ -1520,9 +1535,9 @@ pub struct StringCore {
     lp_state: f32,       // highs are damped relative to each string's fundamental
     out_integ: f32,      // leaky integrator: velocity → displacement (warm output)
     out_gain: f32,       // output scale ∝ f, to cancel the integrator's 1/f tilt
-    disp_a: f32,         // dispersion allpass coeff (0 = none)
-    disp_x1: f32,
-    disp_y1: f32,
+    disp_a: f32,             // dispersion allpass coeff (0 = none)
+    disp_x: [f32; DISP_STAGES], // cascade states (stiffness → inharmonic partials)
+    disp_y: [f32; DISP_STAGES],
     rng: u32,
 }
 
@@ -1545,7 +1560,25 @@ impl StringCore {
         let lp_a = 1.0 - (-tau * cutoff / sr).exp();
         // A one-pole adds ≈(1-a)/a samples of phase at DC; fold it into the delay.
         let lp_phase = (1.0 - lp_a) / lp_a;
-        let total = (sr / f - lp_phase - 0.05).max(4.0);
+        // A cascade of first-order allpasses disperses the string: high partials
+        // travel slower, stretching sharp off the harmonic series (piano /
+        // steel-string inharmonicity). `disp` (0..1 = stiffness) drives a NEGATIVE
+        // coefficient (sharp stretch). The cascade also adds delay at the
+        // fundamental — a lot on a short (high) string — so cap its magnitude so
+        // that delay never exceeds ~25% of the loop (else the tuning breaks and
+        // the treble over-disperses). Net: inharmonicity is strongest in the bass
+        // (long strings) and gentle up top, as on a real piano.
+        let want = disp.clamp(0.0, 1.0) * 0.85;
+        let r = 0.25 * (sr / f);
+        let m_max = ((r - DISP_STAGES as f32) / (r + DISP_STAGES as f32)).clamp(0.0, 0.85);
+        let disp_a = -want.min(m_max);
+        let w0 = tau * f / sr;
+        let disp_phase = if disp_a != 0.0 {
+            allpass_phase_delay(disp_a, w0) * DISP_STAGES as f32
+        } else {
+            0.0
+        };
+        let total = (sr / f - lp_phase - disp_phase - 0.05).max(4.0);
         let pos = pos.clamp(0.05, 0.95);
         let left_len = ((total * (1.0 - pos)).floor() as usize).max(1);
         let right_delay = (total - left_len as f32).max(1.0);
@@ -1576,9 +1609,9 @@ impl StringCore {
             lp_state: 0.0,
             out_integ: 0.0,
             out_gain: (0.0006 * f).clamp(0.03, 0.45),
-            disp_a: disp.clamp(-0.9, 0.9),
-            disp_x1: 0.0,
-            disp_y1: 0.0,
+            disp_a,
+            disp_x: [0.0; DISP_STAGES],
+            disp_y: [0.0; DISP_STAGES],
             rng: 0x2545_f491,
         }
     }
@@ -1646,11 +1679,14 @@ impl StringCore {
         self.lp_state += self.lp_a * (right_out - self.lp_state);
         let mut b = self.loss_g * self.lp_state;
         if self.disp_a != 0.0 {
-            // first-order allpass: y = a·x + x1 − a·y1
-            let y = self.disp_a * b + self.disp_x1 - self.disp_a * self.disp_y1;
-            self.disp_x1 = b;
-            self.disp_y1 = y;
-            b = y;
+            // cascade of first-order allpasses: y = a·x + x1 − a·y1
+            let a = self.disp_a;
+            for i in 0..DISP_STAGES {
+                let y = a * b + self.disp_x[i] - a * self.disp_y[i];
+                self.disp_x[i] = b;
+                self.disp_y[i] = y;
+                b = y;
+            }
         }
         let bridge_refl = -b;
         let nut_refl = -left_out;

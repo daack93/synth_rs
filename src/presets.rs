@@ -411,15 +411,37 @@ pub fn factory() -> Vec<Preset> {
 
     let mut base = vec![
         // ---- Plucked / struck strings on the shared waveguide (StringCore) ----
-        make("Acoustic Bass", plucked(0.15, 2.0, 0.40, 0.0, 30.0, 90.0, 0.8, 0.30), eng(0.75, 4.0, 120.0)),
-        make("Electric Bass", plucked(0.12, 2.6, 0.32, 0.0, 8.0, 100.0, 0.85, 0.20), eng(0.75, 4.0, 140.0)),
-        make("Acoustic Guitar", plucked(0.12, 2.5, 0.28, 0.0, 3.5, 200.0, 0.8, 0.35), eng(0.6, 3.0, 120.0)),
-        make("Electric Guitar", plucked(0.10, 3.0, 0.20, 0.0, 2.0, 250.0, 0.9, 0.15), eng(0.6, 3.0, 200.0)),
+        make("Acoustic Bass", plucked(0.15, 2.0, 0.40, 0.30, 30.0, 90.0, 0.8, 0.30), eng(0.75, 4.0, 120.0)),
+        make("Electric Bass", plucked(0.12, 2.6, 0.32, 0.30, 8.0, 100.0, 0.85, 0.20), eng(0.75, 4.0, 140.0)),
+        make("Acoustic Guitar", plucked(0.12, 2.5, 0.28, 0.40, 3.5, 200.0, 0.8, 0.35), eng(0.6, 3.0, 120.0)),
+        make("Electric Guitar", plucked(0.10, 3.0, 0.20, 0.50, 2.0, 250.0, 0.9, 0.15), eng(0.6, 3.0, 200.0)),
         // Less bass-heavy: brighter (more modes) with the highs allowed to sustain.
         make("Piano", string(0.600, 700.0, 1.10, STEEL, 3.5, 0.3, 0.12), eng(0.6, 2.0, 150.0)),
-        make("Banjo", plucked(0.08, 0.8, 0.12, 0.0, 4.0, 300.0, 0.85, 0.30), eng(0.6, 2.0, 80.0)),
+        make(
+            "Banjo",
+            InstrumentGraph {
+                components: vec![
+                    // Thin steel string (bright, inharmonic) over a tensioned
+                    // DRUMHEAD — a banjo's resonator is a membrane, not a wood box.
+                    Comp::PluckedString { pos: 0.08, decay: 0.8, damping: 0.12, stiffness: 0.6 },
+                    Comp::Membrane(DrumMembrane { radius_m: 0.14, tension_nm: 3400.0, areal_density_kgm2: 0.22, bending_nm: 0.02, decay_time: 0.1, hf_damping: 14.0, num_modes: 20, strike_pos: 0.5, ..DrumMembrane::default() }),
+                    Comp::Mix,
+                ],
+                edges: vec![
+                    Edge { from: 0, to: 2, gain: 0.5 }, // dry string pluck
+                    Edge { from: 0, to: 1, gain: 0.2 }, // string drives the head
+                    Edge { from: 1, to: 2, gain: 0.3 }, // resonating head → out
+                ],
+                output: 2,
+                key_map: vec![KeyBinding {
+                    component: 0,
+                    map: KeyMapKind::Power { param: "decay".into(), amount: -0.7 },
+                }],
+            },
+            eng(0.6, 2.0, 80.0),
+        ),
         // Rounder pluck + more HF damping to tame the "electric" low end.
-        make("Harp", plucked(0.16, 2.5, 0.25, 0.0, 20.0, 150.0, 0.8, 0.30), eng(0.6, 3.0, 180.0)),
+        make("Harp", plucked(0.16, 2.5, 0.25, 0.15, 20.0, 150.0, 0.8, 0.30), eng(0.6, 3.0, 180.0)),
         // ---- A/B twins: the ORIGINAL modal FTM string, same instruments, so the
         // waveguide plucked model above can be compared against it by ear ----
         make("Acoustic Bass (FTM)", string(0.864, 60.0, 1.30, NICKEL, 2.0, 0.5, 0.15), eng(0.75, 4.0, 120.0)),
