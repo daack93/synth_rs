@@ -786,10 +786,12 @@ impl InstrumentGraph {
         // tone but doesn't set pitch, and rebuilding a modal horn per solve step
         // is ~100× the cost of the reed. So strip to a one-node graph.
         let reed = self.components.get(comp).cloned();
-        let measure = |mult: f32, f: f32| -> f32 {
+        // Returns (pitch, rms). A long build-up lets even the slow, weak altissimo
+        // (tract-voiced) locks settle before the tail is measured.
+        let measure = |mult: f32, f: f32| -> (f32, f32) {
             let mut c = match &reed {
                 Some(c) => c.clone(),
-                None => return 0.0,
+                None => return (0.0, 0.0),
             };
             c.set_reed_register(f, anchor_hz, steps); // register + length only
             if let Comp::ReedBore { length, .. } = &mut c {
@@ -803,46 +805,56 @@ impl InstrumentGraph {
             };
             match g.build_graph(f, 1.0, sr) {
                 Some(mut n) => {
-                    // Enough time to build up + a tail of ≥20 periods, so the ACF
-                    // is accurate even for the lowest instruments (a contrabass
-                    // clarinet's ~37 Hz has a 1300-sample period).
-                    let warm = (0.15 * sr) as usize;
-                    let tail_len = ((20.0 * sr / f) as usize).clamp(4_000, 24_000);
-                    let total = warm + tail_len;
-                    let y: Vec<f32> = (0..total).map(|_| n.tick(&[])).collect();
+                    let warm = (0.3 * sr) as usize;
+                    let tail_len = ((24.0 * sr / f) as usize).clamp(8_000, 24_000);
+                    let y: Vec<f32> = (0..warm + tail_len).map(|_| n.tick(&[])).collect();
                     let tail = &y[warm..];
                     let rms = (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt();
                     if rms > 1e-3 {
-                        acf(tail, f)
+                        (acf(tail, f), rms)
                     } else {
-                        0.0
+                        (0.0, rms)
                     }
                 }
-                None => 0.0,
+                None => (0.0, 0.0),
             }
         };
+        let cents = |p: f32, f: f32| 1200.0 * (p / f).log2();
         let mut table = vec![1.0f32; 128];
         for note in 24u8..=108 {
             let f = super::REF_PITCH_HZ * 2f32.powf((note as f32 - 60.0) / 12.0);
+            // Baseline (no correction) — the calibration must beat this to be used.
+            let (p_raw, rms_raw) = measure(1.0, f);
+            if p_raw <= 0.0 {
+                continue; // didn't oscillate; leave 1.0
+            }
             // Bisect the length multiplier so the rendered pitch = f. Shorter bore
             // → sharper (f = c/2L), so flat pitch means shorten (smaller mult).
             let (mut lo, mut hi) = (0.82f32, 1.18f32);
-            let mut ok = false;
             for _ in 0..9 {
                 let m = (lo + hi) * 0.5;
-                let p = measure(m, f);
+                let (p, _) = measure(m, f);
                 if p <= 0.0 {
-                    break; // didn't oscillate; leave 1.0
+                    break;
                 }
-                ok = true;
                 if p < f {
                     hi = m; // flat → shorten the bore
                 } else {
                     lo = m;
                 }
             }
-            if ok {
-                table[note as usize] = (lo + hi) * 0.5;
+            let m = (lo + hi) * 0.5;
+            // Accept the correction only if it genuinely improves tuning AND keeps
+            // the note sounding. The finicky altissimo registers can otherwise be
+            // detuned or choked by a length the pitch-solver liked in isolation;
+            // there we keep the raw geometry (audible, if not perfectly in tune)
+            // rather than make it worse.
+            let (p_cal, rms_cal) = measure(m, f);
+            if p_cal > 0.0
+                && cents(p_cal, f).abs() < cents(p_raw, f).abs()
+                && rms_cal > 0.6 * rms_raw
+            {
+                table[note as usize] = m;
             }
         }
         table
