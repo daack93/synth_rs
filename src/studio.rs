@@ -2317,6 +2317,64 @@ mod tests {
         assert!(buf.iter().all(|s| s.is_finite() && s.abs() <= 1.0001));
     }
 
+    // Record a defining take so a song/loop exists, leaving it playing.
+    fn record_a_loop(s: &mut Studio, frames: usize) {
+        s.tempo.count_in = false;
+        s.handle(Command::Record);
+        s.handle(Command::NoteOn { note: 60, vel: 1.0 });
+        drain(s, frames);
+        s.handle(Command::NoteOff { note: 60 });
+        s.handle(Command::Record); // finish the defining take → loop set, playing
+        assert!(s.song_frames.is_some(), "a song exists after the defining take");
+    }
+
+    #[test]
+    fn stop_rewinds_to_the_start() {
+        let mut s = Studio::new(48_000.0);
+        record_a_loop(&mut s, 4800);
+        drain(&mut s, 2000);
+        assert!(s.pos > 0, "playhead advanced");
+        s.handle(Command::Stop);
+        assert!(!s.playing);
+        assert_eq!(s.pos, 0, "Stop rewinds the seek cursor to the start");
+    }
+
+    #[test]
+    fn play_pauses_in_place_and_resumes() {
+        let mut s = Studio::new(48_000.0);
+        record_a_loop(&mut s, 4800);
+        drain(&mut s, 2000);
+        let at = s.pos;
+        assert!(at > 0);
+        s.handle(Command::Play); // second press = pause
+        assert!(!s.playing, "second Play pauses");
+        assert_eq!(s.pos, at, "pause keeps the cursor where it is");
+        s.handle(Command::Play); // resume
+        assert!(s.playing, "third Play resumes");
+        assert_eq!(s.pos, at, "resume continues from the same spot");
+    }
+
+    #[test]
+    fn punchin_clip_is_recorded_length_not_song_length() {
+        let mut s = Studio::new(48_000.0);
+        record_a_loop(&mut s, 9600); // a long loop
+        let period = s.tracks[0].period;
+        assert!(period >= 9000, "period is the full loop");
+        // Punch in a SHORT overdub while playing, then stop early.
+        drain(&mut s, 500);
+        s.handle(Command::Record); // punch-in
+        assert!(s.armed || s.recording.is_some(), "punched in");
+        s.handle(Command::NoteOn { note: 67, vel: 1.0 });
+        drain(&mut s, 1200); // record ~25 ms, far less than the period
+        s.handle(Command::NoteOff { note: 67 });
+        s.handle(Command::Stop);
+        let lengths: Vec<u64> = s.arrangement.iter().map(|c| c.length).collect();
+        assert!(
+            s.arrangement.iter().any(|c| c.length > 0 && c.length < period / 2),
+            "a punch-in clip should be ~the recorded length, not the song period; clip lengths = {lengths:?}"
+        );
+    }
+
     #[test]
     fn pedal_record_then_play_fires_track() {
         let mut s = Studio::new(48_000.0);
