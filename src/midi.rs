@@ -213,29 +213,39 @@ const LK_DAW_MODE_ON: [u8; 3] = [0x9F, 0x0C, 0x7F];
 const LK_DAW_MODE_OFF: [u8; 3] = [0x9F, 0x0C, 0x00];
 const LK_FEATURE_ON: [u8; 3] = [0x9F, 0x0B, 0x7F];
 
+const PAD_REST: u8 = 3;  // dim resting pad colour
+const PAD_HIT: u8 = 21;  // bright colour while a pad is held
+
 /// A live connection to a Launchkey in DAW mode. Holds the keys input, the DAW
 /// input, and the DAW output (kept open for LED/screen feedback). Dropping it
 /// returns the device to standalone mode.
+type SharedOut = Arc<std::sync::Mutex<MidiOutputConnection>>;
+
 pub struct LaunchkeyHandle {
     _keys_in: MidiInputConnection<()>,
     _daw_in: MidiInputConnection<()>,
-    daw_out: MidiOutputConnection,
+    daw_out: SharedOut,
     pub keys_port: String,
     pub daw_port: String,
 }
 
+fn send_out(out: &SharedOut, bytes: &[u8]) {
+    if let Ok(mut o) = out.lock() {
+        let _ = o.send(bytes);
+    }
+}
+
 impl Drop for LaunchkeyHandle {
     fn drop(&mut self) {
-        // Return the Launchkey to standalone (MIDI) mode.
-        let _ = self.daw_out.send(&LK_DAW_MODE_OFF);
+        send_out(&self.daw_out, &LK_DAW_MODE_OFF); // back to standalone
     }
 }
 
 impl LaunchkeyHandle {
-    /// Send raw bytes to the DAW port (for LED colour / screen feedback).
+    /// Send raw bytes to the DAW port (LED colour / screen feedback).
     #[allow(dead_code)]
     pub fn send(&mut self, bytes: &[u8]) {
-        let _ = self.daw_out.send(bytes);
+        send_out(&self.daw_out, bytes);
     }
 }
 
@@ -289,18 +299,7 @@ pub fn connect_launchkey(
         .connect(&kp, "ftm_synth-lk-keys", move |_, m, _| handle_message(m, &tx_keys, &mon), ())
         .map_err(|e| e.to_string())?;
 
-    // --- DAW input (transport / encoders / pads) ---
-    let mut daw_in = MidiInput::new("ftm_synth-lk-daw").map_err(|e| e.to_string())?;
-    daw_in.ignore(midir::Ignore::None);
-    let dp = port_by_name(&daw_in, &daw_name).ok_or("DAW port vanished")?;
-    let tx_daw = tx.clone();
-    let log_daw = log.clone();
-    let enc_daw = encoders.clone();
-    let daw_conn = daw_in
-        .connect(&dp, "ftm_synth-lk-daw", move |_, m, _| handle_daw_message(m, &tx_daw, &log_daw, &enc_daw), ())
-        .map_err(|e| e.to_string())?;
-
-    // --- DAW output (handshakes + feedback) ---
+    // --- DAW output FIRST (the pad handler needs it for hit-lighting) ---
     // Match the output port FUZZILY: on macOS the device's input and output port
     // names differ ("… DAW Out" vs "… DAW In"), so we can't reuse the input name.
     let daw_out_io = MidiOutput::new("ftm_synth-lk-out").map_err(|e| e.to_string())?;
@@ -320,15 +319,32 @@ pub fn connect_launchkey(
                 .collect();
             format!("no Launchkey DAW output port; outputs seen: [{}]", names.join(", "))
         })?;
-    let mut daw_out = daw_out_io.connect(&op, "ftm_synth-lk-out").map_err(|e| e.to_string())?;
-    daw_out.send(&LK_DAW_MODE_ON).map_err(|e| e.to_string())?;
-    daw_out.send(&LK_FEATURE_ON).map_err(|e| e.to_string())?;
-    // Light the pads a dim colour so the surface is visibly under our control.
+    let daw_out: SharedOut =
+        Arc::new(std::sync::Mutex::new(daw_out_io.connect(&op, "ftm_synth-lk-out").map_err(|e| e.to_string())?));
+    send_out(&daw_out, &LK_DAW_MODE_ON);
+    send_out(&daw_out, &LK_FEATURE_ON);
+    // Light the pads a dim resting colour so the surface is visibly ours.
     for row in [0x60u8, 0x70u8] {
         for i in 0..8u8 {
-            let _ = daw_out.send(&[0x90, row + i, 3]);
+            send_out(&daw_out, &[0x90, row + i, PAD_REST]);
         }
     }
+    // Label encoders 1-4 on the screen (their live values auto-display on turn).
+    for (i, name) in ["Gain", "Attack", "Release", "Retrig"].iter().enumerate() {
+        set_encoder_name(&daw_out, i as u8, name);
+    }
+
+    // --- DAW input (transport / encoders / pads) — has the output for LEDs ---
+    let mut daw_in = MidiInput::new("ftm_synth-lk-daw").map_err(|e| e.to_string())?;
+    daw_in.ignore(midir::Ignore::None);
+    let dp = port_by_name(&daw_in, &daw_name).ok_or("DAW port vanished")?;
+    let tx_daw = tx.clone();
+    let log_daw = log.clone();
+    let enc_daw = encoders.clone();
+    let out_daw = daw_out.clone();
+    let daw_conn = daw_in
+        .connect(&dp, "ftm_synth-lk-daw", move |_, m, _| handle_daw_message(m, &tx_daw, &log_daw, &enc_daw, &out_daw), ())
+        .map_err(|e| e.to_string())?;
 
     Ok(LaunchkeyHandle {
         _keys_in: keys_conn,
@@ -337,6 +353,20 @@ pub fn connect_launchkey(
         keys_port: keys_name,
         daw_port: daw_name,
     })
+}
+
+/// Configure an encoder's OLED display (name + live numeric value, auto-shown on
+/// change) and set its name text. Target = the encoder's CC index (0x15 + idx).
+fn set_encoder_name(out: &SharedOut, idx: u8, name: &str) {
+    let target = 0x15 + idx;
+    // Configure: header 04 <target> <config>; config 0x44 = arrangement 4
+    // (name + numeric value) with bit6 (auto temp-display on change).
+    send_out(out, &[0xF0, 0x00, 0x20, 0x29, 0x02, 0x14, 0x04, target, 0x44, 0xF7]);
+    // Set name (field 0): header 06 <target> 00 <ascii…>.
+    let mut msg = vec![0xF0, 0x00, 0x20, 0x29, 0x02, 0x14, 0x06, target, 0x00];
+    msg.extend(name.bytes().filter(|b| (0x20..=0x7E).contains(b)));
+    msg.push(0xF7);
+    send_out(out, &msg);
 }
 
 /// The 2×8 DAW pad grid maps note indices 0x60–0x77 to pad 0..16
@@ -355,7 +385,7 @@ impl LaunchkeyHandle {
     pub fn light_pads(&mut self, colour: u8) {
         for row in [0x60u8, 0x70u8] {
             for i in 0..8u8 {
-                let _ = self.daw_out.send(&[0x90, row + i, colour & 0x7F]);
+                send_out(&self.daw_out, &[0x90, row + i, colour & 0x7F]);
             }
         }
     }
@@ -363,14 +393,14 @@ impl LaunchkeyHandle {
     /// Set a transport button's LED (Play/Stop/Record are CC on ch1). Colour is
     /// a palette index; 0 = off.
     pub fn set_button_led(&mut self, cc: u8, colour: u8) {
-        let _ = self.daw_out.send(&[0xB0, cc, colour & 0x7F]);
+        send_out(&self.daw_out, &[0xB0, cc, colour & 0x7F]);
     }
 }
 
 /// Handle a message on the Launchkey DAW port. Transport buttons map to the
 /// arrangement transport; everything else is logged so the button/encoder CCs
 /// can be confirmed against the hardware.
-fn handle_daw_message(message: &[u8], tx: &Sender<Command>, log: &DawMonitor, enc: &EncoderMonitor) {
+fn handle_daw_message(message: &[u8], tx: &Sender<Command>, log: &DawMonitor, enc: &EncoderMonitor, out: &SharedOut) {
     if message.len() < 3 {
         return;
     }
@@ -408,9 +438,11 @@ fn handle_daw_message(message: &[u8], tx: &Sender<Command>, log: &DawMonitor, en
         match status & 0xF0 {
             0x90 if d2 > 0 => {
                 let _ = tx.send(Command::NoteOn { note, vel: d2 as f32 / 127.0 });
+                send_out(out, &[0x90, d1, PAD_HIT]); // light while held
             }
             0x90 | 0x80 => {
                 let _ = tx.send(Command::NoteOff { note });
+                send_out(out, &[0x90, d1, PAD_REST]); // back to resting
             }
             _ => {}
         }
