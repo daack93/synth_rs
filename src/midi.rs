@@ -260,8 +260,25 @@ pub fn connect_launchkey(
         .map_err(|e| e.to_string())?;
 
     // --- DAW output (handshakes + feedback) ---
+    // Match the output port FUZZILY: on macOS the device's input and output port
+    // names differ ("… DAW Out" vs "… DAW In"), so we can't reuse the input name.
     let daw_out_io = MidiOutput::new("ftm_synth-lk-out").map_err(|e| e.to_string())?;
-    let op = port_by_name(&daw_out_io, &daw_name).ok_or("DAW out port vanished")?;
+    let is_lk_daw = |n: &str| {
+        let n = n.to_lowercase();
+        (n.contains("launchkey") || n.contains("launch key")) && n.contains("daw")
+    };
+    let out_ports = daw_out_io.ports();
+    let op = out_ports
+        .iter()
+        .find(|p| daw_out_io.port_name(p).as_deref().map(is_lk_daw).unwrap_or(false))
+        .cloned()
+        .ok_or_else(|| {
+            let names: Vec<String> = out_ports
+                .iter()
+                .map(|p| daw_out_io.port_name(p).unwrap_or_default())
+                .collect();
+            format!("no Launchkey DAW output port; outputs seen: [{}]", names.join(", "))
+        })?;
     let mut daw_out = daw_out_io.connect(&op, "ftm_synth-lk-out").map_err(|e| e.to_string())?;
     daw_out.send(&LK_DAW_MODE_ON).map_err(|e| e.to_string())?;
     daw_out.send(&LK_FEATURE_ON).map_err(|e| e.to_string())?;
