@@ -187,6 +187,11 @@ struct App {
     midi_ports: Vec<String>,
     midi_sel: Option<usize>,
     _midi: Option<MidiInputHandle>,
+    /// Novation Launchkey DAW-mode control surface (kept alive; drop = exit DAW).
+    _launchkey: Option<midi::LaunchkeyHandle>,
+    encoders: midi::EncoderMonitor,
+    /// Last transport state pushed to the Launchkey LEDs (to detect changes).
+    last_transport: TransportState,
     /// Shared "last note played" for MIDI-learn on pitch fields.
     note_monitor: midi::NoteMonitor,
     midi_status: String,
@@ -265,6 +270,9 @@ impl App {
             midi_ports,
             midi_sel: None,
             _midi: None,
+            _launchkey: None,
+            encoders: midi::EncoderMonitor::default(),
+            last_transport: TransportState::Recording,
             note_monitor: midi::NoteMonitor::default(),
             midi_status: "not connected".to_string(),
             ge: graph_editor::GeState::default(),
@@ -463,6 +471,31 @@ impl App {
     }
 
     fn connect_midi(&mut self, index: usize) {
+        // Selecting the Launchkey's DAW port engages the full DAW-mode control
+        // surface (transport, encoders, pads, LED + screen feedback); it finds
+        // the matching keys port itself. Any other port is a plain MIDI input.
+        let name = self.midi_ports.get(index).cloned().unwrap_or_default();
+        let n = name.to_lowercase();
+        let is_launchkey_daw =
+            (n.contains("launchkey") || n.contains("launch key")) && n.contains("daw");
+        if is_launchkey_daw {
+            self._midi = None;
+            match midi::connect_launchkey(self.tx.clone(), self.note_monitor.clone(), self.encoders.clone()) {
+                Ok(h) => {
+                    self.midi_status = format!("Launchkey DAW mode: {}", h.daw_port);
+                    self._launchkey = Some(h);
+                    self.midi_sel = Some(index);
+                }
+                Err(e) => {
+                    self.midi_status = format!("error: {e}");
+                    self._launchkey = None;
+                    self.midi_sel = None;
+                }
+            }
+            return;
+        }
+        // A plain input — and leave DAW mode if we were in it (drop = standalone).
+        self._launchkey = None;
         match midi::connect(index, self.tx.clone(), self.note_monitor.clone()) {
             Ok(h) => {
                 self.midi_status = format!("connected: {}", h.port_name);
@@ -551,6 +584,48 @@ impl eframe::App for App {
         // Publish the last note played for MIDI-learn pitch fields to read.
         let latest = self.note_monitor.latest();
         ctx.data_mut(|d| d.insert_temp(egui::Id::new("note_monitor"), latest));
+
+        // Apply any Launchkey encoder moves to the live engine params, in sync
+        // with the on-screen sliders. Encoders 1-4 → gain / attack / release /
+        // retrigger; 5-8 are unmapped for now.
+        let enc = self.encoders.take_changes();
+        let mut eng_changed = false;
+        for (i, v) in enc.iter().enumerate() {
+            if let Some(v) = v {
+                let n = *v as f32 / 127.0;
+                match i {
+                    0 => self.engine.gain = n * 2.0,          // 0 .. 2.0
+                    1 => self.engine.attack_ms = n * 1000.0,  // 0 .. 1000 ms
+                    2 => self.engine.release_ms = (n * 2000.0).max(1.0),
+                    3 => self.engine.retrigger_ms = n * 500.0,
+                    _ => continue,
+                }
+                eng_changed = true;
+            }
+        }
+        if eng_changed {
+            let _ = self.tx.send(Command::SetEngine(self.engine.clone()));
+        }
+
+        // Reflect the transport state on the Launchkey's Play/Record LEDs.
+        let state = self
+            .view
+            .as_ref()
+            .map(|v| v.state())
+            .unwrap_or(TransportState::Idle);
+        if state != self.last_transport {
+            self.last_transport = state;
+            if let Some(lk) = self._launchkey.as_mut() {
+                let (play, rec) = match state {
+                    TransportState::Playing => (21, 0),   // green play
+                    TransportState::Recording => (21, 5), // green play + red rec
+                    _ => (0, 0),
+                };
+                lk.set_button_led(0x73, play);
+                lk.set_button_led(0x75, rec);
+                lk.set_button_led(0x74, 3); // stop: dim white
+            }
+        }
 
         self.handle_computer_keyboard(ctx);
 
@@ -1338,6 +1413,7 @@ impl App {
             }
         });
         ui.label(egui::RichText::new(&self.midi_status).weak());
+
     }
 
     /// Transport controls: play / record / repeat and the tempo grid.

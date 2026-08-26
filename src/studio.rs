@@ -1017,10 +1017,11 @@ impl Studio {
             return;
         }
         if self.song_frames.is_some() {
-            self.playing = !self.playing; // toggle play / pause
-            if self.playing {
-                self.reset_cursors();
-            } else {
+            // Toggle play / pause, keeping the cursor where it is: pressing Play
+            // resumes from the current position; pressing it again pauses there.
+            // (Stop is what rewinds to the start.)
+            self.playing = !self.playing;
+            if !self.playing {
                 // Pausing: release held notes so nothing sticks on.
                 for t in &mut self.tracks {
                     t.inst.release_all();
@@ -1097,6 +1098,9 @@ impl Studio {
         self.defining = false;
         self.pre_roll = 0;
         self.pending = None;
+        // Stop rewinds to the beginning (Play/pause keeps position; Stop resets).
+        self.pos = 0;
+        self.reset_cursors();
         self.live.all_notes_off();
         for t in &mut self.tracks {
             t.inst.all_notes_off();
@@ -1479,11 +1483,16 @@ impl Studio {
             if removed {
                 self.remove_track(idx);
             } else if !self.arrangement.iter().any(|c| c.track == idx) {
-                // Auto-place the new track — at the playhead (arrange punch-in) or 0.
-                // Give it a concrete one-loop length so it never fills to the song
-                // end (which would grow/overlap as the arrangement changes).
-                let period = self.tracks.get(idx).map(|t| t.period.max(1)).unwrap_or(1);
-                self.arrangement.push(Clip::at(idx, origin, period));
+                // Auto-place the new take. The DEFINING take is the loop itself,
+                // so it spans a full period; a later punch-in clip is exactly what
+                // was recorded (origin → where recording stopped), NOT the whole
+                // period — otherwise it stretches to the song length.
+                let clip_len = if self.defining {
+                    self.tracks.get(idx).map(|t| t.period.max(1)).unwrap_or(1)
+                } else {
+                    recorded_len.max(1)
+                };
+                self.arrangement.push(Clip::at(idx, origin, clip_len));
             }
         }
         self.rec_origin = 0;
@@ -2306,6 +2315,64 @@ mod tests {
         let mut buf = vec![0.0f32; frames];
         studio.render(&mut buf, 1);
         assert!(buf.iter().all(|s| s.is_finite() && s.abs() <= 1.0001));
+    }
+
+    // Record a defining take so a song/loop exists, leaving it playing.
+    fn record_a_loop(s: &mut Studio, frames: usize) {
+        s.tempo.count_in = false;
+        s.handle(Command::Record);
+        s.handle(Command::NoteOn { note: 60, vel: 1.0 });
+        drain(s, frames);
+        s.handle(Command::NoteOff { note: 60 });
+        s.handle(Command::Record); // finish the defining take → loop set, playing
+        assert!(s.song_frames.is_some(), "a song exists after the defining take");
+    }
+
+    #[test]
+    fn stop_rewinds_to_the_start() {
+        let mut s = Studio::new(48_000.0);
+        record_a_loop(&mut s, 4800);
+        drain(&mut s, 2000);
+        assert!(s.pos > 0, "playhead advanced");
+        s.handle(Command::Stop);
+        assert!(!s.playing);
+        assert_eq!(s.pos, 0, "Stop rewinds the seek cursor to the start");
+    }
+
+    #[test]
+    fn play_pauses_in_place_and_resumes() {
+        let mut s = Studio::new(48_000.0);
+        record_a_loop(&mut s, 4800);
+        drain(&mut s, 2000);
+        let at = s.pos;
+        assert!(at > 0);
+        s.handle(Command::Play); // second press = pause
+        assert!(!s.playing, "second Play pauses");
+        assert_eq!(s.pos, at, "pause keeps the cursor where it is");
+        s.handle(Command::Play); // resume
+        assert!(s.playing, "third Play resumes");
+        assert_eq!(s.pos, at, "resume continues from the same spot");
+    }
+
+    #[test]
+    fn punchin_clip_is_recorded_length_not_song_length() {
+        let mut s = Studio::new(48_000.0);
+        record_a_loop(&mut s, 9600); // a long loop
+        let period = s.tracks[0].period;
+        assert!(period >= 9000, "period is the full loop");
+        // Punch in a SHORT overdub while playing, then stop early.
+        drain(&mut s, 500);
+        s.handle(Command::Record); // punch-in
+        assert!(s.armed || s.recording.is_some(), "punched in");
+        s.handle(Command::NoteOn { note: 67, vel: 1.0 });
+        drain(&mut s, 1200); // record ~25 ms, far less than the period
+        s.handle(Command::NoteOff { note: 67 });
+        s.handle(Command::Stop);
+        let lengths: Vec<u64> = s.arrangement.iter().map(|c| c.length).collect();
+        assert!(
+            s.arrangement.iter().any(|c| c.length > 0 && c.length < period / 2),
+            "a punch-in clip should be ~the recorded length, not the song period; clip lengths = {lengths:?}"
+        );
     }
 
     #[test]
