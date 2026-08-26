@@ -193,15 +193,14 @@ pub enum Comp {
     /// A digital-waveguide bowed string — a self-contained voice (string delays +
     /// bridge + friction junction) that locks into Helmholtz stick-slip.
     /// `speed` = bow velocity, `force` = bow pressure.
-    /// A digital-waveguide bowed string (friction bow on the shared StringCore),
-    /// grounded in real string physics like PluckedString. `core_mm` is the
-    /// bending core; `open_hz` the open-string pitch; `speed`/`force` the bow.
+    /// A digital-waveguide bowed string (friction bow on the shared StringCore).
+    /// `bow_pos` = beta (bow-to-bridge fraction; ~0.08 normal, smaller = brighter);
+    /// `brightness` 0..1 keeps the sawtooth's upper partials; `speed`/`force` are
+    /// the bow (both scale with note velocity -- dynamics). A bowed string is
+    /// periodic, so its inharmonicity is ~0 (see WaveguideBow).
     BowedString {
-        length_m: f32,
-        tension_n: f32,
-        core_mm: f32,
-        youngs_gpa: f32,
-        open_hz: f32,
+        bow_pos: f32,
+        brightness: f32,
         speed: f32,
         force: f32,
     },
@@ -434,10 +433,8 @@ impl Comp {
                 let l = if *length > 0.0 { *length } else { C_AIR / (2.0 * freq_hz.max(1.0)) };
                 Box::new(JetPipe::new(l, *pressure, *jet_ratio, *tone, sr))
             }
-            Comp::BowedString { length_m, tension_n, core_mm, youngs_gpa, open_hz, speed, force } => {
-                Box::new(WaveguideBow::from_physical(
-                    freq_hz, *length_m, *tension_n, *core_mm, *youngs_gpa, *open_hz, *speed, *force, vel, sr,
-                ))
+            Comp::BowedString { bow_pos, brightness, speed, force } => {
+                Box::new(WaveguideBow::new(freq_hz, *bow_pos, *brightness, *speed, *force, vel, sr))
             }
             Comp::PluckedString { length_m, tension_n, core_mm, youngs_gpa, open_hz, pos, decay, damping } => {
                 Box::new(WaveguidePluck::from_physical(
@@ -667,13 +664,13 @@ impl Comp {
                     .changed();
                 c
             }
-            Comp::BowedString { length_m, tension_n, core_mm, youngs_gpa, open_hz, speed, force } => {
+            Comp::BowedString { bow_pos, brightness, speed, force } => {
                 let mut c = false;
-                c |= ui.add(unbounded_slider(length_m, 0.1..=1.5, "Length (m)")).changed();
-                c |= ui.add(unbounded_slider(tension_n, 20.0..=400.0, "Tension (N)")).changed();
-                c |= ui.add(unbounded_slider(core_mm, 0.1..=1.5, "Core / stiffness gauge (mm)")).changed();
-                c |= ui.add(unbounded_slider(youngs_gpa, 4.0..=220.0, "Young's modulus (GPa)")).changed();
-                c |= ui.add(unbounded_slider(open_hz, 20.0..=440.0, "Open-string pitch (Hz)")).changed();
+                c |= ui
+                    .add(unbounded_slider(bow_pos, 0.04..=0.25, "Bow position (bridge -> tasto)"))
+                    .on_hover_text("Bow-to-bridge distance as a fraction of the string. ~0.08 normal; smaller = near the bridge (brighter/ponticello).")
+                    .changed();
+                c |= ui.add(unbounded_slider(brightness, 0.0..=1.0, "Brightness")).changed();
                 c |= ui.add(unbounded_slider(speed, 0.2..=3.0, "Bow speed")).changed();
                 c |= ui.add(unbounded_slider(force, 0.1..=2.0, "Bow force")).changed();
                 c
@@ -1524,7 +1521,7 @@ impl FtmModel for InstrumentGraph {
                 changed = true;
             }
             if ui.small_button("Bowed string").clicked() {
-                self.components.push(Comp::BowedString { length_m: 0.33, tension_n: 70.0, core_mm: 0.3, youngs_gpa: 200.0, open_hz: 196.0, speed: 0.6, force: 0.4 });
+                self.components.push(Comp::BowedString { bow_pos: 0.09, brightness: 0.6, speed: 0.6, force: 0.4 });
                 changed = true;
             }
             if ui.small_button("Plucked string").clicked() {

@@ -1965,33 +1965,29 @@ pub struct WaveguideBow {
 }
 
 impl WaveguideBow {
-    /// Grounded: real string specs set the core's dispersion/tuning.
+    /// `bow_pos` is β, the bow-to-bridge distance as a fraction of the string
+    /// (~0.08 normal; smaller = closer to the bridge, brighter/ponticello). It
+    /// sets the interaction point (and the comb that suppresses partials near
+    /// 1/β). `brightness` (0..1) keeps the upper partials of the Helmholtz
+    /// sawtooth. A bowed string is driven into PERIODIC motion, so B=0
+    /// (dispersion would smear the travelling corner and break the stick-slip
+    /// lock — measured: even B=0.0002 kills the tone above ~300 Hz).
     #[allow(clippy::too_many_arguments)]
-    pub fn from_physical(
+    pub fn new(
         freq_hz: f32,
-        length_m: f32,
-        tension_n: f32,
-        core_mm: f32,
-        youngs_gpa: f32,
-        open_hz: f32,
+        bow_pos: f32,
+        brightness: f32,
         speed: f32,
         force: f32,
         velocity: f32,
         sr: f32,
     ) -> Self {
-        // A bowed string is driven into PERIODIC Helmholtz motion, which
-        // suppresses inharmonicity — and any dispersion smears the travelling
-        // corner so the stick-slip can't lock (measured: even B=0.0002 kills the
-        // tone above ~300 Hz). So the bow uses an ideal (B=0) string; the specs
-        // still identify it (length/tension/gauge/open pitch) for the UI + future
-        // impedance-based bow force.
-        let _ = (length_m, tension_n, core_mm, youngs_gpa, open_hz);
-        let core = StringCore::new(freq_hz, 0.13, 1.2, 0.35, 0.0, sr);
-        // Dynamics: a harder key press bows FASTER (louder, brighter). And a good
-        // player tracks the bow force with the speed — at Schelleng's window
-        // centre the optimal force F* = √(Fmin·Fmax) ∝ v — so press harder when
-        // bowing faster, keeping the tone in the clean-Helmholtz window instead of
-        // whistling (too little) or crunching (too much).
+        let damping = (1.0 - brightness.clamp(0.0, 1.0)) * 0.6; // 0 bright .. 0.6 dark
+        let core = StringCore::new(freq_hz, bow_pos.clamp(0.04, 0.3), 1.2, damping, 0.0, sr);
+        // Dynamics: a harder key press bows FASTER (louder, brighter), and a good
+        // player tracks the bow force with the speed — at Schelleng's window centre
+        // the optimal force F* = √(Fmin·Fmax) ∝ v, so press harder when bowing
+        // faster to stay in the clean-Helmholtz window (not whistle / crunch).
         let dynamic = 0.4 + 0.6 * velocity.clamp(0.0, 1.0);
         Self::wrap(core, speed * dynamic, force * dynamic, sr)
     }

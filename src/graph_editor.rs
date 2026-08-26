@@ -489,7 +489,7 @@ fn add_menu() -> Vec<(&'static str, Vec<(&'static str, fn() -> Comp)>)> {
             "Waveguide",
             vec![
                 ("Reed pipe", || Comp::ReedPipe { pressure: 0.9, stiffness: 1.0, tone: 1.0 }),
-                ("Bowed string", || Comp::BowedString { length_m: 0.33, tension_n: 70.0, core_mm: 0.3, youngs_gpa: 200.0, open_hz: 196.0, speed: 0.6, force: 0.4 }),
+                ("Bowed string", || Comp::BowedString { bow_pos: 0.09, brightness: 0.6, speed: 0.6, force: 0.4 }),
                 ("Air column (bore)", || Comp::Bore { tone: 1.0, length: 0.0 }),
                 ("Waveguide horn", || Comp::WaveguideHorn { r1: 0.0073, r2: 0.0, r3: 0.002, length: 0.334, segments: 18, tone: 1.0 }),
             ],

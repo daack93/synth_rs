@@ -363,6 +363,39 @@ pub fn factory() -> Vec<Preset> {
     // A plucked/struck string on the shared waveguide core (StringCore), lightly
     // coloured by an instrument body. Pitch tracks the played note; these are the
     // physical tone controls (pluck position, decay, HF damping, stiffness).
+    // Grounded bowed string → body: a stick-slip bow into a body carrying the real
+    // signature resonances — the A0 air (Helmholtz) resonance, the main-wood plate,
+    // and the ~2 kHz "bridge hill" brilliance formant that gives strings presence.
+    #[allow(clippy::too_many_arguments)]
+    fn bowed_graph(
+        bow_pos: f32,
+        brightness: f32,
+        speed: f32,
+        force: f32,
+        air_cav: f32,
+        air_hole: f32,
+        wood_hz: f32,
+        bh_hz: f32,
+    ) -> InstrumentGraph {
+        InstrumentGraph {
+            components: vec![
+                Comp::BowedString { bow_pos, brightness, speed, force },
+                Comp::Body { cavity_litres: air_cav, soundhole_cm: air_hole, top_hz: wood_hz, decay_s: 0.14 },
+                Comp::Body { cavity_litres: 0.0, soundhole_cm: 0.0, top_hz: bh_hz, decay_s: 0.06 },
+                Comp::Mix,
+            ],
+            edges: vec![
+                Edge { from: 0, to: 3, gain: 0.7 },   // dry string
+                Edge { from: 0, to: 1, gain: 1.0 },   // string → main body (air + wood)
+                Edge { from: 1, to: 3, gain: 0.35 },  // main body colour → out
+                Edge { from: 0, to: 2, gain: 1.0 },   // string → bridge hill
+                Edge { from: 2, to: 3, gain: 0.15 },  // brilliance formant → out
+            ],
+            output: 3,
+            key_map: Vec::new(),
+        }
+    }
+
     // Grounded plucked string: the inharmonicity is DERIVED from real string
     // physics (core/stiffness gauge, tension, length, Young's modulus of the
     // bending-resisting CORE — steel for a wound string, nylon for a nylon one).
@@ -1008,96 +1041,13 @@ pub fn factory() -> Vec<Preset> {
             },
             eng(0.55, 2.0, 300.0),
         ),
-        make(
-            "Violin",
-            InstrumentGraph {
-                components: vec![
-                    Comp::BowedString { length_m: 0.328, tension_n: 70.0, core_mm: 0.28, youngs_gpa: 200.0, open_hz: 196.0, speed: 0.6, force: 0.4 },
-                    Comp::Body { cavity_litres: 2.2, soundhole_cm: 3.2, top_hz: 280.0, decay_s: 0.35 },
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 2, gain: 0.8 }, // dry string → out
-                    Edge { from: 0, to: 1, gain: 1.0 }, // string → body
-                    Edge { from: 1, to: 2, gain: 0.3 }, // body colour → out
-                ],
-                output: 2,
-                key_map: Vec::new(),
-            },
-            eng(0.5, 45.0, 200.0),
-        ),
-        make(
-            "Viola",
-            InstrumentGraph {
-                components: vec![
-                    Comp::BowedString { length_m: 0.380, tension_n: 55.0, core_mm: 0.35, youngs_gpa: 200.0, open_hz: 130.8, speed: 0.6, force: 0.45 },
-                    Comp::Body { cavity_litres: 4.5, soundhole_cm: 3.8, top_hz: 210.0, decay_s: 0.38 },
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 2, gain: 0.8 }, // dry string → out
-                    Edge { from: 0, to: 1, gain: 1.0 }, // string → body
-                    Edge { from: 1, to: 2, gain: 0.3 }, // body colour → out
-                ],
-                output: 2,
-                key_map: Vec::new(),
-            },
-            eng(0.5, 45.0, 200.0),
-        ),
-        make(
-            "Cello",
-            InstrumentGraph {
-                components: vec![
-                    Comp::BowedString { length_m: 0.690, tension_n: 150.0, core_mm: 0.55, youngs_gpa: 200.0, open_hz: 65.4, speed: 0.6, force: 0.45 },
-                    Comp::Body { cavity_litres: 28.0, soundhole_cm: 6.5, top_hz: 105.0, decay_s: 0.5 },
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 2, gain: 0.8 }, // dry string → out
-                    Edge { from: 0, to: 1, gain: 1.0 }, // string → body
-                    Edge { from: 1, to: 2, gain: 0.3 }, // body colour → out
-                ],
-                output: 2,
-                key_map: Vec::new(),
-            },
-            eng(0.5, 50.0, 220.0),
-        ),
-        make(
-            "Double Bass",
-            InstrumentGraph {
-                components: vec![
-                    Comp::BowedString { length_m: 1.060, tension_n: 250.0, core_mm: 0.90, youngs_gpa: 200.0, open_hz: 41.2, speed: 0.6, force: 0.5 },
-                    Comp::Body { cavity_litres: 120.0, soundhole_cm: 11.5, top_hz: 60.0, decay_s: 0.6 },
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 2, gain: 0.8 }, // dry string → out
-                    Edge { from: 0, to: 1, gain: 1.0 }, // string → body
-                    Edge { from: 1, to: 2, gain: 0.3 }, // body colour → out
-                ],
-                output: 2,
-                key_map: Vec::new(),
-            },
-            eng(0.5, 50.0, 250.0),
-        ),
-        make(
-            "Hurdy-Gurdy",
-            InstrumentGraph {
-                components: vec![
-                    Comp::BowedString { length_m: 0.350, tension_n: 70.0, core_mm: 0.40, youngs_gpa: 200.0, open_hz: 196.0, speed: 0.6, force: 0.45 },
-                    Comp::Body { cavity_litres: 12.0, soundhole_cm: 0.0, top_hz: 160.0, decay_s: 0.4 },
-                    Comp::Mix,
-                ],
-                edges: vec![
-                    Edge { from: 0, to: 2, gain: 0.8 }, // dry string → out
-                    Edge { from: 0, to: 1, gain: 1.0 }, // string → body
-                    Edge { from: 1, to: 2, gain: 0.3 }, // body colour → out
-                ],
-                output: 2,
-                key_map: Vec::new(),
-            },
-            eng(0.5, 40.0, 250.0),
-        ),
+        // ---- Bowed strings (grounded): bow → body with real A0 air, main-wood,
+        //      and bridge-hill (brilliance) resonances (see research notes) ----
+        make("Violin", bowed_graph(0.08, 0.75, 0.6, 0.40, 1.3, 3.5, 500.0, 2400.0), eng(0.5, 45.0, 200.0)),
+        make("Viola", bowed_graph(0.08, 0.60, 0.6, 0.45, 2.0, 3.8, 400.0, 2100.0), eng(0.5, 45.0, 200.0)),
+        make("Cello", bowed_graph(0.09, 0.50, 0.6, 0.45, 15.0, 6.0, 190.0, 1200.0), eng(0.5, 50.0, 220.0)),
+        make("Double Bass", bowed_graph(0.09, 0.40, 0.6, 0.50, 90.0, 11.0, 90.0, 700.0), eng(0.5, 50.0, 250.0)),
+        make("Hurdy-Gurdy", bowed_graph(0.10, 0.70, 0.6, 0.45, 4.0, 3.0, 350.0, 1800.0), eng(0.5, 40.0, 250.0)),
         // Flute: an air JET blown across the mouth edge drives an open cylinder
         // (all harmonics, f ≈ c/2L). The coupled jet↔bore voice is self-oscillating
         // and pitched by its bore length (key-mapped chromatically), coloured by a
