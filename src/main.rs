@@ -189,8 +189,6 @@ struct App {
     _midi: Option<MidiInputHandle>,
     /// Novation Launchkey DAW-mode control surface (kept alive; drop = exit DAW).
     _launchkey: Option<midi::LaunchkeyHandle>,
-    launchkey_status: String,
-    daw_log: midi::DawMonitor,
     encoders: midi::EncoderMonitor,
     /// Last transport state pushed to the Launchkey LEDs (to detect changes).
     last_transport: TransportState,
@@ -224,7 +222,7 @@ impl App {
         // First run seeds the folder with the factory instrument kit.
         let preset_list = presets::load_library();
 
-        let mut app = App {
+        App {
             tx,
             _audio: audio,
             audio_err,
@@ -273,19 +271,12 @@ impl App {
             midi_sel: None,
             _midi: None,
             _launchkey: None,
-            launchkey_status: "not connected".to_string(),
-            daw_log: midi::DawMonitor::default(),
             encoders: midi::EncoderMonitor::default(),
             last_transport: TransportState::Recording,
             note_monitor: midi::NoteMonitor::default(),
             midi_status: "not connected".to_string(),
             ge: graph_editor::GeState::default(),
-        };
-        // Auto-connect a Launchkey in DAW mode if one is plugged in.
-        if midi::find_launchkey_ports().is_some() {
-            app.connect_launchkey();
         }
-        app
     }
 
     /// Send the active model's current parameters to the audio thread.
@@ -480,6 +471,31 @@ impl App {
     }
 
     fn connect_midi(&mut self, index: usize) {
+        // Selecting the Launchkey's DAW port engages the full DAW-mode control
+        // surface (transport, encoders, pads, LED + screen feedback); it finds
+        // the matching keys port itself. Any other port is a plain MIDI input.
+        let name = self.midi_ports.get(index).cloned().unwrap_or_default();
+        let n = name.to_lowercase();
+        let is_launchkey_daw =
+            (n.contains("launchkey") || n.contains("launch key")) && n.contains("daw");
+        if is_launchkey_daw {
+            self._midi = None;
+            match midi::connect_launchkey(self.tx.clone(), self.note_monitor.clone(), self.encoders.clone()) {
+                Ok(h) => {
+                    self.midi_status = format!("Launchkey DAW mode: {}", h.daw_port);
+                    self._launchkey = Some(h);
+                    self.midi_sel = Some(index);
+                }
+                Err(e) => {
+                    self.midi_status = format!("error: {e}");
+                    self._launchkey = None;
+                    self.midi_sel = None;
+                }
+            }
+            return;
+        }
+        // A plain input — and leave DAW mode if we were in it (drop = standalone).
+        self._launchkey = None;
         match midi::connect(index, self.tx.clone(), self.note_monitor.clone()) {
             Ok(h) => {
                 self.midi_status = format!("connected: {}", h.port_name);
@@ -490,21 +506,6 @@ impl App {
                 self.midi_status = format!("error: {e}");
                 self._midi = None;
                 self.midi_sel = None;
-            }
-        }
-    }
-
-    /// Connect a Novation Launchkey as a DAW-mode control surface (transport +,
-    /// later, encoders/pads/screen). Keys still arrive on the normal MIDI port.
-    fn connect_launchkey(&mut self) {
-        match midi::connect_launchkey(self.tx.clone(), self.note_monitor.clone(), self.daw_log.clone(), self.encoders.clone()) {
-            Ok(h) => {
-                self.launchkey_status = format!("DAW mode: {} + {}", h.keys_port, h.daw_port);
-                self._launchkey = Some(h);
-            }
-            Err(e) => {
-                self.launchkey_status = format!("not connected ({e})");
-                self._launchkey = None;
             }
         }
     }
@@ -1413,54 +1414,6 @@ impl App {
         });
         ui.label(egui::RichText::new(&self.midi_status).weak());
 
-        // --- Novation Launchkey (DAW mode) + live message monitor ---
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.strong("🎹 Launchkey (DAW)");
-            if ui.button("Connect").clicked() {
-                self.connect_launchkey();
-            }
-        });
-        ui.label(egui::RichText::new(&self.launchkey_status).weak());
-        ui.collapsing("All MIDI ports (for debugging)", |ui| {
-            ui.label(egui::RichText::new("Inputs:").strong());
-            for n in midi::list_ports() {
-                ui.label(egui::RichText::new(format!("  in : {n}")).monospace());
-            }
-            ui.label(egui::RichText::new("Outputs:").strong());
-            for n in midi::list_output_ports() {
-                ui.label(egui::RichText::new(format!("  out: {n}")).monospace());
-            }
-        });
-        if self._launchkey.is_some() {
-            ui.label(
-                egui::RichText::new(
-                    "Press a transport button / knob / pad — its MIDI message appears below:",
-                )
-                .weak(),
-            );
-            let lines = self.daw_log.lines();
-            egui::ScrollArea::vertical()
-                .max_height(150.0)
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    if lines.is_empty() {
-                        ui.label(egui::RichText::new("(waiting for input…)").weak());
-                    }
-                    for l in &lines {
-                        ui.label(egui::RichText::new(l).monospace());
-                    }
-                });
-            ui.horizontal(|ui| {
-                if ui.button("Copy log").clicked() {
-                    let text = self.daw_log.lines().join("\n");
-                    ui.output_mut(|o| o.copied_text = text);
-                }
-                if ui.button("Clear log").clicked() {
-                    self.daw_log.clear();
-                }
-            });
-        }
     }
 
     /// Transport controls: play / record / repeat and the tempo grid.

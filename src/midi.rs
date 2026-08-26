@@ -31,34 +31,6 @@ impl NoteMonitor {
     }
 }
 
-/// A small shared ring of recent Launchkey DAW-port messages, so the UI can show
-/// them (no terminal needed) — used to identify the transport/encoder controls.
-#[derive(Clone, Default)]
-pub struct DawMonitor(Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
-
-impl DawMonitor {
-    fn push(&self, line: String) {
-        if let Ok(mut q) = self.0.lock() {
-            q.push_back(line);
-            while q.len() > 40 {
-                q.pop_front();
-            }
-        }
-    }
-    /// Recent messages, newest last.
-    pub fn lines(&self) -> Vec<String> {
-        self.0
-            .lock()
-            .map(|q| q.iter().cloned().collect())
-            .unwrap_or_default()
-    }
-    pub fn clear(&self) {
-        if let Ok(mut q) = self.0.lock() {
-            q.clear();
-        }
-    }
-}
-
 /// Latest value of each of the 8 Launchkey DAW encoders (absolute 0–127),
 /// polled by the UI each frame so it can apply them in sync with the sliders.
 #[derive(Clone, Default)]
@@ -100,18 +72,6 @@ pub fn list_ports() -> Vec<String> {
         .ports()
         .iter()
         .map(|p| midi_in.port_name(p).unwrap_or_else(|_| "<unknown>".into()))
-        .collect()
-}
-
-/// List the names of available MIDI OUTPUT ports (for the Launchkey DAW feedback).
-pub fn list_output_ports() -> Vec<String> {
-    let Ok(midi_out) = MidiOutput::new("ftm_synth-out-list") else {
-        return Vec::new();
-    };
-    midi_out
-        .ports()
-        .iter()
-        .map(|p| midi_out.port_name(p).unwrap_or_else(|_| "<unknown>".into()))
         .collect()
 }
 
@@ -225,7 +185,6 @@ pub struct LaunchkeyHandle {
     _keys_in: MidiInputConnection<()>,
     _daw_in: MidiInputConnection<()>,
     daw_out: SharedOut,
-    pub keys_port: String,
     pub daw_port: String,
 }
 
@@ -284,7 +243,6 @@ fn port_by_name<T: midir::MidiIO>(io: &T, name: &str) -> Option<T::Port> {
 pub fn connect_launchkey(
     tx: Sender<Command>,
     monitor: NoteMonitor,
-    log: DawMonitor,
     encoders: EncoderMonitor,
 ) -> Result<LaunchkeyHandle, String> {
     let (keys_name, daw_name) = find_launchkey_ports().ok_or("no Launchkey found")?;
@@ -339,18 +297,16 @@ pub fn connect_launchkey(
     daw_in.ignore(midir::Ignore::None);
     let dp = port_by_name(&daw_in, &daw_name).ok_or("DAW port vanished")?;
     let tx_daw = tx.clone();
-    let log_daw = log.clone();
     let enc_daw = encoders.clone();
     let out_daw = daw_out.clone();
     let daw_conn = daw_in
-        .connect(&dp, "ftm_synth-lk-daw", move |_, m, _| handle_daw_message(m, &tx_daw, &log_daw, &enc_daw, &out_daw), ())
+        .connect(&dp, "ftm_synth-lk-daw", move |_, m, _| handle_daw_message(m, &tx_daw, &enc_daw, &out_daw), ())
         .map_err(|e| e.to_string())?;
 
     Ok(LaunchkeyHandle {
         _keys_in: keys_conn,
         _daw_in: daw_conn,
         daw_out,
-        keys_port: keys_name,
         daw_port: daw_name,
     })
 }
@@ -380,16 +336,6 @@ fn pad_index(note: u8) -> u8 {
 }
 
 impl LaunchkeyHandle {
-    /// Light all 16 DAW pads a static colour (palette index) so they are visible.
-    /// Colour is set by a note-on on channel 1 (static), velocity = palette index.
-    pub fn light_pads(&mut self, colour: u8) {
-        for row in [0x60u8, 0x70u8] {
-            for i in 0..8u8 {
-                send_out(&self.daw_out, &[0x90, row + i, colour & 0x7F]);
-            }
-        }
-    }
-
     /// Set a transport button's LED (Play/Stop/Record are CC on ch1). Colour is
     /// a palette index; 0 = off.
     pub fn set_button_led(&mut self, cc: u8, colour: u8) {
@@ -400,7 +346,7 @@ impl LaunchkeyHandle {
 /// Handle a message on the Launchkey DAW port. Transport buttons map to the
 /// arrangement transport; everything else is logged so the button/encoder CCs
 /// can be confirmed against the hardware.
-fn handle_daw_message(message: &[u8], tx: &Sender<Command>, log: &DawMonitor, enc: &EncoderMonitor, out: &SharedOut) {
+fn handle_daw_message(message: &[u8], tx: &Sender<Command>, enc: &EncoderMonitor, out: &SharedOut) {
     if message.len() < 3 {
         return;
     }
@@ -447,14 +393,4 @@ fn handle_daw_message(message: &[u8], tx: &Sender<Command>, log: &DawMonitor, en
             _ => {}
         }
     }
-    // Record every DAW-port message so the UI can show it (identify the controls).
-    let kind = match status & 0xF0 {
-        0x90 => "note-on",
-        0x80 => "note-off",
-        0xB0 => "CC",
-        0xA0 => "aftertouch",
-        _ => "?",
-    };
-    let ch = (status & 0x0F) + 1;
-    log.push(format!("ch{ch:<2} {kind:<9} num={d1:>3} (0x{d1:02X})  val={d2:>3}"));
 }
