@@ -191,6 +191,7 @@ struct App {
     _launchkey: Option<midi::LaunchkeyHandle>,
     launchkey_status: String,
     daw_log: midi::DawMonitor,
+    encoders: midi::EncoderMonitor,
     /// Shared "last note played" for MIDI-learn on pitch fields.
     note_monitor: midi::NoteMonitor,
     midi_status: String,
@@ -272,6 +273,7 @@ impl App {
             _launchkey: None,
             launchkey_status: "not connected".to_string(),
             daw_log: midi::DawMonitor::default(),
+            encoders: midi::EncoderMonitor::default(),
             note_monitor: midi::NoteMonitor::default(),
             midi_status: "not connected".to_string(),
             ge: graph_editor::GeState::default(),
@@ -492,7 +494,7 @@ impl App {
     /// Connect a Novation Launchkey as a DAW-mode control surface (transport +,
     /// later, encoders/pads/screen). Keys still arrive on the normal MIDI port.
     fn connect_launchkey(&mut self) {
-        match midi::connect_launchkey(self.tx.clone(), self.note_monitor.clone(), self.daw_log.clone()) {
+        match midi::connect_launchkey(self.tx.clone(), self.note_monitor.clone(), self.daw_log.clone(), self.encoders.clone()) {
             Ok(h) => {
                 self.launchkey_status = format!("DAW mode: {} + {}", h.keys_port, h.daw_port);
                 self._launchkey = Some(h);
@@ -578,6 +580,28 @@ impl eframe::App for App {
         // Publish the last note played for MIDI-learn pitch fields to read.
         let latest = self.note_monitor.latest();
         ctx.data_mut(|d| d.insert_temp(egui::Id::new("note_monitor"), latest));
+
+        // Apply any Launchkey encoder moves to the live engine params, in sync
+        // with the on-screen sliders. Encoders 1-4 → gain / attack / release /
+        // retrigger; 5-8 are unmapped for now.
+        let enc = self.encoders.take_changes();
+        let mut eng_changed = false;
+        for (i, v) in enc.iter().enumerate() {
+            if let Some(v) = v {
+                let n = *v as f32 / 127.0;
+                match i {
+                    0 => self.engine.gain = n * 2.0,          // 0 .. 2.0
+                    1 => self.engine.attack_ms = n * 1000.0,  // 0 .. 1000 ms
+                    2 => self.engine.release_ms = (n * 2000.0).max(1.0),
+                    3 => self.engine.retrigger_ms = n * 500.0,
+                    _ => continue,
+                }
+                eng_changed = true;
+            }
+        }
+        if eng_changed {
+            let _ = self.tx.send(Command::SetEngine(self.engine.clone()));
+        }
 
         self.handle_computer_keyboard(ctx);
 

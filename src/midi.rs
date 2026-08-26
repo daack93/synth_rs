@@ -59,6 +59,33 @@ impl DawMonitor {
     }
 }
 
+/// Latest value of each of the 8 Launchkey DAW encoders (absolute 0–127),
+/// polled by the UI each frame so it can apply them in sync with the sliders.
+#[derive(Clone, Default)]
+pub struct EncoderMonitor(Arc<std::sync::Mutex<[Option<u8>; 8]>>);
+
+impl EncoderMonitor {
+    fn set(&self, i: usize, v: u8) {
+        if i < 8 {
+            if let Ok(mut a) = self.0.lock() {
+                a[i] = Some(v);
+            }
+        }
+    }
+    /// Take the latest value for each encoder that moved since the last poll,
+    /// clearing them.
+    pub fn take_changes(&self) -> [Option<u8>; 8] {
+        self.0
+            .lock()
+            .map(|mut a| {
+                let r = *a;
+                *a = [None; 8];
+                r
+            })
+            .unwrap_or([None; 8])
+    }
+}
+
 pub struct MidiInputHandle {
     _conn: MidiInputConnection<()>,
     pub port_name: String,
@@ -248,6 +275,7 @@ pub fn connect_launchkey(
     tx: Sender<Command>,
     monitor: NoteMonitor,
     log: DawMonitor,
+    encoders: EncoderMonitor,
 ) -> Result<LaunchkeyHandle, String> {
     let (keys_name, daw_name) = find_launchkey_ports().ok_or("no Launchkey found")?;
 
@@ -267,8 +295,9 @@ pub fn connect_launchkey(
     let dp = port_by_name(&daw_in, &daw_name).ok_or("DAW port vanished")?;
     let tx_daw = tx.clone();
     let log_daw = log.clone();
+    let enc_daw = encoders.clone();
     let daw_conn = daw_in
-        .connect(&dp, "ftm_synth-lk-daw", move |_, m, _| handle_daw_message(m, &tx_daw, &log_daw), ())
+        .connect(&dp, "ftm_synth-lk-daw", move |_, m, _| handle_daw_message(m, &tx_daw, &log_daw, &enc_daw), ())
         .map_err(|e| e.to_string())?;
 
     // --- DAW output (handshakes + feedback) ---
@@ -307,7 +336,7 @@ pub fn connect_launchkey(
 /// Handle a message on the Launchkey DAW port. Transport buttons map to the
 /// arrangement transport; everything else is logged so the button/encoder CCs
 /// can be confirmed against the hardware.
-fn handle_daw_message(message: &[u8], tx: &Sender<Command>, log: &DawMonitor) {
+fn handle_daw_message(message: &[u8], tx: &Sender<Command>, log: &DawMonitor, enc: &EncoderMonitor) {
     if message.len() < 3 {
         return;
     }
@@ -331,6 +360,11 @@ fn handle_daw_message(message: &[u8], tx: &Sender<Command>, log: &DawMonitor) {
             // 0x76 Loop, 0x66/0x67 ◀ ▶ track — mapped in a later phase.
             _ => {}
         }
+    }
+    // Encoders (Plugin/Mixer/Sends absolute mode): CC 0x15–0x1C on ch16 (BFh),
+    // value 0–127. Stashed for the UI to apply to params.
+    if status == 0xBF && (0x15..=0x1C).contains(&d1) {
+        enc.set((d1 - 0x15) as usize, d2);
     }
     // Record every DAW-port message so the UI can show it (identify the controls).
     let kind = match status & 0xF0 {
