@@ -323,6 +323,12 @@ pub fn connect_launchkey(
     let mut daw_out = daw_out_io.connect(&op, "ftm_synth-lk-out").map_err(|e| e.to_string())?;
     daw_out.send(&LK_DAW_MODE_ON).map_err(|e| e.to_string())?;
     daw_out.send(&LK_FEATURE_ON).map_err(|e| e.to_string())?;
+    // Light the pads a dim colour so the surface is visibly under our control.
+    for row in [0x60u8, 0x70u8] {
+        for i in 0..8u8 {
+            let _ = daw_out.send(&[0x90, row + i, 3]);
+        }
+    }
 
     Ok(LaunchkeyHandle {
         _keys_in: keys_conn,
@@ -331,6 +337,34 @@ pub fn connect_launchkey(
         keys_port: keys_name,
         daw_port: daw_name,
     })
+}
+
+/// The 2×8 DAW pad grid maps note indices 0x60–0x77 to pad 0..16
+/// (top row 0x70–0x77 above the bottom row 0x60–0x67).
+fn pad_index(note: u8) -> u8 {
+    if note >= 0x70 {
+        8 + (note - 0x70)
+    } else {
+        note - 0x60
+    }
+}
+
+impl LaunchkeyHandle {
+    /// Light all 16 DAW pads a static colour (palette index) so they are visible.
+    /// Colour is set by a note-on on channel 1 (static), velocity = palette index.
+    pub fn light_pads(&mut self, colour: u8) {
+        for row in [0x60u8, 0x70u8] {
+            for i in 0..8u8 {
+                let _ = self.daw_out.send(&[0x90, row + i, colour & 0x7F]);
+            }
+        }
+    }
+
+    /// Set a transport button's LED (Play/Stop/Record are CC on ch1). Colour is
+    /// a palette index; 0 = off.
+    pub fn set_button_led(&mut self, cc: u8, colour: u8) {
+        let _ = self.daw_out.send(&[0xB0, cc, colour & 0x7F]);
+    }
 }
 
 /// Handle a message on the Launchkey DAW port. Transport buttons map to the
@@ -365,6 +399,21 @@ fn handle_daw_message(message: &[u8], tx: &Sender<Command>, log: &DawMonitor, en
     // value 0–127. Stashed for the UI to apply to params.
     if status == 0xBF && (0x15..=0x1C).contains(&d1) {
         enc.set((d1 - 0x15) as usize, d2);
+    }
+    // DAW pads: note-on/off on ch1, the 2×8 grid at indices 0x60–0x77
+    // (96–119), velocity-sensitive. Remap to a drum-ish octave from C2 so they
+    // line up with kit zones and play the live instrument.
+    if (0x60..=0x77).contains(&d1) {
+        let note = 36 + pad_index(d1);
+        match status & 0xF0 {
+            0x90 if d2 > 0 => {
+                let _ = tx.send(Command::NoteOn { note, vel: d2 as f32 / 127.0 });
+            }
+            0x90 | 0x80 => {
+                let _ = tx.send(Command::NoteOff { note });
+            }
+            _ => {}
+        }
     }
     // Record every DAW-port message so the UI can show it (identify the controls).
     let kind = match status & 0xF0 {

@@ -192,6 +192,8 @@ struct App {
     launchkey_status: String,
     daw_log: midi::DawMonitor,
     encoders: midi::EncoderMonitor,
+    /// Last transport state pushed to the Launchkey LEDs (to detect changes).
+    last_transport: TransportState,
     /// Shared "last note played" for MIDI-learn on pitch fields.
     note_monitor: midi::NoteMonitor,
     midi_status: String,
@@ -274,6 +276,7 @@ impl App {
             launchkey_status: "not connected".to_string(),
             daw_log: midi::DawMonitor::default(),
             encoders: midi::EncoderMonitor::default(),
+            last_transport: TransportState::Recording,
             note_monitor: midi::NoteMonitor::default(),
             midi_status: "not connected".to_string(),
             ge: graph_editor::GeState::default(),
@@ -601,6 +604,26 @@ impl eframe::App for App {
         }
         if eng_changed {
             let _ = self.tx.send(Command::SetEngine(self.engine.clone()));
+        }
+
+        // Reflect the transport state on the Launchkey's Play/Record LEDs.
+        let state = self
+            .view
+            .as_ref()
+            .map(|v| v.state())
+            .unwrap_or(TransportState::Idle);
+        if state != self.last_transport {
+            self.last_transport = state;
+            if let Some(lk) = self._launchkey.as_mut() {
+                let (play, rec) = match state {
+                    TransportState::Playing => (21, 0),   // green play
+                    TransportState::Recording => (21, 5), // green play + red rec
+                    _ => (0, 0),
+                };
+                lk.set_button_led(0x73, play);
+                lk.set_button_led(0x75, rec);
+                lk.set_button_led(0x74, 3); // stop: dim white
+            }
         }
 
         self.handle_computer_keyboard(ctx);
