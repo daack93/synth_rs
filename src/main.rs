@@ -187,6 +187,9 @@ struct App {
     midi_ports: Vec<String>,
     midi_sel: Option<usize>,
     _midi: Option<MidiInputHandle>,
+    /// Novation Launchkey DAW-mode control surface (kept alive; drop = exit DAW).
+    _launchkey: Option<midi::LaunchkeyHandle>,
+    launchkey_status: String,
     /// Shared "last note played" for MIDI-learn on pitch fields.
     note_monitor: midi::NoteMonitor,
     midi_status: String,
@@ -217,7 +220,7 @@ impl App {
         // First run seeds the folder with the factory instrument kit.
         let preset_list = presets::load_library();
 
-        App {
+        let mut app = App {
             tx,
             _audio: audio,
             audio_err,
@@ -265,10 +268,17 @@ impl App {
             midi_ports,
             midi_sel: None,
             _midi: None,
+            _launchkey: None,
+            launchkey_status: "not connected".to_string(),
             note_monitor: midi::NoteMonitor::default(),
             midi_status: "not connected".to_string(),
             ge: graph_editor::GeState::default(),
+        };
+        // Auto-connect a Launchkey in DAW mode if one is plugged in.
+        if midi::find_launchkey_ports().is_some() {
+            app.connect_launchkey();
         }
+        app
     }
 
     /// Send the active model's current parameters to the audio thread.
@@ -473,6 +483,21 @@ impl App {
                 self.midi_status = format!("error: {e}");
                 self._midi = None;
                 self.midi_sel = None;
+            }
+        }
+    }
+
+    /// Connect a Novation Launchkey as a DAW-mode control surface (transport +,
+    /// later, encoders/pads/screen). Keys still arrive on the normal MIDI port.
+    fn connect_launchkey(&mut self) {
+        match midi::connect_launchkey(self.tx.clone(), self.note_monitor.clone()) {
+            Ok(h) => {
+                self.launchkey_status = format!("DAW mode: {} + {}", h.keys_port, h.daw_port);
+                self._launchkey = Some(h);
+            }
+            Err(e) => {
+                self.launchkey_status = format!("not connected ({e})");
+                self._launchkey = None;
             }
         }
     }

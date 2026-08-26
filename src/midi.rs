@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
-use midir::{MidiInput, MidiInputConnection};
+use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 
 use crate::studio::Command;
 
@@ -118,4 +118,173 @@ fn handle_message(message: &[u8], tx: &Sender<Command>, monitor: &NoteMonitor) {
         }
         _ => {}
     }
+}
+
+
+// ============================================================================
+// Novation Launchkey Mk4 — DAW-mode control-surface support.
+//
+// The Launchkey exposes TWO USB-MIDI port pairs: a "MIDI" pair (keys, wheels,
+// pads/pots in performance modes) and a "DAW" pair (the control surface —
+// transport, encoders, pads, and feedback to the LEDs + screen). We connect
+// BOTH inputs (keys → notes as usual; DAW → transport/controls) and open the DAW
+// OUTPUT so we can send the handshakes and, later, LED/screen feedback.
+//
+// Protocol (from the Mk4 Programmer's Reference, regular-SKU header 00 20 29
+// 02 14): enter DAW mode with Note-On ch16 note 0x0C vel 0x7F; enable the
+// feature controls (tempo/LED/screen settings) with Note-On ch16 note 0x0B vel
+// 0x7F. Transport buttons report as CC on channel 16; encoders (Plugin/Mixer/
+// Sends) as CC 0x15–0x1C ch16; the Transport encoder mode as relative CC
+// 0x55–0x5C ch16; DAW pads as notes on ch1.
+// ============================================================================
+
+/// SysEx header for regular-SKU Launchkeys (the 49 Mk4 is a regular SKU).
+#[allow(dead_code)]
+pub const LK_SYSEX_HEADER: [u8; 6] = [0xF0, 0x00, 0x20, 0x29, 0x02, 0x14];
+
+const LK_DAW_MODE_ON: [u8; 3] = [0x9F, 0x0C, 0x7F];
+const LK_DAW_MODE_OFF: [u8; 3] = [0x9F, 0x0C, 0x00];
+const LK_FEATURE_ON: [u8; 3] = [0x9F, 0x0B, 0x7F];
+
+/// A live connection to a Launchkey in DAW mode. Holds the keys input, the DAW
+/// input, and the DAW output (kept open for LED/screen feedback). Dropping it
+/// returns the device to standalone mode.
+pub struct LaunchkeyHandle {
+    _keys_in: MidiInputConnection<()>,
+    _daw_in: MidiInputConnection<()>,
+    daw_out: MidiOutputConnection,
+    pub keys_port: String,
+    pub daw_port: String,
+}
+
+impl Drop for LaunchkeyHandle {
+    fn drop(&mut self) {
+        // Return the Launchkey to standalone (MIDI) mode.
+        let _ = self.daw_out.send(&LK_DAW_MODE_OFF);
+    }
+}
+
+impl LaunchkeyHandle {
+    /// Send raw bytes to the DAW port (for LED colour / screen feedback).
+    #[allow(dead_code)]
+    pub fn send(&mut self, bytes: &[u8]) {
+        let _ = self.daw_out.send(bytes);
+    }
+}
+
+/// Find the (keys, daw) input port names for a connected Launchkey. Returns the
+/// two port names if a Launchkey is present. The DAW port's name contains "DAW".
+pub fn find_launchkey_ports() -> Option<(String, String)> {
+    let midi_in = MidiInput::new("ftm_synth-lk-scan").ok()?;
+    let names: Vec<String> = midi_in
+        .ports()
+        .iter()
+        .map(|p| midi_in.port_name(p).unwrap_or_default())
+        .collect();
+    let is_lk = |n: &str| {
+        let n = n.to_lowercase();
+        n.contains("launchkey") || n.contains("launch key")
+    };
+    let daw = names.iter().find(|n| is_lk(n) && n.to_lowercase().contains("daw"))?;
+    // The keys port is the other Launchkey port (not the DAW one).
+    let keys = names
+        .iter()
+        .find(|n| is_lk(n) && !n.to_lowercase().contains("daw"))
+        .unwrap_or(daw);
+    Some((keys.clone(), daw.clone()))
+}
+
+fn port_by_name<T: midir::MidiIO>(io: &T, name: &str) -> Option<T::Port> {
+    io.ports()
+        .into_iter()
+        .find(|p| io.port_name(p).as_deref() == Ok(name))
+}
+
+/// Connect to a Launchkey in DAW mode: open both inputs and the DAW output,
+/// send the DAW-mode + feature-control handshakes, and forward keys as notes and
+/// DAW-surface events as transport commands (logging the rest so the exact
+/// button CCs can be confirmed against the hardware).
+pub fn connect_launchkey(
+    tx: Sender<Command>,
+    monitor: NoteMonitor,
+) -> Result<LaunchkeyHandle, String> {
+    let (keys_name, daw_name) = find_launchkey_ports().ok_or("no Launchkey found")?;
+
+    // --- keys input (notes / wheels, as usual) ---
+    let mut keys_in = MidiInput::new("ftm_synth-lk-keys").map_err(|e| e.to_string())?;
+    keys_in.ignore(midir::Ignore::None);
+    let kp = port_by_name(&keys_in, &keys_name).ok_or("keys port vanished")?;
+    let tx_keys = tx.clone();
+    let mon = monitor.clone();
+    let keys_conn = keys_in
+        .connect(&kp, "ftm_synth-lk-keys", move |_, m, _| handle_message(m, &tx_keys, &mon), ())
+        .map_err(|e| e.to_string())?;
+
+    // --- DAW input (transport / encoders / pads) ---
+    let mut daw_in = MidiInput::new("ftm_synth-lk-daw").map_err(|e| e.to_string())?;
+    daw_in.ignore(midir::Ignore::None);
+    let dp = port_by_name(&daw_in, &daw_name).ok_or("DAW port vanished")?;
+    let tx_daw = tx.clone();
+    let daw_conn = daw_in
+        .connect(&dp, "ftm_synth-lk-daw", move |_, m, _| handle_daw_message(m, &tx_daw), ())
+        .map_err(|e| e.to_string())?;
+
+    // --- DAW output (handshakes + feedback) ---
+    let daw_out_io = MidiOutput::new("ftm_synth-lk-out").map_err(|e| e.to_string())?;
+    let op = port_by_name(&daw_out_io, &daw_name).ok_or("DAW out port vanished")?;
+    let mut daw_out = daw_out_io.connect(&op, "ftm_synth-lk-out").map_err(|e| e.to_string())?;
+    daw_out.send(&LK_DAW_MODE_ON).map_err(|e| e.to_string())?;
+    daw_out.send(&LK_FEATURE_ON).map_err(|e| e.to_string())?;
+
+    Ok(LaunchkeyHandle {
+        _keys_in: keys_conn,
+        _daw_in: daw_conn,
+        daw_out,
+        keys_port: keys_name,
+        daw_port: daw_name,
+    })
+}
+
+/// Handle a message on the Launchkey DAW port. Transport buttons map to the
+/// arrangement transport; everything else is logged so the button/encoder CCs
+/// can be confirmed against the hardware.
+fn handle_daw_message(message: &[u8], tx: &Sender<Command>) {
+    if message.len() < 3 {
+        return;
+    }
+    let status = message[0];
+    let d1 = message[1];
+    let d2 = message[2];
+    // Transport buttons report as CC on channel 16 (BFh). The exact CC numbers
+    // are in the reference's surface figures; these are the Mk3-lineage defaults
+    // and are logged so we can confirm/correct them from live hardware.
+    if status == 0xBF {
+        match d1 {
+            0x73 if d2 > 0 => {
+                let _ = tx.send(Command::Stop);
+            }
+            0x74 if d2 > 0 => {
+                let _ = tx.send(Command::Play);
+            }
+            0x75 if d2 > 0 => {
+                let _ = tx.send(Command::Record);
+            }
+            _ => {}
+        }
+    }
+    // Log every DAW-port message so the surface map can be nailed down.
+    eprintln!(
+        "LK DAW: {:02X} {:02X} {:02X}  (ch{}, {})",
+        status,
+        d1,
+        d2,
+        (status & 0x0F) + 1,
+        match status & 0xF0 {
+            0x90 => "note-on",
+            0x80 => "note-off",
+            0xB0 => "cc",
+            0xA0 => "poly-at",
+            _ => "?",
+        }
+    );
 }
