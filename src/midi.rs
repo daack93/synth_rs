@@ -31,6 +31,34 @@ impl NoteMonitor {
     }
 }
 
+/// A small shared ring of recent Launchkey DAW-port messages, so the UI can show
+/// them (no terminal needed) — used to identify the transport/encoder controls.
+#[derive(Clone, Default)]
+pub struct DawMonitor(Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
+
+impl DawMonitor {
+    fn push(&self, line: String) {
+        if let Ok(mut q) = self.0.lock() {
+            q.push_back(line);
+            while q.len() > 40 {
+                q.pop_front();
+            }
+        }
+    }
+    /// Recent messages, newest last.
+    pub fn lines(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .map(|q| q.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+    pub fn clear(&self) {
+        if let Ok(mut q) = self.0.lock() {
+            q.clear();
+        }
+    }
+}
+
 pub struct MidiInputHandle {
     _conn: MidiInputConnection<()>,
     pub port_name: String,
@@ -207,6 +235,7 @@ fn port_by_name<T: midir::MidiIO>(io: &T, name: &str) -> Option<T::Port> {
 pub fn connect_launchkey(
     tx: Sender<Command>,
     monitor: NoteMonitor,
+    log: DawMonitor,
 ) -> Result<LaunchkeyHandle, String> {
     let (keys_name, daw_name) = find_launchkey_ports().ok_or("no Launchkey found")?;
 
@@ -225,8 +254,9 @@ pub fn connect_launchkey(
     daw_in.ignore(midir::Ignore::None);
     let dp = port_by_name(&daw_in, &daw_name).ok_or("DAW port vanished")?;
     let tx_daw = tx.clone();
+    let log_daw = log.clone();
     let daw_conn = daw_in
-        .connect(&dp, "ftm_synth-lk-daw", move |_, m, _| handle_daw_message(m, &tx_daw), ())
+        .connect(&dp, "ftm_synth-lk-daw", move |_, m, _| handle_daw_message(m, &tx_daw, &log_daw), ())
         .map_err(|e| e.to_string())?;
 
     // --- DAW output (handshakes + feedback) ---
@@ -248,7 +278,7 @@ pub fn connect_launchkey(
 /// Handle a message on the Launchkey DAW port. Transport buttons map to the
 /// arrangement transport; everything else is logged so the button/encoder CCs
 /// can be confirmed against the hardware.
-fn handle_daw_message(message: &[u8], tx: &Sender<Command>) {
+fn handle_daw_message(message: &[u8], tx: &Sender<Command>, log: &DawMonitor) {
     if message.len() < 3 {
         return;
     }
@@ -272,19 +302,14 @@ fn handle_daw_message(message: &[u8], tx: &Sender<Command>) {
             _ => {}
         }
     }
-    // Log every DAW-port message so the surface map can be nailed down.
-    eprintln!(
-        "LK DAW: {:02X} {:02X} {:02X}  (ch{}, {})",
-        status,
-        d1,
-        d2,
-        (status & 0x0F) + 1,
-        match status & 0xF0 {
-            0x90 => "note-on",
-            0x80 => "note-off",
-            0xB0 => "cc",
-            0xA0 => "poly-at",
-            _ => "?",
-        }
-    );
+    // Record every DAW-port message so the UI can show it (identify the controls).
+    let kind = match status & 0xF0 {
+        0x90 => "note-on",
+        0x80 => "note-off",
+        0xB0 => "CC",
+        0xA0 => "aftertouch",
+        _ => "?",
+    };
+    let ch = (status & 0x0F) + 1;
+    log.push(format!("ch{ch:<2} {kind:<9} num={d1:>3} (0x{d1:02X})  val={d2:>3}"));
 }

@@ -190,6 +190,7 @@ struct App {
     /// Novation Launchkey DAW-mode control surface (kept alive; drop = exit DAW).
     _launchkey: Option<midi::LaunchkeyHandle>,
     launchkey_status: String,
+    daw_log: midi::DawMonitor,
     /// Shared "last note played" for MIDI-learn on pitch fields.
     note_monitor: midi::NoteMonitor,
     midi_status: String,
@@ -270,6 +271,7 @@ impl App {
             _midi: None,
             _launchkey: None,
             launchkey_status: "not connected".to_string(),
+            daw_log: midi::DawMonitor::default(),
             note_monitor: midi::NoteMonitor::default(),
             midi_status: "not connected".to_string(),
             ge: graph_editor::GeState::default(),
@@ -490,7 +492,7 @@ impl App {
     /// Connect a Novation Launchkey as a DAW-mode control surface (transport +,
     /// later, encoders/pads/screen). Keys still arrive on the normal MIDI port.
     fn connect_launchkey(&mut self) {
-        match midi::connect_launchkey(self.tx.clone(), self.note_monitor.clone()) {
+        match midi::connect_launchkey(self.tx.clone(), self.note_monitor.clone(), self.daw_log.clone()) {
             Ok(h) => {
                 self.launchkey_status = format!("DAW mode: {} + {}", h.keys_port, h.daw_port);
                 self._launchkey = Some(h);
@@ -1363,6 +1365,39 @@ impl App {
             }
         });
         ui.label(egui::RichText::new(&self.midi_status).weak());
+
+        // --- Novation Launchkey (DAW mode) + live message monitor ---
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.strong("🎹 Launchkey (DAW)");
+            if ui.button("Connect").clicked() {
+                self.connect_launchkey();
+            }
+        });
+        ui.label(egui::RichText::new(&self.launchkey_status).weak());
+        if self._launchkey.is_some() {
+            ui.label(
+                egui::RichText::new(
+                    "Press a transport button / knob / pad — its MIDI message appears below:",
+                )
+                .weak(),
+            );
+            let lines = self.daw_log.lines();
+            egui::ScrollArea::vertical()
+                .max_height(150.0)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    if lines.is_empty() {
+                        ui.label(egui::RichText::new("(waiting for input…)").weak());
+                    }
+                    for l in &lines {
+                        ui.label(egui::RichText::new(l).monospace());
+                    }
+                });
+            if ui.button("Clear log").clicked() {
+                self.daw_log.clear();
+            }
+        }
     }
 
     /// Transport controls: play / record / repeat and the tempo grid.
