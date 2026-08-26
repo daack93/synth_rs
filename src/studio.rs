@@ -1017,10 +1017,11 @@ impl Studio {
             return;
         }
         if self.song_frames.is_some() {
-            self.playing = !self.playing; // toggle play / pause
-            if self.playing {
-                self.reset_cursors();
-            } else {
+            // Toggle play / pause, keeping the cursor where it is: pressing Play
+            // resumes from the current position; pressing it again pauses there.
+            // (Stop is what rewinds to the start.)
+            self.playing = !self.playing;
+            if !self.playing {
                 // Pausing: release held notes so nothing sticks on.
                 for t in &mut self.tracks {
                     t.inst.release_all();
@@ -1097,6 +1098,9 @@ impl Studio {
         self.defining = false;
         self.pre_roll = 0;
         self.pending = None;
+        // Stop rewinds to the beginning (Play/pause keeps position; Stop resets).
+        self.pos = 0;
+        self.reset_cursors();
         self.live.all_notes_off();
         for t in &mut self.tracks {
             t.inst.all_notes_off();
@@ -1479,11 +1483,16 @@ impl Studio {
             if removed {
                 self.remove_track(idx);
             } else if !self.arrangement.iter().any(|c| c.track == idx) {
-                // Auto-place the new track — at the playhead (arrange punch-in) or 0.
-                // Give it a concrete one-loop length so it never fills to the song
-                // end (which would grow/overlap as the arrangement changes).
-                let period = self.tracks.get(idx).map(|t| t.period.max(1)).unwrap_or(1);
-                self.arrangement.push(Clip::at(idx, origin, period));
+                // Auto-place the new take. The DEFINING take is the loop itself,
+                // so it spans a full period; a later punch-in clip is exactly what
+                // was recorded (origin → where recording stopped), NOT the whole
+                // period — otherwise it stretches to the song length.
+                let clip_len = if self.defining {
+                    self.tracks.get(idx).map(|t| t.period.max(1)).unwrap_or(1)
+                } else {
+                    recorded_len.max(1)
+                };
+                self.arrangement.push(Clip::at(idx, origin, clip_len));
             }
         }
         self.rec_origin = 0;

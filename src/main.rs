@@ -1404,9 +1404,15 @@ impl App {
                         ui.label(egui::RichText::new(l).monospace());
                     }
                 });
-            if ui.button("Clear log").clicked() {
-                self.daw_log.clear();
-            }
+            ui.horizontal(|ui| {
+                if ui.button("Copy log").clicked() {
+                    let text = self.daw_log.lines().join("\n");
+                    ui.output_mut(|o| o.copied_text = text);
+                }
+                if ui.button("Clear log").clicked() {
+                    self.daw_log.clear();
+                }
+            });
         }
     }
 
