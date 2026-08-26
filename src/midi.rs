@@ -314,20 +314,21 @@ fn handle_daw_message(message: &[u8], tx: &Sender<Command>, log: &DawMonitor) {
     let status = message[0];
     let d1 = message[1];
     let d2 = message[2];
-    // Transport buttons report as CC on channel 16 (BFh). The exact CC numbers
-    // are in the reference's surface figures; these are the Mk3-lineage defaults
-    // and are logged so we can confirm/correct them from live hardware.
-    if status == 0xBF {
+    // Transport buttons report as CC on CHANNEL 1 (B0h) on this Mk4 (confirmed
+    // from hardware; the reference's figures are images). Fire on press (val>0),
+    // ignore the release (val=0).
+    if status == 0xB0 && d2 > 0 {
         match d1 {
-            0x73 if d2 > 0 => {
-                let _ = tx.send(Command::Stop);
+            0x73 => {
+                let _ = tx.send(Command::Play); // ▶
             }
-            0x74 if d2 > 0 => {
-                let _ = tx.send(Command::Play);
+            0x74 => {
+                let _ = tx.send(Command::Stop); // ■
             }
-            0x75 if d2 > 0 => {
-                let _ = tx.send(Command::Record);
+            0x75 => {
+                let _ = tx.send(Command::Record); // ●
             }
+            // 0x76 Loop, 0x66/0x67 ◀ ▶ track — mapped in a later phase.
             _ => {}
         }
     }
