@@ -1845,7 +1845,8 @@ impl Node for WaveguidePluck {
 /// strike point is the integral of the junction velocity. A one-shot: once the
 /// hammer leaves, the string rings freely. Grounded like the other strings.
 pub struct WaveguideHammer {
-    core: StringCore,
+    cores: Vec<StringCore>, // 1–3 unison strings, slightly detuned (piano choir)
+    out_scale: f32,         // level compensation for summing the unison strings
     hpos: f32,  // hammer position (well-scaled internal units)
     hvel: f32,  // hammer velocity (from key velocity)
     k: f32,     // felt stiffness
@@ -1877,17 +1878,41 @@ impl WaveguideHammer {
         pos: f32,
         decay_time: f32,
         hf_damping: f32,
+        detune_cents: f32,
         sr: f32,
     ) -> Self {
-        let core = StringCore::from_physical(
-            freq_hz, length_m, tension_n, core_mm, 7850.0, youngs_gpa,
-            StringGeometry::Fretted { open_hz }, pos, decay_time, hf_damping, sr,
-        );
+        // Unison strings: a real piano strikes 1 string in the low bass, 2 in the
+        // tenor, 3 through the rest — tuned a hair apart (~1 cent). The tiny
+        // detuning is what gives the shimmer and the two-slope "double decay"
+        // (prompt sound → aftersound) as the strings beat and trade energy.
+        let n_strings = if freq_hz < 120.0 {
+            1
+        } else if freq_hz < 175.0 {
+            2
+        } else {
+            3
+        };
+        let mut cores = Vec::with_capacity(n_strings);
+        for i in 0..n_strings {
+            // spread the strings symmetrically around the pitch
+            let off = if n_strings > 1 {
+                (i as f32 / (n_strings - 1) as f32 - 0.5) * detune_cents
+            } else {
+                0.0
+            };
+            let f = freq_hz * 2f32.powf(off / 1200.0);
+            cores.push(StringCore::from_physical(
+                f, length_m, tension_n, core_mm, 7850.0, youngs_gpa,
+                StringGeometry::Fretted { open_hz }, pos, decay_time, hf_damping, sr,
+            ));
+        }
+        let out_scale = 1.0 / (n_strings as f32).sqrt();
         // hardness 0..1 → felt stiffness 10^(5.5..7); mass fixed so contact lands
         // in the real ~1–9 ms range across the sweep.
         let k = 10f32.powf(5.5 + 1.5 * hardness.clamp(0.0, 1.0));
         WaveguideHammer {
-            core,
+            cores,
+            out_scale,
             hpos: 0.0,
             hvel: velocity.clamp(0.02, 1.0) * 8.0,
             k,
@@ -1910,12 +1935,17 @@ impl Node for WaveguideHammer {
     #[inline]
     fn tick(&mut self, _inputs: &[f32]) -> f32 {
         if self.done {
-            return self.core.tick(0.0); // string rings freely
+            // The strings ring freely — still summed so the detuned unison beats
+            // (the shimmer / aftersound).
+            let mut out = 0.0;
+            for c in &mut self.cores {
+                out += c.tick(0.0);
+            }
+            return out * self.out_scale;
         }
-        // Use the string displacement from the PREVIOUS sample (a 1-sample delay)
-        // for the compression — otherwise hammer force → string velocity → spos →
-        // force forms an instantaneous algebraic loop that goes unstable at high
-        // notes. The delay (as in the modal hammer) breaks the loop.
+        // String displacement from the PREVIOUS sample (a 1-sample delay) for the
+        // compression — otherwise force → velocity → spos → force is an
+        // instantaneous algebraic loop that goes unstable at high notes.
         let x = self.spos * Self::READ;
         let compression = self.hpos - x;
         let force = if compression > 0.0 {
@@ -1923,27 +1953,34 @@ impl Node for WaveguideHammer {
         } else {
             0.0
         };
-        // Felt reaction decelerates the hammer (semi-implicit Euler).
+        // Felt reaction decelerates the hammer (the whole choir pushes back).
         self.hvel -= force / self.mass * self.inv_sr;
         self.hpos += self.hvel * self.inv_sr;
-        let vel = self.core.read_junction();
         // The felt force is unipolar (a push) → it injects DC, which the output
-        // integrator emphasises as a subsonic THUMP. Remove the force's slow
-        // component so the injection is biphasic (a string can't hold DC anyway).
+        // integrator emphasises as a subsonic THUMP. Remove its slow component so
+        // the injection is biphasic (a string can't hold DC anyway).
         let f_inj = if self.dcblock {
             self.f_lp += 0.002 * (force - self.f_lp);
             force - self.f_lp
         } else {
             force
         };
-        let out = self.core.commit(f_inj * self.inject);
-        // Integrate the junction velocity → string displacement, AFTER using it.
-        self.spos = 0.9995 * self.spos + vel;
-        // The hammer has left once it's clear of the string and moving away.
+        let drive = f_inj * self.inject;
+        // Drive every unison string; average their displacement back for the
+        // shared hammer contact.
+        let mut out = 0.0;
+        let mut vsum = 0.0;
+        for c in &mut self.cores {
+            let vel = c.read_junction();
+            out += c.commit(drive);
+            vsum += vel;
+        }
+        vsum /= self.cores.len() as f32;
+        self.spos = 0.9995 * self.spos + vsum;
         if compression <= 0.0 && self.hvel <= 0.0 {
             self.done = true;
         }
-        out
+        out * self.out_scale
     }
 }
 

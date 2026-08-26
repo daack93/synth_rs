@@ -448,7 +448,7 @@ pub fn factory() -> Vec<Preset> {
                     // Felt hammer on a steel string over a soundboard. Real specs:
                     // long thick strings (audible inharmonic stretch), struck near
                     // the end; hammer graded harder toward the treble.
-                    Comp::HammeredString { length_m: 1.2, tension_n: 700.0, core_mm: 1.0, youngs_gpa: 200.0, open_hz: 27.5, hardness: 0.5, felt: 2.0, pos: 0.12, decay: 5.0, damping: 0.12 },
+                    Comp::HammeredString { length_m: 1.2, tension_n: 700.0, core_mm: 1.0, youngs_gpa: 200.0, open_hz: 27.5, hardness: 0.5, felt: 2.0, pos: 0.12, decay: 5.0, damping: 0.12, detune: 1.3 },
                     Comp::Body { cavity_litres: 40.0, soundhole_cm: 8.0, top_hz: 120.0, decay_s: 0.3 }, // soundboard
                     Comp::Mix,
                 ],

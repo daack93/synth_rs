@@ -239,6 +239,7 @@ pub enum Comp {
         pos: f32,
         decay: f32,
         damping: f32,
+        detune: f32,
     },
     /// A vocal-fold (glottal) source, pitched at the played note. `open_quotient`
     /// = how long the folds stay open (breathy → pressed), `level` = drive.
@@ -442,10 +443,10 @@ impl Comp {
                     *pos, *decay, *damping, vel, sr,
                 ))
             }
-            Comp::HammeredString { length_m, tension_n, core_mm, youngs_gpa, open_hz, hardness, felt, pos, decay, damping } => {
+            Comp::HammeredString { length_m, tension_n, core_mm, youngs_gpa, open_hz, hardness, felt, pos, decay, damping, detune } => {
                 Box::new(WaveguideHammer::from_physical(
                     freq_hz, *length_m, *tension_n, *core_mm, *youngs_gpa, *open_hz,
-                    *hardness, *felt, vel, *pos, *decay, *damping, sr,
+                    *hardness, *felt, vel, *pos, *decay, *damping, *detune, sr,
                 ))
             }
             Comp::Hammer { hardness, felt } => {
@@ -690,7 +691,7 @@ impl Comp {
                 c |= ui.add(unbounded_slider(damping, 0.0..=0.9, "HF damping")).changed();
                 c
             }
-            Comp::HammeredString { length_m, tension_n, core_mm, youngs_gpa, open_hz, hardness, felt, pos, decay, damping } => {
+            Comp::HammeredString { length_m, tension_n, core_mm, youngs_gpa, open_hz, hardness, felt, pos, decay, damping, detune } => {
                 let mut c = false;
                 c |= ui.add(unbounded_slider(length_m, 0.1..=2.0, "Length (m)")).changed();
                 c |= ui.add(unbounded_slider(tension_n, 20.0..=1200.0, "Tension (N)")).changed();
@@ -702,6 +703,10 @@ impl Comp {
                 c |= ui.add(unbounded_slider(pos, 0.02..=0.5, "Strike position")).changed();
                 c |= ui.add(unbounded_slider(decay, 0.2..=12.0, "Decay time (s)")).changed();
                 c |= ui.add(unbounded_slider(damping, 0.0..=0.9, "HF damping")).changed();
+                c |= ui
+                    .add(unbounded_slider(detune, 0.0..=5.0, "Unison detune (cents)"))
+                    .on_hover_text("Spread of the 2-3 unison strings. ~1 cent gives the piano's shimmer and aftersound.")
+                    .changed();
                 c
             }
             Comp::Hammer { hardness, felt } => {
@@ -1529,7 +1534,7 @@ impl FtmModel for InstrumentGraph {
                 changed = true;
             }
             if ui.small_button("Hammered string").clicked() {
-                self.components.push(Comp::HammeredString { length_m: 1.0, tension_n: 700.0, core_mm: 1.0, youngs_gpa: 200.0, open_hz: 27.5, hardness: 0.5, felt: 2.0, pos: 0.13, decay: 5.0, damping: 0.12 });
+                self.components.push(Comp::HammeredString { length_m: 1.0, tension_n: 700.0, core_mm: 1.0, youngs_gpa: 200.0, open_hz: 27.5, hardness: 0.5, felt: 2.0, pos: 0.13, decay: 5.0, damping: 0.12, detune: 1.2 });
                 changed = true;
             }
             if ui.small_button("Hammer").clicked() {
