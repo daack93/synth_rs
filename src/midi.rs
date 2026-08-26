@@ -76,6 +76,18 @@ pub fn list_ports() -> Vec<String> {
         .collect()
 }
 
+/// List the names of available MIDI OUTPUT ports (for the Launchkey DAW feedback).
+pub fn list_output_ports() -> Vec<String> {
+    let Ok(midi_out) = MidiOutput::new("ftm_synth-out-list") else {
+        return Vec::new();
+    };
+    midi_out
+        .ports()
+        .iter()
+        .map(|p| midi_out.port_name(p).unwrap_or_else(|_| "<unknown>".into()))
+        .collect()
+}
+
 /// Connect to the input port at `index`, forwarding events to `tx`.
 pub fn connect(index: usize, tx: Sender<Command>, monitor: NoteMonitor) -> Result<MidiInputHandle, String> {
     let mut midi_in = MidiInput::new("ftm_synth").map_err(|e| e.to_string())?;

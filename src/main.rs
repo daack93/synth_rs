@@ -1375,6 +1375,16 @@ impl App {
             }
         });
         ui.label(egui::RichText::new(&self.launchkey_status).weak());
+        ui.collapsing("All MIDI ports (for debugging)", |ui| {
+            ui.label(egui::RichText::new("Inputs:").strong());
+            for n in midi::list_ports() {
+                ui.label(egui::RichText::new(format!("  in : {n}")).monospace());
+            }
+            ui.label(egui::RichText::new("Outputs:").strong());
+            for n in midi::list_output_ports() {
+                ui.label(egui::RichText::new(format!("  out: {n}")).monospace());
+            }
+        });
         if self._launchkey.is_some() {
             ui.label(
                 egui::RichText::new(
